@@ -1,0 +1,55 @@
+{
+  "name": "bold",
+  "title": "Bold",
+  "font": {
+    "family": "Montserrat ExtraBold",
+    "file": "Montserrat-ExtraBold.ttf",
+    "weight": 900,
+    "size": 104,
+    "uppercase": true,
+    "letter_spacing": -0.02
+  },
+  "colors": {
+    "active": "#FFFFFF",
+    "past": "#FFFFFF",
+    "ghost": "#FFFFFF",
+    "past_opacity": 0.55,
+    "ghost_opacity": 0.22,
+    "accent": "#28E07B",
+    "shout": "#FF3B30",
+    "outline": "#000000",
+    "shadow": "#000000"
+  },
+  "panel": {
+    "enabled": false,
+    "color": "#000000",
+    "opacity": 0.0,
+    "blur": 0,
+    "radius": 0,
+    "padding_x": 0,
+    "padding_y": 0,
+    "border_color": "#FFFFFF",
+    "border_opacity": 0.0,
+    "border_width": 0
+  },
+  "caption": {
+    "position": "center",
+    "margin": 0,
+    "max_line_chars": 12,
+    "line_height": 1.0,
+    "align": "center"
+  },
+  "animation": {
+    "pop_scale": 1.24,
+    "pop_ms": 130,
+    "spring_damping": 10.0,
+    "spring_stiffness": 240.0,
+    "spring_mass": 0.6,
+    "block_in_ms": 120,
+    "block_out_ms": 100,
+    "accent_scale": 1.22,
+    "shout_scale": 1.42,
+    "shout_rotate": -6.0
+  },
+  "background": "#000000"
+}

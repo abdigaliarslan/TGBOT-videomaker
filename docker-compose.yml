@@ -1,0 +1,79 @@
+name: reelbot
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-reelbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-reelbot}
+      POSTGRES_DB: ${POSTGRES_DB:-reelbot}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-reelbot} -d ${POSTGRES_DB:-reelbot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-reelbot}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-reelbot-secret}
+    ports:
+      - "${S3_PORT:-9000}:9000"
+      - "${S3_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Локальный Bot API server: лимит файла 2 ГБ вместо 20 МБ (§1).
+  #
+  # ⚠ Он отдаёт ЛОКАЛЬНЫЕ ПУТИ к файлам, а не URL. bot.download_file() с ним не
+  # работает — файл читается напрямую с этого тома, поэтому том смонтирован и
+  # в контейнер, и на хост в одно и то же место (M0 ⚠).
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: 1
+      TELEGRAM_STAT: 1
+    ports:
+      - "${BOT_API_PORT:-8081}:8081"
+    volumes:
+      - ${BOT_API_DATA_DIR_HOST:-./data/telegram-bot-api}:/var/lib/telegram-bot-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8082/ >/dev/null 2>&1 || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

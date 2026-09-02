@@ -1,0 +1,21 @@
+.venv/
+.env
+.env.docker
+__pycache__/
+*.pyc
+.pytest_cache/
+.playwright-mcp/
+
+# рабочие папки джобов, кеш картинок, том Bot API
+data/
+
+# node и артефакты рендера
+render/node_modules/
+render/.cache/
+.remotion/
+
+# видео: в репозитории только демо; фикстуры собираются скриптом
+*.mp4
+*.mov
+*.wav
+!assets/demo.mp4

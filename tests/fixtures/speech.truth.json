@@ -1,0 +1,90 @@
+{
+  "video": "speech.mp4",
+  "duration": 15.52,
+  "fps": 30,
+  "width": 1920,
+  "height": 1080,
+  "language": "en",
+  "lead_in": 0.5,
+  "phrases": [
+    {
+      "text": "this video shows how the editor works",
+      "words": [
+        "this",
+        "video",
+        "shows",
+        "how",
+        "the",
+        "editor",
+        "works"
+      ],
+      "start": 0.716,
+      "end": 2.744,
+      "file_start": 0.5,
+      "file_end": 2.825,
+      "gap_after": 0.35
+    },
+    {
+      "text": "it cuts the long pauses automatically",
+      "words": [
+        "it",
+        "cuts",
+        "the",
+        "long",
+        "pauses",
+        "automatically"
+      ],
+      "start": 3.404,
+      "end": 5.612,
+      "file_start": 3.175,
+      "file_end": 5.83,
+      "gap_after": 1.6
+    },
+    {
+      "text": "captions appear word by word",
+      "words": [
+        "captions",
+        "appear",
+        "word",
+        "by",
+        "word"
+      ],
+      "start": 7.684,
+      "end": 9.35,
+      "file_start": 7.43,
+      "file_end": 9.5,
+      "gap_after": 0.4
+    },
+    {
+      "text": "and the important word gets bigger",
+      "words": [
+        "and",
+        "the",
+        "important",
+        "word",
+        "gets",
+        "bigger"
+      ],
+      "start": 10.109,
+      "end": 11.979,
+      "file_start": 9.9,
+      "file_end": 12.135,
+      "gap_after": 1.2
+    },
+    {
+      "text": "that is the whole idea",
+      "words": [
+        "that",
+        "is",
+        "the",
+        "whole",
+        "idea"
+      ],
+      "start": 13.552,
+      "end": 14.775,
+      "file_start": 13.335,
+      "file_end": 14.92,
+      "gap_after": 0.6
+    }
+  ]
+}

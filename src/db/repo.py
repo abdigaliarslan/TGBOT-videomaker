@@ -1,0 +1,267 @@
+"""Доступ к БД. Сессия на операцию, никаких долгоживущих сессий в воркере."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any, AsyncIterator
+
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from src.core.config import Settings, settings as default_settings
+from src.db.models import Base, Job, JobStatus, LLMCall, User
+from src.llm.client import Usage
+
+log = logging.getLogger(__name__)
+
+_engine = None
+_sessionmaker: async_sessionmaker[AsyncSession] | None = None
+
+
+def init_engine(cfg: Settings | None = None):
+    global _engine, _sessionmaker
+    cfg = cfg or default_settings
+    if _engine is None:
+        _engine = create_async_engine(
+            cfg.postgres_dsn,
+            echo=False,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+        )
+        _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
+    return _engine
+
+
+async def dispose_engine() -> None:
+    global _engine, _sessionmaker
+    if _engine is not None:
+        await _engine.dispose()
+        _engine = None
+        _sessionmaker = None
+
+
+@asynccontextmanager
+async def session() -> AsyncIterator[AsyncSession]:
+    if _sessionmaker is None:
+        init_engine()
+    assert _sessionmaker is not None
+    async with _sessionmaker() as s:
+        try:
+            yield s
+            await s.commit()
+        except Exception:
+            await s.rollback()
+            raise
+
+
+async def create_all() -> None:
+    """Только для тестов и первого локального запуска. В проде — alembic."""
+    engine = init_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+# ------------------------------------------------------------------ пользователи
+
+
+async def upsert_user(
+    user_id: int,
+    *,
+    username: str | None = None,
+    first_name: str | None = None,
+    language_code: str | None = None,
+    is_admin: bool = False,
+) -> User:
+    now = datetime.now(timezone.utc)
+    async with session() as s:
+        stmt = (
+            pg_insert(User)
+            .values(
+                id=user_id,
+                username=username,
+                first_name=first_name,
+                language_code=language_code,
+                is_admin=is_admin,
+                created_at=now,
+                last_seen_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=[User.id],
+                set_={
+                    "username": username,
+                    "first_name": first_name,
+                    "language_code": language_code,
+                    "is_admin": is_admin,
+                    "last_seen_at": now,
+                },
+            )
+            .returning(User)
+        )
+        return (await s.execute(stmt)).scalar_one()
+
+
+async def get_user(user_id: int) -> User | None:
+    async with session() as s:
+        return await s.get(User, user_id)
+
+
+async def set_user_preset(user_id: int, preset: str) -> None:
+    async with session() as s:
+        await s.execute(update(User).where(User.id == user_id).values(preset=preset))
+
+
+async def bump_videos_done(user_id: int) -> None:
+    async with session() as s:
+        await s.execute(
+            update(User).where(User.id == user_id).values(videos_done=User.videos_done + 1)
+        )
+
+
+# ------------------------------------------------------------------ задачи
+
+
+async def create_job(
+    user_id: int,
+    *,
+    source_file_id: str | None,
+    source_key: str | None,
+    source_size: int | None,
+    preset: str,
+    chat_id: int | None = None,
+) -> Job:
+    async with session() as s:
+        job = Job(
+            user_id=user_id,
+            source_file_id=source_file_id,
+            source_key=source_key,
+            source_size=source_size,
+            preset=preset,
+            chat_id=chat_id,
+            status=JobStatus.QUEUED,
+        )
+        s.add(job)
+        await s.flush()
+        await s.refresh(job)
+        return job
+
+
+async def get_job(job_id: uuid.UUID | str) -> Job | None:
+    async with session() as s:
+        return await s.get(Job, uuid.UUID(str(job_id)))
+
+
+async def update_job(job_id: uuid.UUID | str, **values: Any) -> None:
+    async with session() as s:
+        await s.execute(update(Job).where(Job.id == uuid.UUID(str(job_id))).values(**values))
+
+
+async def mark_running(job_id: uuid.UUID | str) -> None:
+    await update_job(
+        job_id, status=JobStatus.RUNNING, started_at=datetime.now(timezone.utc), progress=0.0
+    )
+
+
+async def mark_failed(job_id: uuid.UUID | str, error: str) -> None:
+    await update_job(
+        job_id,
+        status=JobStatus.FAILED,
+        error=error[:4000],
+        finished_at=datetime.now(timezone.utc),
+    )
+
+
+async def mark_done(job_id: uuid.UUID | str, **values: Any) -> None:
+    await update_job(
+        job_id,
+        status=JobStatus.DONE,
+        progress=1.0,
+        finished_at=datetime.now(timezone.utc),
+        **values,
+    )
+
+
+async def active_jobs_count(user_id: int | None = None) -> int:
+    async with session() as s:
+        q = select(func.count(Job.id)).where(
+            Job.status.in_([JobStatus.QUEUED, JobStatus.RUNNING])
+        )
+        if user_id is not None:
+            q = q.where(Job.user_id == user_id)
+        return int((await s.execute(q)).scalar_one())
+
+
+async def jobs_in_flight() -> list[Job]:
+    """Задачи, за которыми кто-то ждёт ответа.
+
+    Нужны при старте бота: наблюдатели живут в памяти процесса, и после
+    рестарта пользователь иначе никогда не дождётся своего ролика.
+    """
+    async with session() as s:
+        q = (
+            select(Job)
+            .where(
+                Job.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+                Job.chat_id.isnot(None),
+                Job.status_message_id.isnot(None),
+            )
+            .order_by(Job.created_at)
+        )
+        return list((await s.execute(q)).scalars())
+
+
+async def recent_jobs(user_id: int, limit: int = 5) -> list[Job]:
+    async with session() as s:
+        q = (
+            select(Job)
+            .where(Job.user_id == user_id, Job.status == JobStatus.DONE)
+            .order_by(Job.created_at.desc())
+            .limit(limit)
+        )
+        return list((await s.execute(q)).scalars())
+
+
+# ------------------------------------------------------------------ учёт токенов
+
+
+async def record_llm_call(usage: Usage, job_id: uuid.UUID | str | None = None) -> None:
+    async with session() as s:
+        s.add(
+            LLMCall(
+                job_id=uuid.UUID(str(job_id)) if job_id else None,
+                prompt=usage.prompt,
+                tier=usage.tier,
+                model=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_creation_tokens=usage.cache_creation_tokens,
+                cost_usd=usage.cost_usd,
+                seconds=usage.seconds,
+                attempt=usage.attempt,
+            )
+        )
+
+
+async def cost_report(days: int = 7) -> list[dict[str, Any]]:
+    """Себестоимость по типам вызова — то, что надо мерить с первого дня (§7)."""
+    async with session() as s:
+        q = (
+            select(
+                LLMCall.prompt,
+                LLMCall.model,
+                func.count(LLMCall.id).label("calls"),
+                func.sum(LLMCall.input_tokens).label("input_tokens"),
+                func.sum(LLMCall.cache_read_tokens).label("cache_read_tokens"),
+                func.sum(LLMCall.output_tokens).label("output_tokens"),
+                func.sum(LLMCall.cost_usd).label("cost_usd"),
+            )
+            .where(LLMCall.created_at > func.now() - func.make_interval(0, 0, 0, days))
+            .group_by(LLMCall.prompt, LLMCall.model)
+            .order_by(func.sum(LLMCall.cost_usd).desc())
+        )
+        return [dict(row._mapping) for row in (await s.execute(q)).all()]

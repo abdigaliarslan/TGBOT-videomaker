@@ -1,0 +1,255 @@
+"""Композиция этапов в один прогон: файл на входе → готовый ролик на выходе.
+
+Здесь же собираются метрики (§7): время каждого этапа, стоимость LLM, доля
+падений на валидации EDL. Без них экономика вскроется поздно.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import shutil
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+from src.core.config import Settings, settings as default_settings
+from src.core.edl import EDL, validate_edl
+from src.core.preset import load_preset
+from src.core.render_plan import build_plan
+from src.llm.client import LLMClient
+from src.pipeline import broll as broll_mod
+from src.pipeline.asr import ASRResult, transcribe
+from src.pipeline.crop import autocrop
+from src.pipeline.cut import apply_cuts
+from src.pipeline.director import clean_transcript, direct, make_metadata
+from src.pipeline.probe import MediaInfo, probe
+from src.pipeline.render import arender_remotion, render_ass
+
+log = logging.getLogger(__name__)
+
+Progress = Callable[[str, float], Awaitable[None] | None]
+
+STAGES = [
+    ("probe", "Читаю файл", 0.03),
+    ("asr", "Распознаю речь", 0.32),
+    ("clean", "Проверяю расшифровку", 0.36),
+    ("direct", "Собираю монтаж", 0.45),
+    ("broll", "Подбираю картинки", 0.52),
+    ("cut", "Режу паузы", 0.66),
+    ("crop", "Кадрирую 9:16", 0.78),
+    ("render", "Рисую субтитры", 0.97),
+    ("done", "Готово", 1.0),
+]
+STAGE_TITLES = {key: title for key, title, _ in STAGES}
+STAGE_SHARE = {key: share for key, _, share in STAGES}
+
+
+class JobError(RuntimeError):
+    """Ошибка, текст которой можно показать пользователю."""
+
+
+@dataclass
+class JobResult:
+    output: Path
+    edl: EDL
+    asr: ASRResult
+    info: MediaInfo
+    timings: dict[str, float] = field(default_factory=dict)
+    llm_report: dict[str, Any] = field(default_factory=dict)
+    edl_from_llm: bool = False
+    broll_used: int = 0
+    metadata: dict[str, Any] | None = None
+    transcript_fixes: int = 0
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "output": str(self.output),
+            "source_duration": self.info.duration,
+            "out_duration": round(self.edl.out_duration, 2),
+            "words": len(self.asr.words),
+            "blocks": len(self.edl.captions),
+            "cuts_dropped": sum(1 for c in self.edl.cuts if not c.kept),
+            "broll": self.broll_used,
+            "edl_from_llm": self.edl_from_llm,
+            "transcript_fixes": self.transcript_fixes,
+            "metadata": self.metadata,
+            "timings": self.timings,
+            "llm": self.llm_report,
+        }
+
+
+async def _notify(progress: Progress | None, stage: str) -> None:
+    if progress is None:
+        return
+    res = progress(STAGE_TITLES.get(stage, stage), STAGE_SHARE.get(stage, 0.0))
+    if hasattr(res, "__await__"):
+        await res  # type: ignore[misc]
+
+
+async def process_video(
+    src: str | Path,
+    work_dir: str | Path,
+    *,
+    preset: str | None = None,
+    llm: LLMClient | None = None,
+    progress: Progress | None = None,
+    cut_pauses: bool = True,
+    vertical: bool = True,
+    backend: str | None = None,
+    cfg: Settings | None = None,
+    keep_work: bool | None = None,
+) -> JobResult:
+    """Полный прогон: probe → asr → direct → broll → cut → crop → render."""
+    cfg = cfg or default_settings
+    src = Path(src)
+    work = Path(work_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    timings: dict[str, float] = {}
+    # Рабочую папку удаляет вызывающий (воркер) — здесь только помечаем режим.
+    keep = cfg.debug if keep_work is None else keep_work
+
+    def mark(stage: str, t0: float) -> None:
+        timings[stage] = round(time.perf_counter() - t0, 2)
+
+    try:
+        # ---------------------------------------------------------- восприятие
+        await _notify(progress, "probe")
+        t = time.perf_counter()
+        info = probe(src)
+        mark("probe", t)
+
+        if info.duration < cfg.min_video_seconds:
+            raise JobError(
+                f"Видео короче {cfg.min_video_seconds:.0f} с — монтировать нечего."
+            )
+        if info.duration > cfg.max_video_seconds:
+            raise JobError(
+                f"Видео длиннее {cfg.max_video_minutes:.0f} мин. "
+                f"Пришлите кусок покороче."
+            )
+        if not info.has_audio:
+            raise JobError("В видео нет звуковой дорожки — субтитры делать не из чего.")
+
+        await _notify(progress, "asr")
+        t = time.perf_counter()
+        asr = transcribe(src)
+        mark("asr", t)
+        if not asr.words:
+            raise JobError("Речь не распознана. Возможно, в ролике только музыка или шум.")
+
+        # ---------------------------------------------------------- правка ASR
+        words = asr.words
+        fixes = 0
+        if llm is not None and llm.ready:
+            await _notify(progress, "clean")
+            t = time.perf_counter()
+            words, fixes = await clean_transcript(
+                asr.words, llm=llm, language=asr.language, cfg=cfg
+            )
+            mark("clean", t)
+
+        # ---------------------------------------------------------- режиссёр
+        await _notify(progress, "direct")
+        t = time.perf_counter()
+        edl = await direct(
+            words,
+            info.duration,
+            llm=llm,
+            language=asr.language,
+            preset=preset,
+            cfg=cfg,
+        )
+        mark("direct", t)
+        errors = validate_edl(edl)
+        if errors:
+            raise JobError("Не удалось собрать монтажный лист: " + "; ".join(errors[:3]))
+        edl_from_llm = bool(llm and llm.ready and any(u.prompt == "direct" for u in llm.usages))
+
+        # ---------------------------------------------------------- b-roll
+        broll_used = 0
+        if cfg.broll_enabled and llm is not None and llm.ready:
+            await _notify(progress, "broll")
+            t = time.perf_counter()
+            try:
+                broll_used = await broll_mod.plan_and_fetch(
+                    edl, src, work / "broll", llm=llm, info=info, cfg=cfg
+                )
+            except Exception as e:  # noqa: BLE001 — b-roll необязателен, ролик важнее
+                log.warning("b-roll пропущен: %s", e)
+            mark("broll", t)
+
+        # ---------------------------------------------------------- монтаж
+        await _notify(progress, "cut")
+        t = time.perf_counter()
+        cut_path = work / "cut.mp4"
+        if cut_pauses:
+            apply_cuts(edl, src, cut_path, info=info, cfg=cfg)
+        else:
+            shutil.copy2(src, cut_path)
+        mark("cut", t)
+
+        await _notify(progress, "crop")
+        t = time.perf_counter()
+        staged = cut_path
+        if vertical:
+            staged = autocrop(
+                cut_path, work / "vertical.mp4", work_dir=work,
+                out_width=cfg.render_width, out_height=cfg.render_height, cfg=cfg,
+            )
+        mark("crop", t)
+
+        # ---------------------------------------------------------- рендер
+        await _notify(progress, "render")
+        t = time.perf_counter()
+        staged_info = probe(staged)
+        plan = build_plan(
+            edl,
+            str(staged),
+            fps=int(round(staged_info.fps)) or cfg.render_fps,
+            width=staged_info.width,
+            height=staged_info.height,
+            preset=load_preset(preset or edl.preset),
+            apply_cuts=cut_pauses,
+            cfg=cfg,
+        )
+        (work / "plan.json").write_text(
+            json.dumps(plan.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        (work / "edl.json").write_text(edl.model_dump_json(indent=1), encoding="utf-8")
+
+        out_path = work / "result.mp4"
+        chosen = backend or cfg.render_backend
+        if chosen == "ass":
+            render_ass(plan, out_path, work_dir=work, cfg=cfg)
+        else:
+            await arender_remotion(
+                plan, out_path, assets_dir=work, job_key=work.name, cfg=cfg
+            )
+        mark("render", t)
+
+        metadata = await make_metadata(
+            asr.text, edl.out_duration, llm=llm, language=asr.language, cfg=cfg
+        )
+        await _notify(progress, "done")
+
+        result = JobResult(
+            output=out_path,
+            edl=edl,
+            asr=asr,
+            info=info,
+            timings=timings,
+            llm_report=llm.report() if llm else {},
+            edl_from_llm=edl_from_llm,
+            broll_used=broll_used,
+            metadata=metadata,
+            transcript_fixes=fixes,
+        )
+        log.info("джоб готов: %s", json.dumps(result.summary(), ensure_ascii=False))
+        return result
+
+    except Exception:
+        if keep:
+            log.info("DEBUG: рабочая папка оставлена для разбора — %s", work)
+        raise

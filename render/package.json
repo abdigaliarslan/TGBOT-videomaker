@@ -1,0 +1,24 @@
+{
+  "name": "reelbot-render",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Remotion renderer. Node только рендерит: stdin JSON -> mp4 (§1).",
+  "scripts": {
+    "studio": "remotion studio src/Root.tsx",
+    "render": "node render.mjs",
+    "browser": "node -e \"import('@remotion/renderer').then(m=>m.ensureBrowser())\""
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.520",
+    "@remotion/cli": "4.0.520",
+    "@remotion/renderer": "4.0.520",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.520"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "typescript": "5.6.3"
+  }
+}

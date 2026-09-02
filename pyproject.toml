@@ -1,0 +1,66 @@
+[project]
+name = "reelbot"
+version = "0.1.0"
+description = "Telegram bot for automatic vertical reel editing: word-level captions, pause cutting, 9:16 autocrop, b-roll"
+requires-python = ">=3.12,<3.13"
+
+# Версии зафиксированы намеренно (§5 M1): ASR-стек ломается на мажорных апдейтах.
+dependencies = [
+    # bot
+    "aiogram==3.31.0",
+    "aiofiles==25.1.0",
+    # config / models
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
+    "python-dotenv==1.2.3",
+    # queue
+    "arq==0.26.3",
+    "redis==5.2.1",
+    # db
+    "SQLAlchemy[asyncio]==2.0.44",
+    "asyncpg==0.30.0",
+    "alembic==1.14.1",
+    # storage
+    "boto3==1.35.99",
+    # llm
+    "anthropic==0.69.0",
+    "httpx==0.28.1",
+    # asr (CTranslate2-бэкенд Whisper; см. src/pipeline/asr.py про выбор бэкенда)
+    "faster-whisper==1.2.1",
+    "ctranslate2==4.8.1",
+    "av==18.1.0",
+    "onnxruntime==1.29.0",
+    # vision (автокроп)
+    "opencv-python-headless==4.12.0.88",
+    "numpy==2.5.2",
+    "Pillow==12.3.0",
+]
+
+[project.optional-dependencies]
+# Форсированное выравнивание. Ставится отдельно, потому что torch с PyPI тянет
+# CUDA-сборку; на машине без GPU берите индекс .../whl/cpu (см. README).
+asr = [
+    "torch>=2.6",
+    "torchaudio>=2.6",
+    "whisperx>=3.4",
+]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "fonttools==4.55.3",  # нарезка статических начертаний из вариативного шрифта
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+addopts = "-m 'not slow'"
+markers = ["slow: медленные тесты (грузят модели ASR, рендерят видео)"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
