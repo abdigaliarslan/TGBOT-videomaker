@@ -39,12 +39,6 @@ export type PlanBroll = {
   query: string;
 };
 
-export type PlanCamera = {
-  start: number;
-  end: number;
-  type: "zoom_punch" | "shake";
-  scale: number;
-};
 
 export type Preset = {
   name: string;
@@ -99,6 +93,15 @@ export type Preset = {
     shout_scale: number;
     shout_rotate: number;
   };
+  /** Геометрия в долях кадра: раньше эти числа были константами в компонентах. */
+  geometry: {
+    max_line_width_ratio: number;
+    safe_area_ratio: number;
+    broll_inset_ratio: number;
+    broll_margin_ratio: number;
+    broll_top_ratio: number;
+    broll_bottom_ratio: number;
+  };
   background: string;
 };
 
@@ -114,7 +117,6 @@ export type RenderPlan = {
   preset: Preset;
   blocks: PlanBlock[];
   broll: PlanBroll[];
-  camera: PlanCamera[];
   meta: Record<string, unknown>;
   /** Шрифт: путь относительно публичной директории. Ставится в рендер, не в систему. */
   fontUrl?: string | null;
@@ -130,7 +132,6 @@ export const EMPTY_PLAN: RenderPlan = {
   audio: null,
   blocks: [],
   broll: [],
-  camera: [],
   meta: {},
   fontUrl: null,
   preset: {
@@ -149,7 +150,7 @@ export const EMPTY_PLAN: RenderPlan = {
       past: "#FFFFFF",
       ghost: "#FFFFFF",
       past_opacity: 0.7,
-      ghost_opacity: 0.3,
+      ghost_opacity: 0.0,
       accent: "#FFD54A",
       shout: "#FF6A3D",
       outline: "#05070A",
@@ -158,8 +159,8 @@ export const EMPTY_PLAN: RenderPlan = {
     panel: {
       enabled: true,
       color: "#0B0F14",
-      opacity: 0.32,
-      blur: 18,
+      opacity: 0.5,
+      blur: 24,
       radius: 30,
       padding_x: 34,
       padding_y: 22,
@@ -175,7 +176,7 @@ export const EMPTY_PLAN: RenderPlan = {
       align: "center",
     },
     animation: {
-      pop_scale: 1.16,
+      pop_scale: 1.05,
       pop_ms: 160,
       spring_damping: 12,
       spring_stiffness: 190,
@@ -185,6 +186,14 @@ export const EMPTY_PLAN: RenderPlan = {
       accent_scale: 1.18,
       shout_scale: 1.34,
       shout_rotate: -4,
+    },
+    geometry: {
+      max_line_width_ratio: 0.78,
+      safe_area_ratio: 0.07,
+      broll_inset_ratio: 0.44,
+      broll_margin_ratio: 0.05,
+      broll_top_ratio: 0.16,
+      broll_bottom_ratio: 0.58,
     },
     background: "#000000",
   },

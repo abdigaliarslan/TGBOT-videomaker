@@ -40,7 +40,7 @@
     "align": "center"
   },
   "animation": {
-    "pop_scale": 1.24,
+    "pop_scale": 1.06,
     "pop_ms": 130,
     "spring_damping": 10.0,
     "spring_stiffness": 240.0,
@@ -51,5 +51,12 @@
     "shout_scale": 1.42,
     "shout_rotate": -6.0
   },
-  "background": "#000000"
+  "background": "#000000",
+  "grade": {
+    "enabled": true,
+    "contrast": 1.1,
+    "saturation": 1.08,
+    "gamma": 0.97,
+    "vignette": 0.0
+  }
 }

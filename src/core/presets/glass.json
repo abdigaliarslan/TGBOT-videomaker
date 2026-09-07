@@ -14,7 +14,7 @@
     "past": "#FFFFFF",
     "ghost": "#FFFFFF",
     "past_opacity": 0.7,
-    "ghost_opacity": 0.3,
+    "ghost_opacity": 0.0,
     "accent": "#FFD54A",
     "shout": "#FF6A3D",
     "outline": "#05070A",
@@ -23,8 +23,8 @@
   "panel": {
     "enabled": true,
     "color": "#0B0F14",
-    "opacity": 0.32,
-    "blur": 18,
+    "opacity": 0.5,
+    "blur": 24,
     "radius": 30,
     "padding_x": 34,
     "padding_y": 22,
@@ -40,7 +40,7 @@
     "align": "center"
   },
   "animation": {
-    "pop_scale": 1.16,
+    "pop_scale": 1.05,
     "pop_ms": 160,
     "spring_damping": 12.0,
     "spring_stiffness": 190.0,
@@ -51,5 +51,12 @@
     "shout_scale": 1.34,
     "shout_rotate": -4.0
   },
-  "background": "#000000"
+  "background": "#000000",
+  "grade": {
+    "enabled": true,
+    "contrast": 1.08,
+    "saturation": 1.12,
+    "gamma": 0.98,
+    "vignette": 0.63
+  }
 }

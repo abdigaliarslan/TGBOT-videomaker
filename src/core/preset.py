@@ -71,6 +71,64 @@ class Caption(BaseModel):
     align: Literal["center", "left"] = "center"
 
 
+class Geometry(BaseModel):
+    """Геометрия кадра в долях, а не в пикселях TSX.
+
+    Раньше эти числа жили константами в компонентах, и Python не мог предсказать,
+    куда попадёт текст. Здесь они данные, которые читают и Python, и рендерер.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Доля ширины кадра, которую может занять строка субтитра.
+    max_line_width_ratio: float = 0.78
+    # Безопасная зона у края кадра (был SAFE_AREA_RATIO в Captions.tsx).
+    safe_area_ratio: float = 0.07
+    # Картинка в углу: доля ширины кадра и отступ от края (были INSET_RATIO, MARGIN).
+    broll_inset_ratio: float = 0.44
+    broll_margin_ratio: float = 0.05
+    broll_top_ratio: float = 0.16
+    broll_bottom_ratio: float = 0.58
+
+
+class Grade(BaseModel):
+    """Лёгкий цветокор. Телефонное видео приходит тёмным и плоским."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    contrast: float = 1.08
+    saturation: float = 1.12  # выше 1.2 на лицах даёт красноту
+    gamma: float = 0.98
+    vignette: float = 0.0  # сила виньетки в радианах для ffmpeg, 0 — выключена
+
+
+class Crop(BaseModel):
+    """Правила кадрирования: крупность задаётся долей лица, а не вписыванием bbox."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    face_height_ratio: float = 0.22  # крупность «wide»
+    tight_face_height_ratio: float = 0.28  # крупность «tight» на резе
+    eye_line_ratio: float = 0.36  # линия глаз по высоте кадра, не центр
+    headroom_ratio: float = 0.05  # запас над макушкой
+    # Больше 1.0 — это апскейл исходника: вертикальный вход зумиться не должен.
+    max_scale: float = 1.0
+
+
+class Audio(BaseModel):
+    """Звуковой пост: громкость речи, подложка, дакинг, эффекты."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_lufs: float = -16.0
+    music_gain_db: float = -20.0
+    duck_db: float = -12.0
+    sfx_gain_db: float = -6.0
+    music_fade_s: float = 0.5
+    music: str | None = None  # имя файла в assets/music, None — без подложки
+
+
 class Animation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -97,6 +155,10 @@ class Preset(BaseModel):
     panel: Panel = Field(default_factory=Panel)
     caption: Caption = Field(default_factory=Caption)
     animation: Animation = Field(default_factory=Animation)
+    geometry: Geometry = Field(default_factory=Geometry)
+    grade: Grade = Field(default_factory=Grade)
+    crop: Crop = Field(default_factory=Crop)
+    audio: Audio = Field(default_factory=Audio)
     background: str = "#000000"
 
     def scaled(self, height: int) -> "Preset":

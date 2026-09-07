@@ -272,3 +272,94 @@ async def process_video(
         if keep:
             log.info("DEBUG: рабочая папка оставлена для разбора — %s", work)
         raise
+
+
+async def process_from_edl(
+    src: str | Path,
+    work_dir: str | Path,
+    edl: EDL,
+    *,
+    preset: str | None = None,
+    backend: str | None = None,
+    cut_pauses: bool = True,
+    vertical: bool = True,
+    cfg: Settings | None = None,
+) -> JobResult:
+    """Пересборка ролика из готового EDL: без ASR и без LLM (§0.4).
+
+    Нужна для двух вещей: перерендер с другим пресетом и честное сравнение фаз.
+    Режиссёр недетерминирован, поэтому «до и после» имеет смысл только на одном и
+    том же монтажном листе — иначе меряется разброс LLM, а не правка в коде.
+    """
+    cfg = cfg or default_settings
+    src = Path(src)
+    work = Path(work_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    timings: dict[str, float] = {}
+
+    def mark(stage: str, t0: float) -> None:
+        timings[stage] = round(time.perf_counter() - t0, 2)
+
+    t = time.perf_counter()
+    info = probe(src)
+    mark("probe", t)
+
+    if preset:
+        edl.preset = preset
+    errors = validate_edl(edl)
+    if errors:
+        raise JobError("Монтажный лист не проходит валидацию: " + "; ".join(errors[:3]))
+
+    t = time.perf_counter()
+    cut_path = work / "cut.mp4"
+    if cut_pauses:
+        apply_cuts(edl, src, cut_path, info=info, cfg=cfg)
+    else:
+        shutil.copy2(src, cut_path)
+    if not is_playable(cut_path):
+        raise JobError("Нарезка оборвалась — файл повреждён.")
+    mark("cut", t)
+
+    t = time.perf_counter()
+    staged = cut_path
+    if vertical:
+        staged = autocrop(
+            cut_path, work / "vertical.mp4", work_dir=work,
+            out_width=cfg.render_width, out_height=cfg.render_height, cfg=cfg,
+        )
+    if not is_playable(staged):
+        raise JobError("Кадрирование оборвалось — файл повреждён.")
+    mark("crop", t)
+
+    t = time.perf_counter()
+    staged_info = probe(staged)
+    plan = build_plan(
+        edl,
+        str(staged),
+        fps=int(round(staged_info.fps)) or cfg.render_fps,
+        width=staged_info.width,
+        height=staged_info.height,
+        preset=load_preset(edl.preset),
+        apply_cuts=cut_pauses,
+        cfg=cfg,
+    )
+    (work / "plan.json").write_text(
+        json.dumps(plan.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+    (work / "edl.json").write_text(edl.model_dump_json(indent=1), encoding="utf-8")
+
+    out_path = work / "result.mp4"
+    chosen = backend or cfg.render_backend
+    if chosen == "ass":
+        render_ass(plan, out_path, work_dir=work, cfg=cfg)
+    else:
+        await arender_remotion(plan, out_path, assets_dir=work, job_key=work.name, cfg=cfg)
+    mark("render", t)
+
+    return JobResult(
+        output=out_path,
+        edl=edl,
+        asr=ASRResult(words=list(edl.words), language="", backend="edl", model="—"),
+        info=info,
+        timings=timings,
+    )

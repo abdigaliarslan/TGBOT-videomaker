@@ -31,10 +31,19 @@ from src.pipeline.probe import MediaInfo, probe
 
 log = logging.getLogger(__name__)
 
-BROLL_WINDOW = 8.0
+from src.core.edl import BROLL_MAX, BROLL_WINDOW  # потолок один на весь проект
 FRAMES_FOR_VISION = 4
 PEXELS_URL = "https://api.pexels.com/v1/search"
 WAVESPEED_URL = "https://api.wavespeed.ai/api/v3"
+
+# Какую нарезку брать у Pexels. Параметр `orientation=portrait` в поиске
+# отбирает вертикальные СНИМКИ, но не влияет на то, какую версию файла отдадут.
+#
+# Замерено на живом ключе: `large` приходит зажатым по высоте 650 — реальный
+# файл 433x650. Для кадра шириной 1080 это мыло. `portrait` отдаёт 800x1200,
+# то есть вдвое больше и ровно в нужной пропорции.
+PEXELS_RENDITION = "portrait"
+PEXELS_FALLBACK_RENDITIONS = ("large2x", "original", "large")
 
 # Дописка к любому промпту генерации.
 #
@@ -84,7 +93,7 @@ def extract_frames(
 
 
 def _cap(edl: EDL) -> int:
-    return max(0, math.ceil(edl.out_duration / BROLL_WINDOW))
+    return min(BROLL_MAX, max(0, math.ceil(edl.out_duration / BROLL_WINDOW)))
 
 
 def sanitize_items(edl: EDL, items: list[dict[str, Any]]) -> list[Broll]:
@@ -164,7 +173,15 @@ async def plan_broll(
     }
     try:
         result = await llm.complete(
-            "plan_broll", variables, BROLL_SCHEMA, "vision", images=images, max_tokens=4000
+            "plan_broll",
+            variables,
+            BROLL_SCHEMA,
+            "vision",
+            images=images,
+            # У reasoning-моделей размышления считаются в max_tokens: с тесным
+            # бюджетом ответ обрывается на полуслове (stop=length) и b-roll
+            # молча отваливается. Проверено — 4000 не хватает.
+            max_tokens=16_000
         )
     except (LLMUnavailable, LLMBadOutput) as e:
         log.warning("план b-roll не получен: %s", e)
@@ -180,7 +197,9 @@ async def plan_broll(
 
 
 def cache_key(query: str, prompt: str | None, size: str) -> str:
-    raw = f"{query}|{prompt or ''}|{size}".lower().strip()
+    # Нарезка входит в ключ намеренно: сменили её — старые файлы другого
+    # разрешения перестают подходить, и кеш обязан это заметить сам.
+    raw = f"{query}|{prompt or ''}|{size}|{PEXELS_RENDITION}".lower().strip()
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -197,7 +216,14 @@ async def fetch_pexels(client: httpx.AsyncClient, query: str, api_key: str) -> b
         photos = r.json().get("photos") or []
         if not photos:
             return None
-        url = photos[0]["src"].get("large") or photos[0]["src"].get("original")
+        src = photos[0].get("src") or {}
+        url = next(
+            (src[k] for k in (PEXELS_RENDITION, *PEXELS_FALLBACK_RENDITIONS) if src.get(k)),
+            None,
+        )
+        if not url:
+            log.warning("Pexels не отдал ни одной нарезки по %r", query)
+            return None
         img = await client.get(url, timeout=60)
         img.raise_for_status()
         return img.content

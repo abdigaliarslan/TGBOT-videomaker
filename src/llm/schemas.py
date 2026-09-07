@@ -16,7 +16,7 @@ from typing import Any
 DIRECT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["blocks", "drop_words", "hook_end_word", "camera"],
+    "required": ["blocks", "drop_words", "hook_end_word"],
     "properties": {
         "hook_end_word": {
             "type": ["integer", "null"],
@@ -63,20 +63,6 @@ DIRECT_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "enum": ["top", "center", "bottom", "auto"],
                     },
-                },
-            },
-        },
-        "camera": {
-            "type": "array",
-            "maxItems": 6,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["word_idx", "type", "scale"],
-                "properties": {
-                    "word_idx": {"type": "integer"},
-                    "type": {"type": "string", "enum": ["zoom_punch", "shake"]},
-                    "scale": {"type": "number", "minimum": 1.0, "maximum": 1.25},
                 },
             },
         },

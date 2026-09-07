@@ -18,8 +18,11 @@ from typing import Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Потолок b-roll: не чаще одной картинки на BROLL_WINDOW секунд (§3, M7 DoD).
-BROLL_WINDOW = 8.0
+# Потолок b-roll: не чаще одной картинки на BROLL_WINDOW секунд и не больше
+# BROLL_MAX на ролик. Одна картинка на 8 с — это мельтешение: на 20-секундном
+# ролике их выходило три, и ролик переставал быть про говорящего.
+BROLL_WINDOW = 12.0
+BROLL_MAX = 2
 # Сколько слов допустимо в одном блоке субтитров.
 BLOCK_MIN_WORDS = 1
 BLOCK_MAX_WORDS = 5
@@ -48,6 +51,10 @@ class Cut(BaseModel):
     src_in: float
     src_out: float
     reason: Literal["hook", "keep", "drop_silence", "drop_filler"]
+    # Крупность куска. Движение в кадре делается сменой крупности на резе, а не
+    # зумом внутри куска: оно мотивировано монтажом, не спорит с субтитрами и не
+    # требует физики по номеру кадра. Ставит Python по готовым резам, не LLM.
+    framing: Literal["wide", "tight"] = "wide"
 
     @property
     def kept(self) -> bool:
@@ -78,6 +85,10 @@ class CaptionBlock(BaseModel):
     words: list[CaptionWord] = Field(min_length=1)  # 3-5 слов
     position: Literal["top", "center", "bottom", "auto"] = "auto"
     layout: Literal["stack", "ragged", "single_line"] = "stack"
+    # Средняя яркость кадра под блоком, 0..1. Заполняет Python замером, не LLM.
+    # Единственное место, где стиль уступает измерению: панель фиксированной
+    # прозрачности не читается над светлым фоном.
+    bg_luma: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class BrollAnim(str, Enum):
@@ -101,12 +112,24 @@ class Broll(BaseModel):
     asset: str | None = None
 
 
-class CameraMove(BaseModel):
+class Sfx(BaseModel):
+    """Звуковой акцент на резе или входе картинки. Расставляет Python, не LLM."""
+
     model_config = ConfigDict(extra="forbid")
 
-    word_idx: int
-    type: Literal["zoom_punch", "shake"]
-    scale: float = Field(ge=1.0, le=1.25)
+    at_word_idx: int
+    name: str  # имя файла в assets/sfx без расширения
+    gain_db: float = -6.0
+
+
+class Music(BaseModel):
+    """Подложка на весь ролик с дакингом под голос."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    track: str  # имя файла в assets/music
+    gain_db: float = -20.0
+    duck_db: float = -12.0
 
 
 class EDL(BaseModel):
@@ -118,7 +141,8 @@ class EDL(BaseModel):
     cuts: list[Cut]
     captions: list[CaptionBlock]
     broll: list[Broll] = []
-    camera: list[CameraMove] = []
+    sfx: list[Sfx] = []
+    music: Music | None = None
     preset: str = "glass"
 
     # ---------------------------------------------------------------- удобные срезы
@@ -287,9 +311,12 @@ def validate_edl(edl: EDL, *, strict_coverage: bool = True) -> list[str]:
             errors.append(f"captions: слова из вырезанных кусков попали в блоки: {extra[:8]}")
 
     # --- broll: жёсткий потолок по количеству и по плотности
-    cap = max(0, math.ceil(edl.out_duration / BROLL_WINDOW))
+    cap = min(BROLL_MAX, max(0, math.ceil(edl.out_duration / BROLL_WINDOW)))
     if len(edl.broll) > cap:
-        errors.append(f"broll: {len(edl.broll)} штук при потолке {cap} (1 на {BROLL_WINDOW:.0f} с)")
+        errors.append(
+            f"broll: {len(edl.broll)} штук при потолке {cap} "
+            f"(1 на {BROLL_WINDOW:.0f} с, максимум {BROLL_MAX})"
+        )
     tl = edl.timeline()
     stamps: list[float] = []
     for i, b in enumerate(edl.broll):
@@ -309,10 +336,21 @@ def validate_edl(edl: EDL, *, strict_coverage: bool = True) -> list[str]:
             errors.append(f"broll: две картинки ближе {BROLL_WINDOW:.0f} с ({a:.1f} и {b_:.1f})")
             break
 
-    # --- camera
-    for i, cm in enumerate(edl.camera):
-        if cm.word_idx not in known:
-            errors.append(f"camera[{i}]: word_idx={cm.word_idx} отсутствует в words")
+    # --- sfx
+    for i, s in enumerate(edl.sfx):
+        if s.at_word_idx not in known:
+            errors.append(f"sfx[{i}]: word_idx={s.at_word_idx} отсутствует в words")
+
+    # --- монотонность слов: тайминги — единственный источник правды о времени,
+    # и если они врут, подсветка уезжает на слово. Проверка здесь, а не только в
+    # тесте: сломанный ASR должен ронять валидацию, а не тихо ехать в рендер.
+    for i in range(len(edl.words) - 1):
+        cur, nxt = edl.words[i], edl.words[i + 1]
+        if cur.end > nxt.start + 1e-6:
+            errors.append(
+                f"words[{i}]: конец {cur.end:.3f} позже начала следующего {nxt.start:.3f}"
+            )
+            break
 
     return errors
 

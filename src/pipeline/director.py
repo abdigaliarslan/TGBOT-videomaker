@@ -22,7 +22,6 @@ from src.core.config import Settings, settings as default_settings
 from src.core.edl import (
     BLOCK_MAX_WORDS,
     EDL,
-    CameraMove,
     CaptionBlock,
     CaptionWord,
     Cut,
@@ -30,7 +29,7 @@ from src.core.edl import (
     Word,
     validate_edl,
 )
-from src.llm.client import LLMBadOutput, LLMClient, LLMUnavailable
+from src.llm.client import LLMBadOutput, LLMBudgetExceeded, LLMClient, LLMUnavailable
 from src.llm.schemas import DIRECT_SCHEMA
 
 log = logging.getLogger(__name__)
@@ -350,26 +349,11 @@ def edl_from_plan(
             )
         )
 
-    camera: list[CameraMove] = []
-    for raw in plan.get("camera") or []:
-        idx = raw.get("word_idx")
-        if not isinstance(idx, int) or idx not in known or idx in drop:
-            continue
-        scale = float(raw.get("scale") or 1.08)
-        camera.append(
-            CameraMove(
-                word_idx=idx,
-                type=raw.get("type") if raw.get("type") in ("zoom_punch", "shake") else "zoom_punch",
-                scale=min(1.25, max(1.0, scale)),
-            )
-        )
-
     return EDL(
         source_duration=source_duration,
         words=list(words),
         cuts=cuts,
         captions=captions,
-        camera=camera,
         preset=preset or cfg.default_preset,
     )
 
@@ -415,7 +399,7 @@ async def clean_transcript(
             {"language": language or cfg.whisper_language or "auto", "words_table": words_table(words)},
             CLEAN_SCHEMA,
             "cheap",
-            max_tokens=4000,
+            max_tokens=8000,
         )
     except (LLMUnavailable, LLMBadOutput) as e:
         log.warning("правка транскрипта пропущена: %s", e)
@@ -467,7 +451,7 @@ async def make_metadata(
             },
             METADATA_SCHEMA,
             "cheap",
-            max_tokens=1500,
+            max_tokens=6000,
         )
     except (LLMUnavailable, LLMBadOutput) as e:
         log.warning("метаданные не сгенерированы: %s", e)
@@ -517,9 +501,22 @@ async def direct(
                 correction=correction,
                 effort="high",
             )
-        except (LLMUnavailable, LLMBadOutput) as e:
-            log.warning("режиссёр: вызов LLM не удался (%s), фолбэк", e)
+        except LLMUnavailable as e:
+            # Провайдер недоступен — повторять нечего, сразу фолбэк.
+            log.warning("режиссёр: LLM недоступна (%s), фолбэк", e)
             break
+        except LLMBudgetExceeded as e:
+            # Повтор с теми же настройками даст тот же обрыв и вторую оплату.
+            log.warning("режиссёр: %s — фолбэк без повтора", e)
+            break
+        except LLMBadOutput as e:
+            # Ответ не той формы. Это ровно тот случай, ради которого §4
+            # разрешает один ретрай — тратим его так же, как на семантику.
+            log.warning("режиссёр: ответ не по схеме (попытка %d): %s", attempt, e)
+            if attempt == 2:
+                break
+            correction = str(e)
+            continue
 
         edl = edl_from_plan(words, source_duration, result.data, preset=preset, cfg=cfg)
         errors = validate_edl(edl)

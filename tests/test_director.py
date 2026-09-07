@@ -171,12 +171,10 @@ def test_edl_from_plan_is_valid():
             {"words": [3, 5], "accent_word": None, "accent": None, "position": "auto"},
             {"words": [6, 7, 8], "accent_word": 8, "accent": "shout", "position": "auto"},
         ],
-        "camera": [{"word_idx": 8, "type": "zoom_punch", "scale": 1.1}],
     }
     edl = edl_from_plan(ws, 5.0, plan, cfg=cfg())
     assert validate_edl(edl) == []
     assert [cw.word_idx for b in edl.captions for cw in b.words] == [0, 1, 2, 3, 5, 6, 7, 8]
-    assert edl.camera[0].word_idx == 8
 
 
 def test_edl_from_plan_drops_unknown_indices():
@@ -186,11 +184,9 @@ def test_edl_from_plan_drops_unknown_indices():
         "drop_words": [77],
         "blocks": [{"words": [0, 1, 99], "accent_word": 99, "accent": "shout", "position": "auto"},
                    {"words": [2, 3], "accent_word": None, "accent": None, "position": "auto"}],
-        "camera": [{"word_idx": 55, "type": "zoom_punch", "scale": 9.0}],
     }
     edl = edl_from_plan(ws, 3.0, plan, cfg=cfg())
     assert validate_edl(edl) == []
-    assert edl.camera == []
 
 
 def test_edl_from_plan_ignores_accent_outside_block():
@@ -200,7 +196,6 @@ def test_edl_from_plan_ignores_accent_outside_block():
         "drop_words": [],
         "blocks": [{"words": [0, 1], "accent_word": 3, "accent": "shout", "position": "auto"},
                    {"words": [2, 3], "accent_word": None, "accent": None, "position": "auto"}],
-        "camera": [],
     }
     edl = edl_from_plan(ws, 3.0, plan, cfg=cfg())
     assert validate_edl(edl) == []

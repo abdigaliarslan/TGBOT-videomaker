@@ -13,6 +13,7 @@ from typing import Any, Literal
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, Emphasis, Timeline
 from src.core.preset import Preset, load_preset
+from src.core.text import display_text
 
 
 @dataclass(slots=True)
@@ -48,14 +49,6 @@ class PlanBroll:
 
 
 @dataclass(slots=True)
-class PlanCamera:
-    start: float
-    end: float
-    type: str
-    scale: float
-
-
-@dataclass(slots=True)
 class RenderPlan:
     version: int
     fps: int
@@ -66,7 +59,6 @@ class RenderPlan:
     preset: dict[str, Any]
     blocks: list[PlanBlock] = field(default_factory=list)
     broll: list[PlanBroll] = field(default_factory=list)
-    camera: list[PlanCamera] = field(default_factory=list)
     audio: str | None = None
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -91,7 +83,6 @@ class RenderPlan:
                 for b in data.get("blocks", [])
             ],
             broll=[PlanBroll(**x) for x in data.get("broll", [])],
-            camera=[PlanCamera(**x) for x in data.get("camera", [])],
             meta=data.get("meta", {}),
         )
 
@@ -115,7 +106,6 @@ class RenderPlan:
                 for b in self.blocks
             ],
             "broll": [asdict(x) for x in self.broll],
-            "camera": [asdict(x) for x in self.camera],
             "meta": self.meta,
         }
 
@@ -240,9 +230,7 @@ def build_plan(
             window = tl.word_window(w)
             if window is None:
                 continue
-            text = w.text.strip()
-            if ps.font.uppercase:
-                text = text.upper()
+            text = display_text(w.text, uppercase=ps.font.uppercase)
             pwords.append(
                 PlanWord(
                     text=text,
@@ -280,24 +268,6 @@ def build_plan(
     if blocks and duration > 0:
         blocks[-1].end = min(blocks[-1].end, duration)
 
-    camera: list[PlanCamera] = []
-    for cm in edl.camera:
-        w = by_idx.get(cm.word_idx)
-        if w is None:
-            continue
-        window = tl.word_window(w)
-        if window is None:
-            continue
-        span = 0.45 if cm.type == "zoom_punch" else 0.3
-        camera.append(
-            PlanCamera(
-                start=round(max(0.0, window[0] - 0.05), 3),
-                end=round(min(window[0] + span, duration), 3),
-                type=cm.type,
-                scale=cm.scale,
-            )
-        )
-
     return RenderPlan(
         version=1,
         fps=fps,
@@ -309,6 +279,5 @@ def build_plan(
         preset=ps.model_dump(),
         blocks=blocks,
         broll=broll,
-        camera=camera,
         meta=meta or {},
     )

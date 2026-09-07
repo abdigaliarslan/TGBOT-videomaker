@@ -27,9 +27,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.core.config import settings  # noqa: E402
+from src.core.edl import EDL  # noqa: E402
 from src.core.logging import setup_logging  # noqa: E402
 from src.llm.client import LLMClient  # noqa: E402
-from src.pipeline.job import process_video  # noqa: E402
+from src.pipeline.job import process_from_edl, process_video  # noqa: E402
 
 # Что вынимаем из рабочей папки. Имя в выгрузке — <основа>-<label>.json: ролик
 # именуется фазой (phase-0.mp4), а артефакты — тем, чем они являются для сравнения
@@ -55,9 +56,18 @@ async def run(args: argparse.Namespace) -> int:
     if work.exists():
         shutil.rmtree(work)
 
-    llm = None if args.no_llm else LLMClient()
+    fixed_edl: EDL | None = None
+    if args.edl:
+        raw = json.loads(Path(args.edl).read_text(encoding="utf-8"))
+        # Поля, которых больше нет в контракте (camera), молча выбрасываем:
+        # эталонный EDL снят до их удаления, а сравнивать фазы надо на нём же.
+        known = set(EDL.model_fields)
+        fixed_edl = EDL(**{k: v for k, v in raw.items() if k in known})
+
+    llm = None if args.no_llm or fixed_edl is not None else LLMClient()
     print(
-        f"вход: {src}  llm={'выкл' if llm is None else llm.ready}  "
+        f"вход: {src}  "
+        f"{'EDL из файла: ' + args.edl if fixed_edl else 'llm=' + ('выкл' if llm is None else str(llm.ready))}  "
         f"asr={settings.asr_backend}/{settings.whisper_model}  "
         f"рендер={args.backend or settings.render_backend}  "
         f"пресет={args.preset or settings.default_preset}  b-roll={settings.broll_enabled}",
@@ -65,9 +75,14 @@ async def run(args: argparse.Namespace) -> int:
     )
 
     t0 = time.perf_counter()
-    res = await process_video(
-        src, work, preset=args.preset, llm=llm, backend=args.backend, keep_work=True
-    )
+    if fixed_edl is not None:
+        res = await process_from_edl(
+            src, work, fixed_edl, preset=args.preset, backend=args.backend
+        )
+    else:
+        res = await process_video(
+            src, work, preset=args.preset, llm=llm, backend=args.backend, keep_work=True
+        )
     wall = round(time.perf_counter() - t0, 2)
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +124,10 @@ def main() -> int:
     ap.add_argument("--preset", default=None, help="пресет субтитров")
     ap.add_argument("--backend", default=None, choices=["ass", "remotion"], help="рендерер")
     ap.add_argument("--no-llm", action="store_true", help="без LLM: детерминированный режиссёр")
+    ap.add_argument(
+        "--edl", default=None,
+        help="готовый EDL: без ASR и LLM, тот же монтаж — так сравниваются фазы",
+    )
     ap.add_argument("--work", default=None, help="рабочая папка (по умолч. <out>/.work-<prefix>)")
     ap.add_argument("--keep-work", action="store_true", help="не удалять рабочую папку")
     ap.add_argument("--log", default="INFO", help="уровень логов")

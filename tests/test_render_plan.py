@@ -9,7 +9,6 @@ from src.core.edl import (
     EDL,
     Broll,
     BrollAnim,
-    CameraMove,
     CaptionBlock,
     CaptionWord,
     Cut,
@@ -149,18 +148,6 @@ def test_broll_is_timed_and_clamped():
     assert item.start == pytest.approx(0.0, abs=0.05)
     assert item.end <= plan.duration + 1e-6
     assert item.end - item.start == pytest.approx(2.0, abs=0.05)
-
-
-def test_camera_move_gets_a_window():
-    edl = sample_edl(cuts=[Cut(src_in=0.0, src_out=10.0, reason="keep")])
-    edl.camera = [CameraMove(word_idx=4, type="zoom_punch", scale=1.1)]
-    plan = build_plan(edl, "v.mp4", cfg=cfg())
-    assert len(plan.camera) == 1
-    assert plan.camera[0].end > plan.camera[0].start
-    assert plan.camera[0].scale == pytest.approx(1.1)
-
-
-# ------------------------------------------------------------------ сериализация
 
 
 def test_plan_round_trips_through_json():

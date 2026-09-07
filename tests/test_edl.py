@@ -8,7 +8,6 @@ from src.core.edl import (
     EDL,
     Broll,
     BrollAnim,
-    CameraMove,
     CaptionBlock,
     CaptionWord,
     Cut,
@@ -81,14 +80,6 @@ def test_unknown_word_idx_in_captions():
 def test_unknown_word_idx_in_broll():
     edl = base_edl(broll=[Broll(word_idx=99, duration=1.5, query="cat", anim=BrollAnim.POP_IN, anchor="center")])
     assert any("broll[0]" in e and "отсутствует" in e for e in validate_edl(edl))
-
-
-def test_unknown_word_idx_in_camera():
-    edl = base_edl(camera=[CameraMove(word_idx=42, type="zoom_punch", scale=1.1)])
-    assert any("camera[0]" in e for e in validate_edl(edl))
-
-
-# ------------------------------------------------------------------ покрытие словами
 
 
 def test_word_missing_from_all_blocks():
@@ -206,13 +197,6 @@ def test_broll_duration_bounds_are_pydantic():
         Broll(word_idx=0, duration=5.0, query="q", anim=BrollAnim.POP_IN, anchor="center")
     with pytest.raises(pydantic.ValidationError):
         Broll(word_idx=0, duration=0.1, query="q", anim=BrollAnim.POP_IN, anchor="center")
-
-
-def test_camera_scale_bounds_are_pydantic():
-    import pydantic
-
-    with pytest.raises(pydantic.ValidationError):
-        CameraMove(word_idx=0, type="zoom_punch", scale=2.0)
 
 
 def test_closed_enums_reject_invented_effects():
