@@ -1,0 +1,83 @@
+{
+ "output": "/tmp/claude-1000/-home-arslan-tgbot-video/e38d88f4-22fb-4c0f-80c3-7318b322b61f/scratchpad/f0/work/result.mp4",
+ "source_duration": 20.067,
+ "out_duration": 18.47,
+ "words": 37,
+ "blocks": 12,
+ "cuts_dropped": 4,
+ "broll": 0,
+ "edl_from_llm": true,
+ "transcript_fixes": 0,
+ "metadata": {
+  "title": "Почему не стоит зацикливаться на одной цели",
+  "description": "Разбираемся, почему важно не ограничивать себя единственной задачей и как распределять внимание между несколькими целями. Попробуйте применить этот подход в планировании своего дня.",
+  "hashtags": [
+   "саморазвитие",
+   "продуктивность",
+   "таймменеджмент",
+   "цели",
+   "мотивация",
+   "психология"
+  ]
+ },
+ "timings": {
+  "probe": 0.07,
+  "asr": 7.62,
+  "clean": 1.68,
+  "direct": 2.49,
+  "broll": 5.08,
+  "cut": 7.41,
+  "crop": 16.79,
+  "render": 141.33
+ },
+ "llm": {
+  "provider": "gemini",
+  "calls": [
+   {
+    "prompt": "clean_transcript",
+    "tier": "cheap",
+    "model": "gemini-3.1-flash-lite",
+    "provider": "gemini",
+    "input_tokens": 614,
+    "output_tokens": 5,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "seconds": 1.68,
+    "attempt": 1,
+    "cost_usd": 6.3e-05
+   },
+   {
+    "prompt": "direct",
+    "tier": "smart",
+    "model": "gemini-3.5-flash",
+    "provider": "gemini",
+    "input_tokens": 1522,
+    "output_tokens": 362,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "seconds": 2.48,
+    "attempt": 1,
+    "cost_usd": 0.001362
+   },
+   {
+    "prompt": "metadata",
+    "tier": "cheap",
+    "model": "gemini-3.1-flash-lite",
+    "provider": "gemini",
+    "input_tokens": 273,
+    "output_tokens": 118,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "seconds": 1.39,
+    "attempt": 1,
+    "cost_usd": 7.4e-05
+   }
+  ],
+  "total_cost_usd": 0.001499,
+  "total_input_tokens": 2409,
+  "total_output_tokens": 485,
+  "total_cache_read_tokens": 0
+ },
+ "wall_seconds": 183.9,
+ "source_sha256": null
+}

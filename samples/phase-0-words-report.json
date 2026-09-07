@@ -1,0 +1,93 @@
+{
+  "words": 37,
+  "non_monotonic_pairs": 0,
+  "fatal_violations": 0,
+  "ok": true,
+  "source": {
+    "language": "ru",
+    "backend": "faster_whisper",
+    "model": "small"
+  },
+  "summary": {
+    "words": 37,
+    "first_start": 0.3,
+    "last_end": 19.47,
+    "covered_s": 19.17,
+    "speech_s": 16.86,
+    "silence_s": 2.31,
+    "speech_ratio_of_span": 0.8795,
+    "speech_ratio_of_source": null,
+    "source_duration": null
+  },
+  "gaps": {
+    "count": 36,
+    "median_ms": 0.0,
+    "p90_ms": 180.0,
+    "max_ms": 1090.0,
+    "min_ms": 0.0,
+    "negative": 0,
+    "max_at": {
+      "i": 23,
+      "prev": {
+        "idx": 23,
+        "text": "других",
+        "start": 9.98,
+        "end": 11.1
+      },
+      "next": {
+        "idx": 24,
+        "text": "целей.",
+        "start": 12.19,
+        "end": 13.57
+      }
+    }
+  },
+  "checks": {
+    "monotonic": {
+      "title": "монотонность: end[i] <= start[i+1]",
+      "violations": 0,
+      "worst": []
+    },
+    "starts_nondecreasing": {
+      "title": "неубывание стартов",
+      "violations": 0,
+      "worst": []
+    },
+    "positive_duration": {
+      "title": "положительная длительность",
+      "violations": 0,
+      "worst": []
+    },
+    "idx_sequential": {
+      "title": "idx == позиция в списке",
+      "violations": 0,
+      "worst": []
+    },
+    "short_words": {
+      "title": "слишком короткие (< 40 мс)",
+      "violations": 0,
+      "worst": []
+    },
+    "long_words": {
+      "title": "слишком длинные (> 3.0 с)",
+      "violations": 0,
+      "worst": []
+    },
+    "negative_time": {
+      "title": "отрицательные тайминги",
+      "violations": 0,
+      "worst": []
+    }
+  },
+  "thresholds": {
+    "tolerance_ms": 0.5,
+    "short_word_ms": 40.0,
+    "long_word_s": 3.0,
+    "fatal_checks": [
+      "monotonic",
+      "starts_nondecreasing",
+      "positive_duration",
+      "idx_sequential"
+    ]
+  }
+}

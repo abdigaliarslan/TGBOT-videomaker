@@ -24,7 +24,7 @@ from src.pipeline.asr import ASRResult, transcribe
 from src.pipeline.crop import autocrop
 from src.pipeline.cut import apply_cuts
 from src.pipeline.director import clean_transcript, direct, make_metadata
-from src.pipeline.probe import MediaInfo, probe
+from src.pipeline.probe import MediaInfo, is_playable, probe
 from src.pipeline.render import arender_remotion, render_ass
 
 log = logging.getLogger(__name__)
@@ -188,6 +188,11 @@ async def process_video(
             apply_cuts(edl, src, cut_path, info=info, cfg=cfg)
         else:
             shutil.copy2(src, cut_path)
+        if not is_playable(cut_path):
+            # Оборванный ffmpeg (упавший воркер, kill) оставляет mp4 без
+            # moov-атома. Дальше он поедет в рендер и упадёт там, где причину
+            # уже не видно.
+            raise JobError("Нарезка оборвалась — файл повреждён. Пришлите видео ещё раз.")
         mark("cut", t)
 
         await _notify(progress, "crop")
@@ -198,6 +203,8 @@ async def process_video(
                 cut_path, work / "vertical.mp4", work_dir=work,
                 out_width=cfg.render_width, out_height=cfg.render_height, cfg=cfg,
             )
+        if not is_playable(staged):
+            raise JobError("Кадрирование оборвалось — файл повреждён. Пришлите видео ещё раз.")
         mark("crop", t)
 
         # ---------------------------------------------------------- рендер
@@ -218,6 +225,18 @@ async def process_video(
             json.dumps(plan.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8"
         )
         (work / "edl.json").write_text(edl.model_dump_json(indent=1), encoding="utf-8")
+        # Слова с таймингами — единственный источник правды о времени (§3). Без них
+        # разбор «подсветка уехала на слово вперёд» упирается в то, что EDL хранит
+        # только индексы, а тайминги живут в памяти процесса и умирают вместе с ним.
+        # Пишем ПОСЛЕ clean_transcript: именно эти слова уехали в режиссёра и рендер.
+        (work / "words.json").write_text(
+            json.dumps(
+                {"language": asr.language, "backend": asr.backend, "model": asr.model,
+                 "words": [w.model_dump() for w in words]},
+                ensure_ascii=False, indent=1,
+            ),
+            encoding="utf-8",
+        )
 
         out_path = work / "result.mp4"
         chosen = backend or cfg.render_backend
