@@ -43,6 +43,11 @@ class Detection:
     y: float
     score: float
     area: float
+    # Размеры бокса нужны отдельно от площади: доля лица меряется по ВЫСОТЕ кадра,
+    # а из area её не вытащить. Значения по умолчанию — чтобы старый код и тесты,
+    # конструирующие Detection только по центру и площади, продолжали работать.
+    w: float = 0.0
+    h: float = 0.0
 
 
 class Detector(Protocol):
@@ -79,6 +84,8 @@ class YuNetDetector:
                     y=float(fy) + float(fh) / 2,
                     score=float(f[-1]),
                     area=float(fw) * float(fh),
+                    w=float(fw),
+                    h=float(fh),
                 )
             )
         return out
@@ -99,7 +106,14 @@ class HaarDetector:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = self._cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(48, 48))
         return [
-            Detection(x=float(x) + w / 2, y=float(y) + h / 2, score=0.5, area=float(w * h))
+            Detection(
+                x=float(x) + w / 2,
+                y=float(y) + h / 2,
+                score=0.5,
+                area=float(w * h),
+                w=float(w),
+                h=float(h),
+            )
             for (x, y, w, h) in faces
         ]
 
