@@ -37,8 +37,10 @@ def edl_with_accent() -> EDL:
     )
 
 
-def plan():
-    return build_plan(edl_with_accent(), "in.mp4", width=1080, height=1920, fps=30)
+def plan(preset: str = "glass"):
+    edl = edl_with_accent()
+    edl.preset = preset
+    return build_plan(edl, "in.mp4", width=1080, height=1920, fps=30)
 
 
 # ------------------------------------------------------------------ время
@@ -115,15 +117,18 @@ def test_accent_word_uses_accent_colour_when_active():
 
 
 def test_shout_word_gets_rotation_and_shout_colour():
-    ass = build_ass(plan())
-    preset = load_preset("glass")
+    # Пресет здесь `bold`: после С4 glass не просит ни поворота, ни «пшика»
+    # (у эталона движения в тексте нет вовсе), и на нём тест проверял бы
+    # отсутствие вместо механики. Механика же нужна тому, кто её заказывает.
+    ass = build_ass(plan("bold"))
+    preset = load_preset("bold")
     last = [line for line in ass.splitlines() if line.startswith("Dialogue:")][-1]
     assert to_ass_colour(preset.colors.shout) in last
     assert "\\frz" in last
 
 
 def test_pop_animation_present_on_active_word():
-    ass = build_ass(plan())
+    ass = build_ass(plan("bold"))
     assert "\\t(0," in ass
 
 
@@ -195,7 +200,9 @@ def test_pop_starts_at_the_word_size_and_returns_to_it(fps):
     Раньше слово ПОЯВЛЯЛОСЬ уже увеличенным и только съезжало вниз — то есть
     скачок на первом же кадре, ровно то, что Ф8 убирала в TSX.
     """
-    p = build_plan(edl_with_accent(), "in.mp4", fps=fps, width=1080, height=1920)
+    edl = edl_with_accent()
+    edl.preset = "bold"  # см. `test_shout_word_gets_rotation_and_shout_colour`
+    p = build_plan(edl, "in.mp4", fps=fps, width=1080, height=1920)
     line = dialogues(p)[0]
     m = re.search(
         r"\\fscx(\d+)\\fscy\1\\t\(0,\d+,\\fscx(\d+)\\fscy\2\)\\t\(\d+,\d+,\\fscx(\d+)", line

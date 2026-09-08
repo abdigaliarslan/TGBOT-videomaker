@@ -36,6 +36,18 @@ export const MIN_ANIM_FRAMES = 8;
 export const animFrames = (ms: number, fps: number): number =>
   Math.max(MIN_ANIM_FRAMES, Math.round((ms / 1000) * fps));
 
+/**
+ * То же, но БЕЗ порога в восемь кадров — для чистой прозрачности.
+ *
+ * `MIN_ANIM_FRAMES` — правило про ДВИЖЕНИЕ: короткий ход не читается как ход и
+ * выглядит щелчком. К проявлению это не относится: у эталона блок появляется за
+ * три кадра и уходит за два (замерено по яркости внутри силуэта глифов —
+ * 0.25 / 0.60 / 1.00), и восьмикадровый пол сделал бы такое появление
+ * невозможным втрое.
+ */
+export const fadeFrames = (ms: number, fps: number): number =>
+  Math.max(1, Math.round((ms / 1000) * fps));
+
 export type SpringConfig = { damping: number; stiffness: number; mass: number };
 
 /**

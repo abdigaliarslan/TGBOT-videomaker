@@ -53,16 +53,21 @@
     "text_light": "#FDFAF2"
   },
   "animation": {
-    "pop_scale": 1.05,
+    "pop_scale": 1.0,
     "pop_ms": 160,
     "spring_damping": 12.0,
     "spring_stiffness": 190.0,
     "spring_mass": 0.7,
-    "block_in_ms": 180,
-    "block_out_ms": 140,
+    "block_in_ms": 100,
+    "block_out_ms": 70,
+    "block_gap_ms": 100,
+    "block_in_zoom": 0.0,
+    "block_shift_px": 0,
+    "block_leave_px": 0,
+    "block_leave_scale": 1.0,
     "accent_scale": 2.3,
     "shout_scale": 2.6,
-    "shout_rotate": -4.0
+    "shout_rotate": 0.0
   },
   "background": "#000000",
   "grade": {

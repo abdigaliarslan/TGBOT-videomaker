@@ -799,6 +799,43 @@ def test_presets_carry_a_contrast_rule():
         assert rule.luma_dark < rule.luma_light
 
 
+def test_glass_blocks_never_overlap_in_time():
+    """С4 DoD: на стыке двух блоков нет кадра, где видны оба.
+
+    Раньше блок уходил ПОСЛЕ своего конца и всё время хвоста лежал на
+    приходящем — блоки идут встык (`a.end == b.start`), стоят в одном месте
+    кадра, и разводить их приходилось ДВИЖЕНИЕМ: уходящий уезжал на собственную
+    высоту. Эталон решает иначе — между блоками у него три кадра без текста
+    вообще (замерено на кадрах 165-167), нахлёста нет ни на одном стыке.
+
+    Здесь проверяется то, от чего это зависит: уход обязан уложиться в
+    собственное время блока и оставить паузу до прихода следующего.
+    """
+    preset = load_preset("glass")
+    a = preset.animation
+    assert a.block_gap_ms > 0, "без паузы блок уходит ПОСЛЕ конца и ложится на следующий"
+
+    plan = build_plan(sample_edl(), "v.mp4", cfg=cfg())
+    fps = plan.fps
+
+    def frames(ms: float) -> int:
+        # Тот же расчёт, что `fadeFrames` в style.ts: пол в один кадр, а не в
+        # восемь — восьмикадровый порог про ДВИЖЕНИЕ, а не про прозрачность.
+        return max(1, round(ms / 1000 * fps))
+
+    gap, out = frames(a.block_gap_ms), frames(a.block_out_ms)
+    for i, block in enumerate(plan.blocks):
+        life = round(block.end * fps) - round(block.start * fps)
+        assert out + gap <= life, (
+            f"блок {i}: уход {out} + пауза {gap} не влезает в его жизнь {life} кадров — "
+            "текст начнёт таять на собственных словах"
+        )
+        if i + 1 < len(plan.blocks):
+            leaves = round(block.end * fps) - gap
+            arrives = round(plan.blocks[i + 1].start * fps)
+            assert leaves <= arrives, f"блоки {i} и {i + 1} пересекаются во времени"
+
+
 def test_glass_word_states_are_on_or_off():
     """С2: сказанное слово не гаснет, будущего не видно вовсе.
 

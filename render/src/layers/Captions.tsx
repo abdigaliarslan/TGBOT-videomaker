@@ -33,6 +33,7 @@ import {
   animFrames,
   animNum,
   easeOut,
+  fadeFrames,
   motionPx,
   popBump,
   rgba,
@@ -377,7 +378,18 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
 
   const startFrame = Math.round(block.start * fps);
   const endFrame = Math.round(block.end * fps);
-  const inFrames = animFrames(a.block_in_ms, fps);
+  // Пауза между блоками (С4). Больше нуля — блок уходит ДО своего конца, и на
+  // экране остаётся пустой промежуток; ноль — прежнее поведение, блок уходит
+  // ПОСЛЕ конца и лежит на следующем всё время нахлёста.
+  //
+  // Эталон делает первое. На кадрах 165-167 в нём нет текста ВООБЩЕ — три кадра
+  // пустого экрана между блоками, и нахлёста нет ни на одном стыке. Дыра,
+  // которой здесь боялись, читается как пауза, а не как сбой, и именно она
+  // снимает причину, по которой уходящий блок приходилось УВОДИТЬ движением:
+  // разводить нечего, два текста больше не встречаются.
+  const gapFrames = fadeFrames(animNum(a, "block_gap_ms", 0), fps);
+  const leavesEarly = animNum(a, "block_gap_ms", 0) > 0;
+  const inFrames = leavesEarly ? fadeFrames(a.block_in_ms, fps) : animFrames(a.block_in_ms, fps);
   // Хвост обязан уложиться В КОМПОЗИЦИЮ. Её длину задаёт `plan.duration`, и она
   // ничего не знает про хвост: длины хвоста нет ни в EDL, ни в плане, её решает
   // рендерер. У последнего блока эталонного ролика end приходится на кадр 441
@@ -389,7 +401,15 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
   // анимация не короче восьми кадров. Настоящее лекарство — продлить
   // композицию на хвост последнего блока, но это `render_plan.py`.
   const room = durationInFrames - 1 - endFrame;
-  const outFrames = room >= MIN_ANIM_FRAMES ? Math.min(blockOutFrames(preset, fps), room) : 0;
+  // Уход ДО конца лежит внутри собственного времени блока, поэтому места в
+  // композиции ему искать не нужно — оговорка про `room` касается только
+  // прежнего режима, где хвост торчал за `end`.
+  const outFrames = leavesEarly
+    ? fadeFrames(a.block_out_ms, fps)
+    : room >= MIN_ANIM_FRAMES
+      ? Math.min(blockOutFrames(preset, fps), room)
+      : 0;
+  const outStart = leavesEarly ? endFrame - gapFrames - outFrames : endFrame;
 
   // Блок появляется от своего начала и уходит ПОСЛЕ своего конца. Раньше он
   // гас за block_out_ms до конца, то есть таял прямо на последнем слове, а
@@ -416,26 +436,21 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
   // то есть правило почти перестаёт работать ровно там, где кадров больше
   // всего. Домножение на outFrames/inFrames делает точку пересечения
   // инвариантной к fps и к пресету: 0.448 / 0.451 / 0.455 на тех же трёх парах.
-  const appear = easeOut(
-    interpolate(frame, [startFrame, startFrame + inFrames], [0, 1], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    }),
-  );
+  const rise = interpolate(frame, [startFrame, startFrame + inFrames], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  // Без нахлёста кривая линейна: показатель падения и `easeOut` разводили две
+  // альфы, лежащие друг на друге, а разводить больше нечего. Замер эталона —
+  // 0.25 / 0.60 / 1.00 за три кадра, то есть практически прямая.
+  const appear = leavesEarly ? rise : easeOut(rise);
   const falloff = animNum(a, "block_leave_falloff", 1.35) * (outFrames / inFrames);
+  const fall = interpolate(frame, [outStart, outStart + outFrames], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
   const disappear =
-    outFrames === 0
-      ? 1
-      : Math.pow(
-          1 -
-            easeOut(
-              interpolate(frame, [endFrame, endFrame + outFrames], [0, 1], {
-                extrapolateLeft: "clamp",
-                extrapolateRight: "clamp",
-              }),
-            ),
-          falloff,
-        );
+    outFrames === 0 ? 1 : leavesEarly ? 1 - fall : Math.pow(1 - easeOut(fall), falloff);
   const presence = Math.min(appear, disappear);
   if (presence <= 0) return null;
 
@@ -452,14 +467,24 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
   // тем же метрикам шрифта и не зависит ни от кегля, ни от числа строк —
   // поэтому она и есть гарантия, что блоки разошлись. Пресетное число остаётся
   // нижней границей: оно работает там, где прямоугольника нет.
-  const leave = Math.max(
-    motionPx(a, "block_leave_px", Math.round(preset.font.size * 0.73)),
-    block.rect ? block.rect.height : 0,
-  );
+  // Пол по высоте блока — защита от НАЛОЖЕНИЯ, а не элемент стиля: он разводил
+  // уходящий и приходящий текст, лежащие в одном месте кадра. Без нахлёста
+  // (`block_gap_ms`) разводить нечего, и пол снимается вместе с ним, иначе блок
+  // уезжал бы на свою высоту вообще без причины.
+  const leave = leavesEarly
+    ? motionPx(a, "block_leave_px", Math.round(preset.font.size * 0.73))
+    : Math.max(
+        motionPx(a, "block_leave_px", Math.round(preset.font.size * 0.73)),
+        block.rect ? block.rect.height : 0,
+      );
   const leaveDir = block.position === "top" ? -1 : 1;
   const offsetY = (1 - appear) * shift + (1 - disappear) * leave * leaveDir;
   const leaveScale = animNum(a, "block_leave_scale", 0.9);
-  const zoom = (0.965 + appear * 0.035) * (leaveScale + (1 - leaveScale) * disappear);
+  // Наезд на входе был константой в компоненте — теперь число темы (С4): у
+  // эталона ширина слова с первого же видимого кадра финальная, масштабной
+  // анимации нет вовсе.
+  const inZoom = animNum(a, "block_in_zoom", 0.035);
+  const zoom = (1 - inZoom + appear * inZoom) * (leaveScale + (1 - leaveScale) * disappear);
   const look = lookFor(preset, (block as PlanBlock & { bg_luma?: number | null }).bg_luma);
   // Прямоугольник блока посчитан в Python по этим же метрикам: строка в бюджет
   // уложена, и ограничивать ширину здесь незачем. План без прямоугольника

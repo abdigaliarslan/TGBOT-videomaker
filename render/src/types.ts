@@ -134,6 +134,10 @@ export type Preset = {
     block_overlap_min_ms?: number;
     block_leave_falloff?: number;
     block_leave_scale?: number;
+    /** Пауза с пустым экраном между блоками; > 0 — блок уходит ДО конца (С4). */
+    block_gap_ms?: number;
+    /** Наезд блока на входе; 0 — масштабной анимации нет вовсе (С4). */
+    block_in_zoom?: number;
     /** Ken Burns на вставке: наезд и сползание за всю жизнь картинки (М3). */
     kb_scale?: number;
     kb_shift_ratio?: number;
