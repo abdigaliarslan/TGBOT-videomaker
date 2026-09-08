@@ -80,6 +80,11 @@ class PlanBlock:
     # ведёт прозрачность панели и цвет текста, чтобы контраст взял порог (Ф9).
     # `None` — никто не мерил, пресет играет как играл.
     bg_luma: float | None = None
+    # Носит ли ЭТОТ блок матовое стекло. Решение приезжает из EDL, потому что
+    # оно режиссёрское, а не вычислимое: см. `CaptionBlock.panel`. Место под
+    # плашку (паддинги и рамка) зарезервировано у ВСЕХ блоков одинаково, иначе
+    # текст прыгал бы на её высоту, а Python и Chromium разошлись бы в замере.
+    panel: bool = False
     # Путь блока, привязанного к голове (М2): смещение от прямоугольника покоя в
     # пикселях кадра, по кадрам от `start`. Считает Python — вместе с
     # предохранителями и плавным откатом, потому что рендерер решений не
@@ -144,6 +149,7 @@ class RenderPlan:
                     lines=[[PlanWord(**w) for w in line] for line in b["lines"]],
                     rect=_rect_from(b.get("rect")),
                     bg_luma=b.get("bg_luma"),
+                    panel=bool(b.get("panel", False)),
                     anchor_path=b.get("anchor_path"),
                 )
                 for b in data.get("blocks", [])
@@ -184,6 +190,7 @@ class RenderPlan:
                     "lines": [[asdict(w) for w in line] for line in b.lines],
                     "rect": b.rect.to_dict() if b.rect else None,
                     "bg_luma": b.bg_luma,
+                    "panel": b.panel,
                     "anchor_path": b.anchor_path,
                 }
                 for b in self.blocks
@@ -776,6 +783,7 @@ def build_plan(
                 lines=item.lines,
                 rect=rect,
                 bg_luma=getattr(item.block, "bg_luma", None),
+                panel=bool(getattr(item.block, "panel", False)),
                 anchor_path=anchor_path_of(item, rect),
             )
         )

@@ -45,6 +45,15 @@ export type PlanBlock = {
   lines: PlanWord[][];
   /** Куда блок попадёт в кадре вместе с панелью. */
   rect?: Rect | null;
+  /** Средняя яркость кадра под блоком, 0..1. Меряет Python (Ф9). */
+  bg_luma?: number | null;
+  /**
+   * Носит ли ЭТОТ блок матовое стекло. В эталоне плашка есть у двух блоков из
+   * тринадцати, и решение о ней режиссёрское — правило по фону измерить не
+   * удалось. Место под неё зарезервировано у всех блоков одинаково, поэтому
+   * флаг меняет только вид: заливку, размытие и цвет рамки.
+   */
+  panel?: boolean;
   /**
    * Путь блока, привязанного к голове (М2): смещение от прямоугольника покоя в
    * пикселях кадра, по кадрам от `start`. Считает Python вместе с
@@ -108,6 +117,9 @@ export type Preset = {
     border_color: string;
     border_opacity: number;
     border_width: number;
+    /** Матовое стекло: украшение помеченных блоков, не предохранитель Ф9. */
+    glass_color: string;
+    glass_opacity: number;
   };
   caption: {
     position: Position;
@@ -243,6 +255,8 @@ export const EMPTY_PLAN: RenderPlan = {
       border_color: "#FFFFFF",
       border_opacity: 0.14,
       border_width: 1,
+      glass_color: "#FFFFFF",
+      glass_opacity: 0,
     },
     caption: {
       position: "bottom",

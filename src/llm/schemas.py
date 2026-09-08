@@ -43,6 +43,9 @@ DIRECT_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
+                # `panel` в required НЕТ намеренно: его верное значение — `false`
+                # у одиннадцати блоков из тринадцати, и забытое поле не стоит
+                # ретрая. Отсутствие читается как «плашки нет».
                 "required": ["words", "accent_word", "accent", "position", "follow_face"],
                 "properties": {
                     "words": {
@@ -77,6 +80,15 @@ DIRECT_SCHEMA: dict[str, Any] = {
                     "position": {
                         "type": "string",
                         "enum": ["top", "center", "bottom", "auto"],
+                    },
+                    "panel": {
+                        "type": "boolean",
+                        "description": (
+                            "Под блоком лежит плашка матового стекла. Приём для "
+                            "ДЛИННОЙ пояснительной реплики: не больше двух блоков "
+                            "на ролик, лишние мы снимаем сами. У остальных блоков "
+                            "фона нет вообще."
+                        ),
                     },
                 },
             },

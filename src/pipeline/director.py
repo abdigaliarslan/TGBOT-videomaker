@@ -22,6 +22,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import (
     ANCHOR_TRACK_MAX,
+    PANEL_MAX,
     BLOCK_MAX_WORDS,
     EDL,
     AnchorTrack,
@@ -452,6 +453,7 @@ def cover_missing(
                     words=b.words[k : k + BLOCK_MAX_WORDS],
                     position=b.position,
                     anchor_track=b.anchor_track,
+                    panel=b.panel,
                 )
             )
     for b in out:
@@ -559,6 +561,7 @@ def edl_from_plan(
                 # (§0). Заодно модели нечего сломать: диапазонов, которые она
                 # может нарушить, у неё просто нет.
                 anchor_track=AnchorTrack() if raw.get("follow_face") else None,
+                panel=bool(raw.get("panel")),
             )
         )
 
@@ -584,6 +587,18 @@ def edl_from_plan(
         log.info(
             "привязка к голове: модель попросила %d блоков, оставлено %d",
             len(anchored), ANCHOR_TRACK_MAX,
+        )
+
+    # Плашка — по тому же принципу: перебор с приёмом, а не ошибка формы.
+    # Поставить фон всем блокам значит вернуть ту самую подложку, от которой мы
+    # уходили; в эталоне её носят два блока из тринадцати.
+    panelled = [b for b in captions if b.panel]
+    for extra in panelled[PANEL_MAX:]:
+        extra.panel = False
+    if len(panelled) > PANEL_MAX:
+        log.info(
+            "плашка: модель попросила %d блоков, оставлено %d",
+            len(panelled), PANEL_MAX,
         )
 
     return EDL(

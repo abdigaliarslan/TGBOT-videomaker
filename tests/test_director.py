@@ -427,3 +427,62 @@ def test_edl_from_plan_fills_framing():
     edl = edl_from_plan(ws, 5.0, plan, cfg=cfg())
     assert {c.framing for c in edl.kept_cuts} <= {"wide", "tight"}
     assert any(c.framing == "tight" for c in edl.kept_cuts)
+
+
+def test_the_panel_is_the_directors_call_and_stays_rare():
+    """Плашка — не у всех блоков, и решает про неё режиссёр.
+
+    В эталоне матовое стекло носят два блока из тринадцати, и правило, по
+    которому монтажёр его ставит, измерить не удалось: ни яркость фона под
+    блоком, ни его суетливость плашечные блоки не выделяют (по суетливости они
+    заняли 1-е и 11-е места из 13). Значит это решение, а не следствие, — и оно
+    приходит из плана, как `position` и `follow_face`.
+    """
+    ws = mk([(f"сл{i}", i * 0.4, i * 0.4 + 0.3) for i in range(6)])
+    plan = {
+        "hook_end_word": None,
+        "drop_words": [],
+        "blocks": [
+            {"words": [0, 1, 2], "accent_word": 1, "accent": "accent",
+             "position": "auto", "panel": True},
+            {"words": [3, 4, 5], "accent_word": 4, "accent": "accent",
+             "position": "auto"},
+        ],
+    }
+    edl = edl_from_plan(ws, 3.0, plan, cfg=cfg())
+    assert validate_edl(edl) == []
+    assert [b.panel for b in edl.captions] == [True, False]
+
+
+def test_a_panel_on_every_block_is_trimmed_to_the_cap():
+    """Плашка всем блокам — это снова тот самый фон, который просили убрать.
+
+    Потолок держим здесь, а не ретраем валидатора: перебор с приёмом — не ошибка
+    формы, и снять его дешевле, чем гонять модель по кругу. Остаются ПЕРВЫЕ, как
+    и у привязки к голове.
+    """
+    ws = mk([(f"сл{i}", i * 0.4, i * 0.4 + 0.3) for i in range(9)])
+    plan = {
+        "hook_end_word": None,
+        "drop_words": [],
+        "blocks": [
+            {"words": [0, 1, 2], "accent_word": 1, "accent": "accent",
+             "position": "auto", "panel": True},
+            {"words": [3, 4, 5], "accent_word": 4, "accent": "accent",
+             "position": "auto", "panel": True},
+            {"words": [6, 7, 8], "accent_word": 7, "accent": "accent",
+             "position": "auto", "panel": True},
+        ],
+    }
+    edl = edl_from_plan(ws, 4.5, plan, cfg=cfg())
+    assert validate_edl(edl) == []
+    assert [b.panel for b in edl.captions] == [True, True, False]
+
+
+def test_a_plan_without_the_panel_field_means_no_panel():
+    """Поля нет — плашки нет. Забытое поле не стоит ретрая: `false` верен почти
+    всегда, и требовать его от модели значит платить за очевидное."""
+    ws = mk([(f"сл{i}", i * 0.4, i * 0.4 + 0.3) for i in range(3)])
+    plan = {"hook_end_word": None, "drop_words": [], "blocks": [{"words": [0, 1, 2]}]}
+    edl = edl_from_plan(ws, 2.0, plan, cfg=cfg())
+    assert [b.panel for b in edl.captions] == [False]

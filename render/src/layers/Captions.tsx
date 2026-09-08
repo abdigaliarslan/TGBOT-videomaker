@@ -209,6 +209,11 @@ type Look = { panelOpacity: number; text: string };
  * test_contrast_rule_has_a_lever_on_every_background.
  *
  * `bg_luma = null` — никто не мерил, пресет играет как играл.
+ *
+ * Здесь живёт только ЗАСЛОНКА — тёмная подложка, которую правило поднимает ради
+ * порога. Матовое стекло (`panel.glass_*`) к читаемости отношения не имеет и
+ * считается отдельно: в эталоне оно не коррелирует ни с яркостью фона, ни с его
+ * суетливостью, то есть это украшение, а не предохранитель (STYLE_PLAN §1.4).
  */
 const lookFor = (preset: Preset, bgLuma: number | null | undefined): Look => {
   const base: Look = { panelOpacity: preset.panel.opacity, text: preset.colors.active };
@@ -485,7 +490,12 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
   // анимации нет вовсе.
   const inZoom = animNum(a, "block_in_zoom", 0.035);
   const zoom = (1 - inZoom + appear * inZoom) * (leaveScale + (1 - leaveScale) * disappear);
-  const look = lookFor(preset, (block as PlanBlock & { bg_luma?: number | null }).bg_luma);
+  // Плашка — не у всех блоков (STYLE_PLAN §1.4): в эталоне её носят два блока
+  // из тринадцати, остальные держит одна тень. Стекло (размытие и рамка) идёт
+  // только с флагом; заливка может подняться и без него, если правило контраста
+  // не взяло порог, — это закон, а не стиль.
+  const glass = p.enabled && (block as PlanBlock).panel === true;
+  const look = lookFor(preset, (block as PlanBlock).bg_luma);
   // Прямоугольник блока посчитан в Python по этим же метрикам: строка в бюджет
   // уложена, и ограничивать ширину здесь незачем. План без прямоугольника
   // (пресет без метрик шрифта) — другое дело: там перенос по символам, ширину
@@ -515,13 +525,22 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
         gap: Math.round(preset.font.size * (preset.caption.line_height - 1)),
         padding: p.enabled ? `${p.padding_y}px ${p.padding_x}px` : 0,
         borderRadius: p.enabled ? p.radius : 0,
-        background: p.enabled ? rgba(p.color, look.panelOpacity) : "transparent",
-        backdropFilter: p.enabled && p.blur > 0 ? `blur(${p.blur}px) saturate(1.4)` : undefined,
-        WebkitBackdropFilter:
-          p.enabled && p.blur > 0 ? `blur(${p.blur}px) saturate(1.4)` : undefined,
+        // Два разных слоя в одном свойстве: снизу стекло (стиль, только у
+        // помеченных блоков), сверху заслонка (закон Ф9, у любого блока, где
+        // правило не взяло порог). Обычно ненулевой ровно один из них.
+        backgroundColor: glass ? rgba(p.glass_color, p.glass_opacity) : "transparent",
+        backgroundImage: p.enabled
+          ? `linear-gradient(${rgba(p.color, look.panelOpacity)}, ${rgba(p.color, look.panelOpacity)})`
+          : undefined,
+        backdropFilter: glass && p.blur > 0 ? `blur(${p.blur}px) saturate(1.4)` : undefined,
+        WebkitBackdropFilter: glass && p.blur > 0 ? `blur(${p.blur}px) saturate(1.4)` : undefined,
+        // Рамку РИСУЕМ всегда, когда тема с панелью, — просто прозрачной там,
+        // где стекла нет. Ширина рамки входит в замер `caption_rect` у всех
+        // блоков одинаково, и убрать её у части из них значило бы развести
+        // Python с браузером на `border_width` пикселей.
         border:
           p.enabled && p.border_width > 0
-            ? `${p.border_width}px solid ${rgba(p.border_color, p.border_opacity)}`
+            ? `${p.border_width}px solid ${rgba(p.border_color, glass ? p.border_opacity : 0)}`
             : undefined,
         opacity: presence,
         transform: `translateY(${offsetY}px) scale(${zoom})`,

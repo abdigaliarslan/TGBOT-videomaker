@@ -911,15 +911,23 @@ def test_glass_panel_is_a_safeguard_and_not_a_background():
     0.183, то есть на обычной комнатной стене, и субтитр чернел бы посреди
     ролика.
 
-    Поэтому панель осталась включённой, но её стилевая часть обнулена: базовая
-    прозрачность и обе опорные — нули. Видно её ровно там, где белый физически
-    не читается, и ровно настолько, насколько требует порог.
+    Поэтому ЗАСЛОНКА (`panel.color`/`opacity`) осталась включённой, но её
+    стилевая часть обнулена: базовая прозрачность и обе опорные — нули. Видно её
+    ровно там, где белый физически не читается, и ровно настолько, насколько
+    требует порог.
+
+    Матовое стекло (`glass_*`, `blur`, рамка) — это ДРУГОЙ слой, украшение, и
+    оно приходит только к блокам с флагом `panel`. Здесь проверяется, что оно
+    не подменяет собой заслонку: цвет заслонки обязан остаться тёмным, иначе у
+    правила контраста пропадёт рычаг.
     """
     preset = load_preset("glass")
     assert preset.panel.enabled, "панель — рычаг контраста, выключать её нельзя"
     assert preset.panel.opacity == 0.0, "базовая прозрачность — это фон без замера"
-    assert preset.panel.blur == 0, "размытие видно даже при нулевой заливке"
-    assert preset.panel.border_opacity == 0.0, "рамка обводит невидимую панель"
+    assert _luminance(preset.panel.color) < 0.05, (
+        "заслонка обязана быть тёмной: светлой белый текст не спасти"
+    )
+    assert preset.panel.glass_opacity > 0.0, "стекло у темы есть — его носят помеченные блоки"
 
     # Тёмный фон — панели нет вовсе. Кадр пользователя лежит здесь.
     assert _panel_opacity(preset, 0.05) == 0.0
@@ -1148,3 +1156,35 @@ def test_chromium_draws_the_block_the_plan_promised(name: str):
         box = measured["boxes"][key]
         assert box["width"] == pytest.approx(w, abs=2.0), (name, key, "ширина")
         assert box["height"] == pytest.approx(h, abs=2.0), (name, key, "высота")
+
+
+def test_the_panel_flag_survives_the_round_trip_to_the_plan():
+    """Флаг плашки обязан доехать до рендерера — и вернуться из сохранённого листа.
+
+    Инвариант 4 (перерендер того же EDL даёт то же видео) держится, только пока
+    решение живёт в данных. Плашка — решение режиссёрское, вычислить его заново
+    нельзя: в эталоне оно не выводится ни из яркости фона, ни из его суетливости.
+    """
+    edl = sample_edl()
+    edl.captions[0].panel = True
+    plan = build_plan(edl, "v.mp4", cfg=cfg())
+    assert [b.panel for b in plan.blocks] == [True, False]
+
+    again = RenderPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+    assert [b.panel for b in again.blocks] == [True, False]
+
+
+def test_a_panelled_block_takes_the_same_room_as_a_bare_one():
+    """Место под плашку зарезервировано у ВСЕХ блоков одинаково.
+
+    Иначе текст прыгал бы на высоту паддингов между соседними блоками, а Python
+    и Chromium разошлись бы в замере прямоугольника: сверки в `test_geometry`
+    меряют одну геометрию на всю тему, а не по блокам. Поэтому флаг меняет
+    только вид — заливку, размытие и цвет рамки, — но не раскладку.
+    """
+    bare = build_plan(sample_edl(), "v.mp4", cfg=cfg())
+    edl = sample_edl()
+    edl.captions[0].panel = True
+    glass = build_plan(edl, "v.mp4", cfg=cfg())
+    for a, b in zip(bare.blocks, glass.blocks):
+        assert a.rect == b.rect
