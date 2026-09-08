@@ -14,7 +14,16 @@
  */
 
 import React from "react";
-import { Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
+import {
+  Img,
+  OffthreadVideo,
+  Sequence,
+  interpolate,
+  spring,
+  staticFile,
+  useCurrentFrame,
+  useVideoConfig,
+} from "remotion";
 import type { PlanBroll, Preset, Rect } from "../types";
 import { MIN_ANIM_FRAMES, animFrames, animNum, easeOut, motionPx, springFrames } from "../style";
 
@@ -56,6 +65,39 @@ const springOf = (a: Preset["animation"]) => ({
  */
 const FULL_PUSH = 1.06;
 const INSET_POP = 0.72;
+
+/**
+ * Содержимое вставки: кадр или клип (М4). Отличается только элементом — стиль,
+ * геометрия и движение у обоих одни.
+ *
+ * Клип живёт внутри `<Sequence>`, потому что его время обязано отсчитываться от
+ * начала ВСТАВКИ, а не от начала композиции: без сдвига на 15-й секунде ролика
+ * `OffthreadVideo` показал бы 15-ю секунду клипа, которого столько нет.
+ * `layout="none"` — чтобы Sequence не подкладывала свой `AbsoluteFill` и не
+ * ломала абсолютное позиционирование слоя Ken Burns.
+ *
+ * `trimBefore` (вход в клип) считает Python и кладёт в план: выбирать кадр —
+ * решение, а рендерер решений не принимает (§0).
+ */
+const Media: React.FC<{
+  item: PlanBroll;
+  startFrame: number;
+  style: React.CSSProperties;
+}> = ({ item, startFrame, style }) => {
+  const { fps } = useVideoConfig();
+  const src = staticFile(item.asset as string);
+  if (item.kind !== "video") return <Img src={src} style={style} />;
+  return (
+    <Sequence from={startFrame} layout="none">
+      <OffthreadVideo
+        src={src}
+        muted
+        trimBefore={Math.round((item.asset_start ?? 0) * fps)}
+        style={style}
+      />
+    </Sequence>
+  );
+};
 
 const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) => {
   const frame = useCurrentFrame();
@@ -205,12 +247,17 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
           willChange: "transform",
         }}
       >
-        {isFull ? (
-          // Полный кадр: `cover` здесь режет по-крупному и это не устранить
+        {isFull && item.kind !== "video" ? (
+          // Полный кадр ФОТО: `cover` здесь режет по-крупному и это не устранить
           // пропорцией карточки — сток отдаёт 2:3, кадр 9:16, и максимум из
           // (1080/800, 1920/1200) = 1.6 уводит за края по 100 px исходника с
           // каждой стороны, 15.6 % ширины. Поэтому объект вписывается целиком, а
           // поля закрывает размытая копия того же кадра.
+          //
+          // Для клипа этот приём не берём: у Pexels `orientation=portrait` — это
+          // 1080x1920, то есть ровно кадр, резать почти нечего. А подложка стоила
+          // бы ВТОРОГО декодирования того же клипа на каждом кадре рендера, при
+          // том что М4 и так платит одним лишним видеопотоком.
           <>
             <Img
               src={staticFile(item.asset)}
@@ -242,9 +289,12 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
           // и края уходят за него — это цена движения, а не постоянный кроп.
           // Если источник всё же другой пропорции, смотрим выше центра: сток
           // кладёт объект в верхнюю треть кадра.
-          <Img
-            src={staticFile(item.asset)}
+          <Media
+            item={item}
+            startFrame={startFrame}
             style={{
+              position: "absolute",
+              inset: 0,
               width: "100%",
               height: "100%",
               objectFit: "cover",

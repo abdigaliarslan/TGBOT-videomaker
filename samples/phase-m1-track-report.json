@@ -1,0 +1,29 @@
+{
+ "hits": {
+  "video": "samples/.work-phase-m1/vertical.mp4",
+  "frame": [
+   1080,
+   1920
+  ],
+  "analyzed_height": 1138,
+  "detector": "yunet",
+  "frames_checked": 149,
+  "frames_without_face": 0,
+  "hits": 149,
+  "hit_rate": 1.0,
+  "misses": []
+ },
+ "jitter": {
+  "samples": 445,
+  "window_frames": 24,
+  "static_speed_px_per_frame": 1.5,
+  "static_samples": 62,
+  "static_share": 0.1393258426966292,
+  "static_median_px": 0.636,
+  "static_max_px": 1.976,
+  "overall_median_px": 4.147,
+  "overall_max_px": 11.244
+ },
+ "fps": 24,
+ "points": 446
+}

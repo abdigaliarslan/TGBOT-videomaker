@@ -76,6 +76,16 @@ from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL
 from src.core.preset import Crop, Grade, Preset, load_preset
 from src.core.proc import ffmpeg
+from src.core.track import (
+    MISSING_CONF,
+    REF_HEIGHT,
+    REF_WIDTH,
+    FaceTrack,
+    TrackPoint,
+    fill_gaps as fill_track_gaps,
+    resample,
+    smooth,
+)
 from src.pipeline.probe import MediaInfo, probe
 
 log = logging.getLogger(__name__)
@@ -982,6 +992,133 @@ def plan_segments(
     return segments
 
 
+# --------------------------------------------------------------------------- трек как данные
+
+
+def window_at(seg: Segment, t: float, *, frame_w: int, frame_h: int) -> tuple[int, int, int, int]:
+    """Окно кропа на момент `t` внутри куска: (x, y, w, h) в пикселях исходника.
+
+    Повторяет то, что реально сделает ffmpeg, а не то, что задумано. Отсюда две
+    неочевидности:
+
+    1. Окно во весь кадр — это ОТСУТСТВИЕ фильтра `crop` (`build_crop_filter`
+       возвращает пустую строку), то есть окно (0, 0, кадр). Взять `seg.xs[0]`
+       было бы неверно: там лежит зажатая клампом позиция, которой в графе нет.
+    2. `sendcmd` — ступенька, а не интерполяция: значение держится от своей
+       команды до следующей. Поэтому здесь поиск последней команды до `t`, а не
+       линейное смешивание соседних.
+    """
+    if seg.win_w >= frame_w and seg.win_h >= frame_h:
+        return 0, 0, frame_w, frame_h
+    if not seg.times:
+        return seg.xs[0], seg.ys[0], seg.win_w, seg.win_h
+    i = 0
+    for j, cmd_t in enumerate(seg.times):
+        if cmd_t <= t + 1e-9:
+            i = j
+        else:
+            break
+    return seg.xs[i], seg.ys[i], seg.win_w, seg.win_h
+
+
+def project_track(
+    track: Track,
+    segments: Sequence[Segment],
+    *,
+    info: MediaInfo,
+    fps: int,
+    duration: float | None = None,
+    min_cutoff: float = 1.0,
+    beta: float = 0.007,
+) -> FaceTrack:
+    """Трек в пикселях исходника → нормализованный трек выходного кадра (М1).
+
+    Порядок обязателен и он ровно такой, как в MOTION_PLAN: сначала заполняются
+    пропуски детекции, потом ряд пересчитывается на кадровую сетку, и только
+    после этого сглаживается. Сглаживать до пересчёта нельзя — one euro ведёт
+    срез от частоты, а у проб она в пять раз ниже кадровой.
+
+    Про резы отдельно: их здесь нет и быть не должно. `autocrop` читает уже
+    нарезанное видео, поэтому `track.times` с самого начала лежат в выходном
+    времени — та самая ловушка «применить трек до резов» закрыта не кодом, а
+    местом вызова.
+
+    Пустой результат (лиц не нашли вовсе) — законный: возвращается трек без
+    точек, а не выдуманный центр кадра.
+    """
+    if not track.times or not segments:
+        return FaceTrack(fps=fps, detector=track.detector, analyzed=track.analyzed)
+    if not any(f is not None for f in track.faces):
+        log.info("трек не сохранён: лиц не найдено ни в одной пробе")
+        return FaceTrack(fps=fps, detector=track.detector, analyzed=track.analyzed)
+
+    def segment_at(t: float) -> Segment:
+        for seg in segments:
+            if seg.start - 1e-6 <= t < seg.end - 1e-6:
+                return seg
+        return segments[-1] if t >= segments[-1].start else segments[0]
+
+    # --- 1. пробы в нормализованные координаты выходного кадра
+    cx: list[float | None] = []
+    cy: list[float | None] = []
+    fh: list[float | None] = []
+    conf: list[float] = []
+    for t, face in zip(track.times, track.faces):
+        if face is None:
+            cx.append(None)
+            cy.append(None)
+            fh.append(None)
+            conf.append(MISSING_CONF)
+            continue
+        seg = segment_at(t)
+        wx, wy, ww, wh = window_at(seg, t, frame_w=info.width, frame_h=info.height)
+        cx.append((face.x - wx) / ww)
+        cy.append((face.y - wy) / wh)
+        fh.append(face.h / wh)
+        conf.append(_clamp(face.score, 0.0, 1.0))
+
+    # --- 2. пропуски: внутри разрыва линейно, по краям удержанием
+    cx_f, cy_f, fh_f = fill_track_gaps(cx), fill_track_gaps(cy), fill_track_gaps(fh)
+
+    # --- 3. на кадровую сетку выходного ролика
+    total = duration if duration is not None else info.duration
+    frames = max(1, int(round(total * fps)))
+    at = [i / fps for i in range(frames)]
+    cx_r = resample(track.times, cx_f, at)
+    cy_r = resample(track.times, cy_f, at)
+    fh_r = resample(track.times, fh_f, at)
+    conf_r = resample(track.times, conf, at)
+
+    # --- 4. сглаживание. Только геометрия: уверенность не сигнал положения, и
+    # размазывать провал в дырке значит прятать его от предохранителей М2.
+    # `scale` обязателен: `beta` умножается на скорость, поэтому в долях кадра
+    # стартовое 0.007 не работает вовсе — см. REF_WIDTH в src/core/track.py.
+    euro = {"fps": fps, "min_cutoff": min_cutoff, "beta": beta}
+    cx_s = smooth(cx_r, scale=REF_WIDTH, **euro)
+    cy_s = smooth(cy_r, scale=REF_HEIGHT, **euro)
+    fh_s = smooth(fh_r, scale=REF_HEIGHT, **euro)
+
+    points = [
+        TrackPoint(
+            f=i,
+            cx=_clamp(cx_s[i], -1.0, 2.0),
+            cy=_clamp(cy_s[i], -1.0, 2.0),
+            h=_clamp(fh_s[i], 0.0, 4.0),
+            conf=_clamp(conf_r[i], 0.0, 1.0),
+        )
+        for i in range(frames)
+    ]
+    weak = sum(1 for p in points if p.conf < 0.5)
+    log.info(
+        "трек лица: %d точек при %d fps, слабых (conf<0.5) %d (%.0f %%), детектор=%s на %dx%d",
+        len(points), fps, weak, 100 * weak / max(1, len(points)),
+        track.detector, track.analyzed[0], track.analyzed[1],
+    )
+    return FaceTrack(
+        fps=fps, points=points, detector=track.detector, analyzed=track.analyzed
+    )
+
+
 # --------------------------------------------------------------------------- ffmpeg
 
 
@@ -1161,11 +1298,17 @@ def autocrop(
     crf: int = 18,
     cfg: Settings | None = None,
     work_dir: str | Path | None = None,
+    track_out: str | Path | None = None,
 ) -> Path:
     """Горизонтальное (или любое) видео → вертикальное 9:16 с лицом в кадре.
 
     `framing` — интервалы крупности в выходном времени, см. `framing_spans`.
     Не передали — весь ролик снимается одной крупностью `wide`.
+
+    `track_out` — куда положить трек лица (М1). Трек считается здесь не потому,
+    что это удобно, а потому, что только здесь известны окна кропа: без них
+    координаты выходного кадра не посчитать. Не передали — трек не сохраняется,
+    поведение как до М1.
 
     Оба необязательных входа — `preset` и `framing` — умеют деградировать молча, и
     это уже стоило продукту всей Ф6: вызовы в `pipeline/job.py` и `worker/tasks.py`
@@ -1222,6 +1365,17 @@ def autocrop(
         segments, frame_w=info.width, frame_h=info.height,
         out_w=out_w, out_h=out_h, grade=grade, cmd_file=cmd_file,
     )
+    if track_out is not None:
+        out_fps = int(round(info.fps)) if info.fps and info.fps > 0 else cfg.render_fps
+        face_track = project_track(
+            track, segments, info=info, fps=out_fps,
+            min_cutoff=preset.crop.track_min_cutoff, beta=preset.crop.track_beta,
+        )
+        Path(track_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(track_out).write_text(
+            face_track.model_dump_json(indent=1), encoding="utf-8"
+        )
+
     _log_framing(track, segments, preset.crop, info=info)
     log.info(
         "автокроп: кусков %d [%s] → %dx%d, цветокор=%s, детектор=%s, проб=%d",

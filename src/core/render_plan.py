@@ -26,6 +26,7 @@ from typing import Any, Literal, Sequence
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, Emphasis, Timeline
 from src.core.geometry import (
+    CAPTION_POSITIONS,
     FontMetrics,
     Rect,
     block_rect,
@@ -33,6 +34,7 @@ from src.core.geometry import (
     broll_rect,
     caption_positions,
     caption_text_width,
+    caption_zone,
     emphasis_size,
     line_box_height,
     line_gap,
@@ -96,6 +98,10 @@ class PlanBroll:
     # Направление медленного наезда, −1 или 1 (М3). Приезжает из EDL, чтобы
     # перерендер того же листа дал ровно то же видео.
     kb_dir: int = 1
+    # Фото или видео (М4) и с какой секунды играть клип. У фото `asset_start`
+    # всегда 0: рендерер не выбирает кадр сам, ему говорят.
+    kind: str = "photo"
+    asset_start: float = 0.0
 
 
 @dataclass(slots=True)
@@ -144,6 +150,8 @@ class RenderPlan:
                     query=x.get("query", ""),
                     rect=_rect_from(x.get("rect")),
                     kb_dir=int(x.get("kb_dir", 1) or 1),
+                    kind=x.get("kind") or "photo",
+                    asset_start=float(x.get("asset_start") or 0.0),
                 )
                 for x in data.get("broll", [])
             ],
@@ -181,6 +189,8 @@ class RenderPlan:
                     "query": x.query,
                     "rect": x.rect.to_dict() if x.rect else None,
                     "kb_dir": x.kb_dir,
+                    "kind": x.kind,
+                    "asset_start": round(x.asset_start, 3),
                 }
                 for x in self.broll
             ],
@@ -437,6 +447,23 @@ def _resolve_position(
     return base  # type: ignore[return-value]
 
 
+@dataclass(slots=True)
+class _Laid:
+    """Блок, уже разложенный в строки, но ещё не выбравший позицию.
+
+    Между раскладкой и позицией стоит картинка: «auto» уклоняется от неё, а сама
+    она уступает тексту. Разорвать этот круг можно только так — сначала измерить
+    блок во ВСЕХ позициях, какие он может занять (`rects`), потом развести
+    картинку со всеми ними, потом выбрать одну.
+    """
+
+    block: Any
+    start: float
+    end: float
+    lines: list[list[PlanWord]]
+    rects: dict[str, Rect]
+
+
 def build_plan(
     edl: EDL,
     video_path: str,
@@ -466,81 +493,44 @@ def build_plan(
     by_idx = {w.idx: w for w in edl.words}
     frame = (width, height)
 
-    # Позиции, которые субтитр РЕАЛЬНО может занять в этом ролике. Знает их
-    # только сборка плана: явные позиции лежат в EDL, а «auto» разрешается в одну
-    # из тех, что даёт пресет (см. `_resolve_position`). Без них `broll_rect`
-    # берёт свою лестницу по умолчанию, и у glass она отбрасывает `center` —
-    # то есть ровно там, где режиссёр поставил блоку явный центр, гарантия Ф7
-    # «картинка не пересекает субтитр» отключалась.
-    wanted = {b.position for b in edl.captions if b.position in ("top", "center", "bottom")}
-    if any(b.position not in ("top", "center", "bottom") for b in edl.captions):
-        wanted.update(caption_positions(ps))
-    caption_places: tuple[str, ...] | None = tuple(sorted(wanted)) or None
+    def layout(
+        places: Sequence[str], words: list[PlanWord]
+    ) -> tuple[list[list[PlanWord]], dict[str, Rect]]:
+        """Перенос строк и прямоугольники блока во всех возможных позициях.
 
-    def rect_of_broll(anchor: str, anim: str) -> Rect | None:
-        return broll_rect(resting_anchor(anchor, anim), ps, frame, positions=caption_places)
-
-    def layout(position: str, words: list[PlanWord]) -> tuple[list[list[PlanWord]], Rect | None]:
-        """Перенос строк и прямоугольник блока — одним измерением.
+        Одно измерение на все позиции: `wrap_block` позицию не видит, от неё
+        зависит только вертикальная привязка готовой коробки.
 
         Метрик шрифта может не быть (свой TTF без выгрузки, пресет без
         `font.file`). Это не повод не отрендерить ролик: переносим по символам
         (лимит считается от кегля пресета), кегли не проставляем, а без
         прямоугольника рендерер и сам переносит строку по правилам CSS — это его
-        последняя защита от строки во весь кадр.
+        последняя защита от строки во весь кадр. Картинку в этом случае разводит
+        резерв `caption_zone`, как раньше.
         """
         try:
             lines, widths = wrap_block(words, ps, width)
         except (FileNotFoundError, ValueError) as err:
             log.warning("геометрия субтитра не посчитана (%s), рендерер разложит сам", err)
             chars = fallback_line_chars(ps, width)
-            return wrap_words(words, chars, ps.caption.max_lines), None
-        return lines, _rect_of_lines(position, lines, widths, ps, frame)
+            return wrap_words(words, chars, ps.caption.max_lines), {}
+        return lines, {p: _rect_of_lines(p, lines, widths, ps, frame) for p in places}
 
-    # B-roll считаем раньше субтитров: блокам нужно знать, какая половина кадра
-    # занята картинкой, чтобы уехать в свободную.
-    broll: list[PlanBroll] = []
-    for b in edl.broll:
-        w = by_idx.get(b.word_idx)
-        if w is None:
-            continue
-        window = tl.word_window(w)
-        if window is None:
-            continue
-        anim = b.anim.value if hasattr(b.anim, "value") else str(b.anim)
-        broll.append(
-            PlanBroll(
-                start=round(window[0], 3),
-                end=round(min(window[0] + b.duration, duration), 3),
-                anim=anim,
-                anchor=b.anchor,
-                asset=b.asset,
-                query=b.query,
-                rect=rect_of_broll(b.anchor, anim),
-                kb_dir=1 if getattr(b, "kb_dir", 1) >= 0 else -1,
-            )
-        )
-
-    def occupied(start: float, end: float) -> tuple[bool, bool, bool]:
-        """Мешает ли картинка субтитру внизу, вверху и по центру в этом промежутке.
-
-        Настоящее пересечение прямоугольников вместо «той же половины кадра»:
-        половинами `center` и `fullscreen` описывались как «занято всё», из-за
-        чего уклонение выключалось именно там, где было нужнее всего
-        (AUDIT §8.3). Полосу субтитра считает `geometry.caption_zone` по
-        худшему случаю — текста блока в этот момент ещё нет, b-roll считается
-        раньше.
-        """
-        bottom = top = center = False
-        for item in broll:
-            if item.end <= start or item.start >= end or item.rect is None:
-                continue
-            bottom = bottom or blocks_caption(item.rect, ps, frame, "bottom")
-            top = top or blocks_caption(item.rect, ps, frame, "top")
-            center = center or blocks_caption(item.rect, ps, frame, "center")
-        return bottom, top, center
-
-    blocks: list[PlanBlock] = []
+    # Раскладка субтитров идёт ПЕРВОЙ, картинки — после неё. Раньше было
+    # наоборот, и картинка разводилась не с блоком, а с ЗАРЕЗЕРВИРОВАННОЙ под
+    # него полосой `caption_zone`. Резерв считается без текста и потому обязан
+    # быть оценкой сверху, а быть ею не может: `wrap_block` при упоре в пол кегля
+    # сознательно отдаёт больше строк, чем `caption.max_lines`, и такой блок выше
+    # резерва (631 px против 431 у glass) — карточка вставала внутрь текста.
+    # Здесь блоки уже измерены, и картинка разводится с их НАСТОЯЩИМИ
+    # прямоугольниками. Это и есть DoD Ф7 «картинка ни разу не пересекает
+    # субтитр»: гарантия, а не оценка.
+    #
+    # Позиция при этом ещё не выбрана: «auto» уклоняется от картинки, а картинка
+    # считается позже. Поэтому у блока их несколько — все, какие он может
+    # получить, — и картинка уступает КАЖДОЙ. Раскладка от позиции не зависит,
+    # поэтому меряется один раз на все.
+    laid: list[_Laid] = []
     for block in edl.captions:
         pwords: list[PlanWord] = []
         for cw in block.words:
@@ -568,27 +558,110 @@ def build_plan(
         if not pwords:
             continue
 
-        start = pwords[0].start
-        end = pwords[-1].end + cfg.sub_tail
-        hits_bottom, hits_top, hits_center = occupied(start, end)
-        position = _resolve_position(
-            block.position,
-            ps.caption.position,
-            collides_bottom=hits_bottom,
-            collides_top=hits_top,
-            collides_center=hits_center,
+        places: tuple[str, ...] = (
+            (block.position,)
+            if block.position in CAPTION_POSITIONS
+            else caption_positions(ps)
         )
-        # Раскладка считается последней: она зависит и от того, в какую половину
-        # кадра блок уехал от картинки, и от кеглей выделенных слов.
-        lines, rect = layout(position, pwords)
-        blocks.append(
-            PlanBlock(
+        lines, rects = layout(places, pwords)
+        laid.append(
+            _Laid(
+                block=block,
+                start=pwords[0].start,
+                end=pwords[-1].end + cfg.sub_tail,
+                lines=lines,
+                rects=rects,
+            )
+        )
+
+    def text_zones(start: float, end: float) -> list[Rect]:
+        """Прямоугольники, которые текст может занять в этом промежутке.
+
+        По ОКНУ вставки, а не по всему ролику: у каждой картинки своё время, и
+        блок с явным `center` в начале ролика к вставке в конце отношения не
+        имеет. Общий на весь план набор позиций схлопывал полосу ниже порога и
+        делал полноэкранными все карточки ролика разом.
+
+        Блок, который посчитать не удалось (нет метрик шрифта), отдаёт резерв
+        `caption_zone` во всех своих позициях: без измерения это единственное,
+        что можно уступить.
+        """
+        out: list[Rect] = []
+        for item in laid:
+            if item.end <= start or item.start >= end:
+                continue
+            if item.rects:
+                out.extend(item.rects.values())
+            else:
+                out.extend(caption_zone(ps, frame, p) for p in CAPTION_POSITIONS)
+        return out
+
+    broll: list[PlanBroll] = []
+    for b in edl.broll:
+        w = by_idx.get(b.word_idx)
+        if w is None:
+            continue
+        window = tl.word_window(w)
+        if window is None:
+            continue
+        anim = b.anim.value if hasattr(b.anim, "value") else str(b.anim)
+        start = round(window[0], 3)
+        end = round(min(window[0] + b.duration, duration), 3)
+        broll.append(
+            PlanBroll(
                 start=start,
                 end=end,
+                anim=anim,
+                anchor=b.anchor,
+                asset=b.asset,
+                query=b.query,
+                rect=broll_rect(
+                    resting_anchor(b.anchor, anim), ps, frame, zones=text_zones(start, end)
+                ),
+                kb_dir=1 if getattr(b, "kb_dir", 1) >= 0 else -1,
+            )
+        )
+
+    def occupied(start: float, end: float, rects: dict[str, Rect]) -> dict[str, bool]:
+        """Какие позиции блока картинка перекрывает в этом промежутке.
+
+        Настоящее пересечение прямоугольников вместо «той же половины кадра»:
+        половинами `center` и `fullscreen` описывались как «занято всё», из-за
+        чего уклонение выключалось именно там, где было нужнее всего
+        (AUDIT §8.3). Прямоугольник блока здесь уже измерен — в каждой позиции,
+        какую он может занять; без метрик остаётся резерв `caption_zone`.
+        """
+        hits = dict.fromkeys(CAPTION_POSITIONS, False)
+        for item in broll:
+            if item.end <= start or item.start >= end or item.rect is None:
+                continue
+            for place in CAPTION_POSITIONS:
+                rect = rects.get(place)
+                hits[place] = hits[place] or (
+                    item.rect.overlaps(rect)
+                    if rect is not None
+                    else blocks_caption(item.rect, ps, frame, place)
+                )
+        return hits
+
+    blocks: list[PlanBlock] = []
+    for item in laid:
+        hits = occupied(item.start, item.end, item.rects)
+        position = _resolve_position(
+            item.block.position,
+            ps.caption.position,
+            collides_bottom=hits["bottom"],
+            collides_top=hits["top"],
+            collides_center=hits["center"],
+        )
+        blocks.append(
+            PlanBlock(
+                start=item.start,
+                end=item.end,
                 position=position,
-                lines=lines,
-                rect=rect,
-                bg_luma=getattr(block, "bg_luma", None),
+                lines=item.lines,
+                rect=item.rects.get(position),
+                bg_luma=getattr(item.block, "bg_luma", None),
             )
         )
 

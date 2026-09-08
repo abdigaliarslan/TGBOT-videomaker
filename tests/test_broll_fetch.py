@@ -21,12 +21,17 @@ from src.pipeline.broll import (
     PEXELS_RENDITION,
     REST_SECONDS,
     TRAVEL_MS,
+    VIDEO_MARGIN_S,
+    VIDEO_MAX_HEIGHT,
+    VIDEO_MIN_HEIGHT,
     asset_aspect,
     cache_key,
     fetch_asset,
     fetch_pexels,
     is_abstract_query,
+    pick_video_file,
     sanitize_items,
+    video_start,
 )
 
 pytestmark = pytest.mark.anyio
@@ -38,6 +43,26 @@ def cfg_without_env(**over) -> Settings:
 
 def photo(**srcs) -> dict:
     return {"photos": [{"src": srcs}]}
+
+
+def video(duration: float = 10.0, heights: tuple[int, ...] = (1080,)) -> dict:
+    """Ответ Pexels на /videos/search с одним клипом и заданными нарезками."""
+    return {
+        "videos": [
+            {
+                "duration": duration,
+                "video_files": [
+                    {
+                        "link": f"https://vid/{h}.mp4",
+                        "file_type": "video/mp4",
+                        "width": int(h * 9 / 16),
+                        "height": h,
+                    }
+                    for h in heights
+                ],
+            }
+        ]
+    }
 
 
 def client_for(handler) -> httpx.AsyncClient:
@@ -279,15 +304,125 @@ async def test_second_request_comes_from_cache(tmp_path):
         return httpx.Response(200, content=b"x" * 4096)
 
     item = Broll(word_idx=0, duration=1.5, query="cat", anim=BrollAnim.POP_IN, anchor="center")
-    cfg = cfg_without_env(pexels_api_key="key")
+    # Видео выключено намеренно: тест про кеш ФОТО, а с включённым М4 каждый
+    # заход начинался бы с поиска клипа и счёт вызовов перестал бы что-то значить.
+    cfg = cfg_without_env(pexels_api_key="key", broll_video=False)
 
     async with client_for(handler) as c:
         first = await fetch_asset(c, item, tmp_path, cfg)
-        assert first is not None and first.exists()
+        assert first is not None and first.path.exists()
         second = await fetch_asset(c, item, tmp_path, cfg)
 
     assert second == first
     assert len(calls) == 2  # поиск + скачивание, и ни одного вызова на второй заход
+
+
+# ------------------------------------------------------------------ видео вместо фото (М4)
+
+
+def broll_item(duration: float = 1.5) -> Broll:
+    return Broll(
+        word_idx=0, duration=duration, query="cat", anim=BrollAnim.POP_IN, anchor="center"
+    )
+
+
+def test_video_rendition_is_the_smallest_that_is_not_mush():
+    """4K поверх основного видео декодируется на каждом кадре, а видно то же самое."""
+    files = [
+        {"link": "a", "file_type": "video/mp4", "height": 360},
+        {"link": "b", "file_type": "video/mp4", "height": 720},
+        {"link": "c", "file_type": "video/mp4", "height": 1080},
+        {"link": "d", "file_type": "video/mp4", "height": 2160},
+    ]
+    picked = pick_video_file(files)
+    assert picked is not None and picked["height"] == VIDEO_MIN_HEIGHT
+    assert VIDEO_MIN_HEIGHT <= picked["height"] <= VIDEO_MAX_HEIGHT
+
+
+def test_video_without_a_usable_rendition_is_skipped():
+    assert pick_video_file([{"link": "a", "file_type": "video/mp4", "height": 360}]) is None
+    assert pick_video_file([{"link": "a", "file_type": "image/gif", "height": 1080}]) is None
+
+
+def test_clip_is_entered_from_the_middle():
+    """У стоковых клипов первые кадры самые статичные — оператор ещё не начал."""
+    assert video_start(10.0, 2.0) == pytest.approx(4.0)
+    assert video_start(2.0, 2.0) == 0.0  # запаса нет — играем с начала
+    assert video_start(1.0, 2.0) == 0.0  # клип короче вставки, но делить нечего
+
+
+async def test_video_wins_over_photo_and_carries_its_entry_point(tmp_path):
+    """М4: сначала видео. Точка входа считается здесь и едет в EDL, не в рендерер."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/videos/search":
+            return httpx.Response(200, json=video(duration=10.0))
+        if request.url.host == "api.pexels.com":
+            raise AssertionError("фото искать не должны: клип нашёлся")
+        return httpx.Response(200, content=b"x" * 4096)
+
+    cfg = cfg_without_env(pexels_api_key="key")
+    async with client_for(handler) as c:
+        asset = await fetch_asset(c, broll_item(1.5), tmp_path, cfg)
+
+    assert asset is not None
+    assert asset.kind == "video"
+    assert asset.path.suffix == ".mp4"
+    assert asset.start == pytest.approx(video_start(10.0, 1.5 + VIDEO_MARGIN_S), abs=0.01)
+
+
+async def test_short_clip_falls_back_to_photo_silently(tmp_path):
+    """Клип короче вставки показал бы чёрное на последних кадрах — берём фото."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/videos/search":
+            return httpx.Response(200, json=video(duration=1.0))
+        if request.url.path == "/v1/search":
+            return httpx.Response(200, json=photo(portrait="https://img/p.jpg"))
+        return httpx.Response(200, content=b"x" * 4096)
+
+    cfg = cfg_without_env(pexels_api_key="key")
+    async with client_for(handler) as c:
+        asset = await fetch_asset(c, broll_item(1.5), tmp_path, cfg)
+
+    assert asset is not None and asset.kind == "photo" and asset.start == 0.0
+
+
+async def test_video_comes_from_cache_with_its_entry_point(tmp_path):
+    """Вход в клип лежит в имени файла: кеш не может разъехаться со своим содержимым."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path == "/videos/search":
+            return httpx.Response(200, json=video(duration=10.0))
+        return httpx.Response(200, content=b"x" * 4096)
+
+    cfg = cfg_without_env(pexels_api_key="key")
+    async with client_for(handler) as c:
+        first = await fetch_asset(c, broll_item(1.5), tmp_path, cfg)
+        second = await fetch_asset(c, broll_item(1.5), tmp_path, cfg)
+
+    assert first is not None and second is not None
+    assert (second.path, second.start) == (first.path, first.start)
+    assert len(calls) == 2  # поиск + скачивание, второй заход в сеть не ходил
+
+
+async def test_video_can_be_switched_off(tmp_path):
+    """Ручка возвращает поведение до М4: только фото, без единого запроса к клипам."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/videos/search":
+            raise AssertionError("видео искать не должны: broll_video выключен")
+        if request.url.path == "/v1/search":
+            return httpx.Response(200, json=photo(portrait="https://img/p.jpg"))
+        return httpx.Response(200, content=b"x" * 4096)
+
+    cfg = cfg_without_env(pexels_api_key="key", broll_video=False)
+    async with client_for(handler) as c:
+        asset = await fetch_asset(c, broll_item(), tmp_path, cfg)
+
+    assert asset is not None and asset.kind == "photo"
 
 
 async def test_no_pexels_key_and_no_wavespeed_gives_none(tmp_path):

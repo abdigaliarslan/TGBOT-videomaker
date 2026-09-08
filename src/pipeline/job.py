@@ -249,7 +249,7 @@ async def process_video(
                 # Без них обе фазы написаны, но выключены: кроп берёт пресет из
                 # конфига и снимает весь ролик одной крупностью.
                 preset=style, framing=framing_spans(edl, applied_cuts=cut_pauses),
-                cfg=cfg,
+                cfg=cfg, track_out=work / "track.json",
             )
         if not is_playable(staged):
             raise JobError("Кадрирование оборвалось — файл повреждён. Пришлите видео ещё раз.")
@@ -400,7 +400,7 @@ async def process_from_edl(
             cut_path, work / "vertical.mp4", work_dir=work,
             out_width=cfg.render_width, out_height=cfg.render_height,
             preset=style, framing=framing_spans(edl, applied_cuts=cut_pauses),
-            cfg=cfg,
+            cfg=cfg, track_out=work / "track.json",
         )
     if not is_playable(staged):
         raise JobError("Кадрирование оборвалось — файл повреждён.")
