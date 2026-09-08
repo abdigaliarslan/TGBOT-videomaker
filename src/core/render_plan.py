@@ -23,6 +23,7 @@ import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Sequence
 
+from src.core.anchor import fallbacks, follow_offsets
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, Emphasis, Timeline
 from src.core.geometry import (
@@ -45,6 +46,7 @@ from src.core.geometry import (
 )
 from src.core.preset import Preset, load_preset
 from src.core.text import display_text
+from src.core.track import FaceTrack
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +80,11 @@ class PlanBlock:
     # ведёт прозрачность панели и цвет текста, чтобы контраст взял порог (Ф9).
     # `None` — никто не мерил, пресет играет как играл.
     bg_luma: float | None = None
+    # Путь блока, привязанного к голове (М2): смещение от прямоугольника покоя в
+    # пикселях кадра, по кадрам от `start`. Считает Python — вместе с
+    # предохранителями и плавным откатом, потому что рендерер решений не
+    # принимает (§0). `None` — блок статичен, то есть поведение до М2.
+    anchor_path: list[list[float]] | None = None
 
     @property
     def words(self) -> list[PlanWord]:
@@ -137,6 +144,7 @@ class RenderPlan:
                     lines=[[PlanWord(**w) for w in line] for line in b["lines"]],
                     rect=_rect_from(b.get("rect")),
                     bg_luma=b.get("bg_luma"),
+                    anchor_path=b.get("anchor_path"),
                 )
                 for b in data.get("blocks", [])
             ],
@@ -176,6 +184,7 @@ class RenderPlan:
                     "lines": [[asdict(w) for w in line] for line in b.lines],
                     "rect": b.rect.to_dict() if b.rect else None,
                     "bg_luma": b.bg_luma,
+                    "anchor_path": b.anchor_path,
                 }
                 for b in self.blocks
             ],
@@ -460,6 +469,7 @@ class _Laid:
     block: Any
     start: float
     end: float
+    places: tuple[str, ...]
     lines: list[list[PlanWord]]
     rects: dict[str, Rect]
 
@@ -476,11 +486,17 @@ def build_plan(
     audio_path: str | None = None,
     cfg: Settings | None = None,
     meta: dict[str, Any] | None = None,
+    track: FaceTrack | None = None,
 ) -> RenderPlan:
     """EDL → RenderPlan.
 
     `apply_cuts=True` означает, что видео УЖЕ нарезано по EDL.cuts и время надо
     пересчитать на выходной таймлайн. `False` — рисуем поверх исходника.
+
+    `track` — трек лица из `crop.project_track` (М1). Нужен только блокам с
+    `anchor_track`; без него они рисуются статично, как до М2. Трек приходит
+    отдельным входом, а не полем EDL, потому что минута при 30 fps — это 1800
+    точек, и EDL перестал бы быть документом, который правят руками.
     """
     cfg = cfg or default_settings
     fps = fps or cfg.render_fps
@@ -569,6 +585,7 @@ def build_plan(
                 block=block,
                 start=pwords[0].start,
                 end=pwords[-1].end + cfg.sub_tail,
+                places=places,
                 lines=lines,
                 rects=rects,
             )
@@ -583,7 +600,7 @@ def build_plan(
         делал полноэкранными все карточки ролика разом.
 
         Блок, который посчитать не удалось (нет метрик шрифта), отдаёт резерв
-        `caption_zone` во всех своих позициях: без измерения это единственное,
+        `caption_zone` в каждой своей позиции: без измерения это единственное,
         что можно уступить.
         """
         out: list[Rect] = []
@@ -593,7 +610,7 @@ def build_plan(
             if item.rects:
                 out.extend(item.rects.values())
             else:
-                out.extend(caption_zone(ps, frame, p) for p in CAPTION_POSITIONS)
+                out.extend(caption_zone(ps, frame, p) for p in item.places)
         return out
 
     broll: list[PlanBroll] = []
@@ -616,9 +633,19 @@ def build_plan(
                 asset=b.asset,
                 query=b.query,
                 rect=broll_rect(
-                    resting_anchor(b.anchor, anim), ps, frame, zones=text_zones(start, end)
+                    resting_anchor(b.anchor, anim),
+                    ps,
+                    frame,
+                    # Пропорция скачанного ФАЙЛА (М4). Без неё `broll_rect` берёт
+                    # стоковые 2:3 по умолчанию, и для генерации 3:4 или для
+                    # видеоклипа 9:16 карточка выходит другой высоты, чем
+                    # содержимое: `object-fit: cover` режет источник (§8.3).
+                    aspect=getattr(b, "asset_aspect", None),
+                    zones=text_zones(start, end),
                 ),
                 kb_dir=1 if getattr(b, "kb_dir", 1) >= 0 else -1,
+                kind=getattr(b, "kind", "photo"),
+                asset_start=float(getattr(b, "asset_start", 0.0) or 0.0),
             )
         )
 
@@ -644,6 +671,57 @@ def build_plan(
                 )
         return hits
 
+    def anchor_path_of(item: _Laid, rect: Rect | None) -> list[list[float]] | None:
+        """Путь блока, привязанного к голове (М2), или `None` для статичного.
+
+        Считается ПОСЛЕДНИМ: нужен прямоугольник в уже выбранной позиции, а
+        позиция зависит от того, куда встала картинка.
+
+        Без прямоугольника привязки не будет, и это не деградация «на всякий
+        случай»: путь — смещение ОТ ПОКОЯ, а покой без измерения неизвестен.
+        Двигать блок относительно неизвестной точки значит гадать, где он
+        окажется, — статичный блок тут честнее.
+        """
+        anchor = getattr(item.block, "anchor_track", None)
+        if anchor is None or track is None or rect is None:
+            return None
+        start_frame = round(item.start * fps)
+        frames = max(1, round(item.end * fps) - start_frame + 1)
+        offsets = follow_offsets(
+            track,
+            start_frame=start_frame,
+            frames=frames,
+            rest_center=(rect.x + rect.width / 2, rect.y + rect.height / 2),
+            frame_size=frame,
+            offset_x=anchor.offset_x,
+            offset_y=anchor.offset_y,
+            follow_x=anchor.follow_x,
+            follow_y=anchor.follow_y,
+            # Высота блока и безопасная зона: без них блок на крупном плане
+            # садится на глаза, а на сверхкрупном уезжает за край кадра. Обе
+            # величины известны только здесь — блок уже измерен.
+            #
+            # Граница берётся из `geometry.safe_area_ratio`, а не из
+            # `safe_margin_y`: тот держит ещё и `caption.margin` — у glass это
+            # 380 px, отступ ПОКОЯ, а не физический предел. Привязанный блок
+            # покой сознательно покидает, и мерить его отступом покоя значит
+            # запретить приём ровно там, где он нужен.
+            block_height=rect.height,
+            bounds=(
+                height * ps.geometry.safe_area_ratio,
+                height * (1.0 - ps.geometry.safe_area_ratio),
+            ),
+        )
+        if not offsets:
+            return None
+        drops = fallbacks(offsets)
+        if drops:
+            log.info(
+                "блок %.2f-%.2f с: привязка к голове отпускала её %d раз",
+                item.start, item.end, drops,
+            )
+        return [[dx, dy] for dx, dy in offsets]
+
     blocks: list[PlanBlock] = []
     for item in laid:
         hits = occupied(item.start, item.end, item.rects)
@@ -654,14 +732,16 @@ def build_plan(
             collides_top=hits["top"],
             collides_center=hits["center"],
         )
+        rect = item.rects.get(position)
         blocks.append(
             PlanBlock(
                 start=item.start,
                 end=item.end,
                 position=position,
                 lines=item.lines,
-                rect=item.rects.get(position),
+                rect=rect,
                 bg_luma=getattr(item.block, "bg_luma", None),
+                anchor_path=anchor_path_of(item, rect),
             )
         )
 

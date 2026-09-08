@@ -18,6 +18,7 @@ from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, validate_edl
 from src.core.preset import load_preset
 from src.core.render_plan import build_plan
+from src.core.track import load_track
 from src.llm.client import LLMClient
 from src.pipeline import broll as broll_mod
 from src.pipeline.asr import ASRResult, transcribe
@@ -273,6 +274,7 @@ async def process_video(
             apply_cuts=cut_pauses,
             audio_path=audio_path,
             cfg=cfg,
+            track=load_track(work / "track.json"),
         )
         (work / "plan.json").write_text(
             json.dumps(plan.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8"
@@ -422,6 +424,7 @@ async def process_from_edl(
         apply_cuts=cut_pauses,
         audio_path=audio_path,
         cfg=cfg,
+        track=load_track(work / "track.json"),
     )
     (work / "plan.json").write_text(
         json.dumps(plan.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8"

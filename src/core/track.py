@@ -29,10 +29,14 @@
 
 from __future__ import annotations
 
+import logging
 import math
+from pathlib import Path
 from typing import Iterable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
+
+log = logging.getLogger(__name__)
 
 
 class TrackPoint(BaseModel):
@@ -67,6 +71,24 @@ class FaceTrack(BaseModel):
         for p in self.points:  # разреженный трек из чужого инструмента
             if p.f == frame:
                 return p
+        return None
+
+
+def load_track(path: str | Path) -> FaceTrack | None:
+    """Трек с диска или `None`, если его нет или он не читается.
+
+    Отсутствие трека — законный путь, а не ошибка: кроп мог не найти ни одного
+    лица, а старая задача снималась до М1 вовсе. Разбор битого файла гасится по
+    той же причине: без трека выйдет ролик со статичными субтитрами, а с
+    исключением не выйдет ничего.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        return FaceTrack.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 — приём важен, но ролик важнее
+        log.warning("трек лица не прочитан (%s) — субтитры останутся статичными", e)
         return None
 
 

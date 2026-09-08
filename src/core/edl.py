@@ -26,6 +26,10 @@ BROLL_MAX = 2
 # Сколько слов допустимо в одном блоке субтитров.
 BLOCK_MIN_WORDS = 1
 BLOCK_MAX_WORDS = 5
+# Сколько блоков за ролик могут ездить за головой (М2). Приём для ОДНОГО
+# смыслового пика: когда за головой ездят все субтитры, ролик невозможно
+# смотреть. Промпт `direct.md` это объясняет, валидатор — обеспечивает.
+ANCHOR_TRACK_MAX = 2
 
 
 # --------------------------------------------------------------------------- модели
@@ -79,12 +83,37 @@ class CaptionWord(BaseModel):
     emoji: str | None = None
 
 
+class AnchorTrack(BaseModel):
+    """Привязка блока к треку лица (М2).
+
+    Смещение — доли кадра, а не пиксели: трек нормализованный, и привязка обязана
+    пережить смену разрешения вместе с ним. Минус по Y — вверх, то есть блок
+    висит НАД головой, а не на ней.
+
+    Числа — краткая часть решения, и её принимает не LLM: модель решает, нужен ли
+    приём в этом месте ролика, а насколько выше головы стоит текст — это ремесло
+    (§0). Поэтому в схему `direct` уезжает один булев флаг.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["face"] = "face"
+    offset_y: float = Field(default=-0.14, ge=-0.5, le=0.5)
+    offset_x: float = Field(default=0.0, ge=-0.5, le=0.5)
+    follow_x: bool = True
+    follow_y: bool = True
+
+
 class CaptionBlock(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     words: list[CaptionWord] = Field(min_length=1)  # 3-5 слов
     position: Literal["top", "center", "bottom", "auto"] = "auto"
     layout: Literal["stack", "ragged", "single_line"] = "stack"
+    # `None` — статичная позиция, то есть поведение до М2. Приём редкий: если за
+    # головой ездят все субтитры, смотреть невозможно, поэтому валидатор держит
+    # потолок ANCHOR_TRACK_MAX.
+    anchor_track: AnchorTrack | None = None
     # Средняя яркость кадра под блоком, 0..1. Заполняет Python замером, не LLM.
     # Единственное место, где стиль уступает измерению: панель фиксированной
     # прозрачности не читается над светлым фоном.
@@ -310,6 +339,13 @@ def validate_edl(edl: EDL, *, strict_coverage: bool = True) -> list[str]:
             if cw.word_idx not in known:
                 errors.append(f"captions[{bi}]: word_idx={cw.word_idx} отсутствует в words")
             flat.append(cw.word_idx)
+
+    anchored = sum(1 for b in edl.captions if b.anchor_track is not None)
+    if anchored > ANCHOR_TRACK_MAX:
+        errors.append(
+            f"captions: {anchored} блоков привязано к треку лица, "
+            f"допустимо не больше {ANCHOR_TRACK_MAX}"
+        )
 
     if len(flat) != len(set(flat)):
         dupes = sorted({i for i in flat if flat.count(i) > 1})[:5]

@@ -31,9 +31,9 @@ def good_plan() -> dict:
         "hook_end_word": 2,
         "drop_words": [],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": 1, "accent": "accent", "position": "auto"},
-            {"words": [3, 4, 5], "accent_word": None, "accent": None, "position": "auto"},
-            {"words": [6, 7, 8], "accent_word": 8, "accent": "shout", "position": "auto"},
+            {"words": [0, 1, 2], "accent_word": 1, "accent": "accent", "position": "auto", "follow_face": False},
+            {"words": [3, 4, 5], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [6, 7, 8], "accent_word": 8, "accent": "shout", "position": "auto", "follow_face": False},
         ],
     }
 
@@ -44,8 +44,8 @@ def broken_plan() -> dict:
         "hook_end_word": None,
         "drop_words": [],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto"},
-            {"words": [3, 6, 7, 8], "accent_word": None, "accent": None, "position": "auto"},
+            {"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [3, 6, 7, 8], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
         ],
     }
 
@@ -119,8 +119,8 @@ async def test_llm_returning_garbage_indices_is_survivable():
         "hook_end_word": 999,
         "drop_words": [-5, 999],
         "blocks": [
-            {"words": [0, 1, 2, 999], "accent_word": 999, "accent": "shout", "position": "auto"},
-            {"words": [3, 4, 5], "accent_word": None, "accent": None, "position": "auto"},
+            {"words": [0, 1, 2, 999], "accent_word": 999, "accent": "shout", "position": "auto", "follow_face": False},
+            {"words": [3, 4, 5], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
         ],
     }
     llm = client_with(plan)
@@ -134,13 +134,13 @@ async def test_out_of_range_value_costs_a_retry():
     ws = words(6)
     good = {
         "hook_end_word": None, "drop_words": [],
-        "blocks": [{"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto"},
-                   {"words": [3, 4, 5], "accent_word": None, "accent": None, "position": "auto"}],
+        "blocks": [{"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+                   {"words": [3, 4, 5], "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
     }
     bad = {
         "hook_end_word": None, "drop_words": [],
         "blocks": [{"words": [0, 1, 2, 3, 4, 5], "accent_word": None, "accent": None,
-                    "position": "auto"}],
+                    "position": "auto", "follow_face": False}],
     }
     llm = client_with(bad, good)
     edl = await direct(ws, 3.0, llm=llm, language="ru", cfg=cfg())
@@ -155,9 +155,9 @@ async def test_dropped_words_are_excluded_from_captions_and_cuts():
         "hook_end_word": 2,
         "drop_words": [4],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto"},
-            {"words": [3, 5], "accent_word": None, "accent": None, "position": "auto"},
-            {"words": [6, 7, 8], "accent_word": None, "accent": None, "position": "auto"},
+            {"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [3, 5], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [6, 7, 8], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
         ],
     }
     llm = client_with(plan)
@@ -175,7 +175,7 @@ async def test_words_table_is_sent_not_raw_text():
         {
             "hook_end_word": None,
             "drop_words": [],
-            "blocks": [{"words": [0, 1, 2, 3], "accent_word": None, "accent": None, "position": "auto"}],
+            "blocks": [{"words": [0, 1, 2, 3], "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
         }
     )
     await direct(ws, 2.0, llm=llm, language="ru", cfg=cfg())

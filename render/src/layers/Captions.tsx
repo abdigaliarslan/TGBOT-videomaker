@@ -542,6 +542,26 @@ export const Captions: React.FC<{ blocks: PlanBlock[]; preset: Preset }> = ({ bl
   const justify = (position: string) =>
     position === "top" ? "flex-start" : position === "center" ? "center" : "flex-end";
 
+  /**
+   * Смещение блока, привязанного к голове (М2). Путь приходит ГОТОВЫМ: его
+   * считает `src/core/anchor.py` вместе с предохранителями, мёртвой зоной и
+   * плавным откатом. Здесь только выборка по кадру — рендерер решений не
+   * принимает (§0), и физика привязки не исключение: кадров конечное число,
+   * трек известен заранее, значит и путь известен заранее.
+   *
+   * Индекс зажимается в конец: блок живёт на `tail` кадров дольше своего конца
+   * (нахлёст с приходящим), а путь посчитан по самому блоку. Держать последнее
+   * смещение во время ухода правильнее, чем возвращать блок в покой: он в этот
+   * момент уже уезжает и растворяется, и лишний скачок был бы виден.
+   */
+  const anchorShift = (block: PlanBlock): [number, number] => {
+    const path = block.anchor_path;
+    if (!path || path.length === 0) return [0, 0];
+    const i = Math.min(path.length - 1, Math.max(0, frame - Math.round(block.start * fps)));
+    const point = path[i];
+    return [point[0] ?? 0, point[1] ?? 0];
+  };
+
   return (
     <>
       {/* Порядок сохраняем: во время нахлёста уходящий блок лежит под приходящим. */}
@@ -566,6 +586,12 @@ export const Captions: React.FC<{ blocks: PlanBlock[]; preset: Preset }> = ({ bl
             letterSpacing: `${preset.font.letter_spacing}em`,
             textAlign: preset.caption.align,
             pointerEvents: "none",
+            // Смещение живёт на контейнере, а не на самом блоке: у блока свой
+            // transform под появление и уход, и складывать два движения в одну
+            // строку значило бы, что правка одного молча ломает другое.
+            transform: (([dx, dy]) =>
+              dx || dy ? `translate(${dx}px, ${dy}px)` : undefined)(anchorShift(block)),
+            willChange: block.anchor_path ? "transform" : undefined,
           }}
         >
           <Block block={block} preset={preset} />

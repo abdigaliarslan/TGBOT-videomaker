@@ -43,13 +43,22 @@ DIRECT_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["words", "accent_word", "accent", "position"],
+                "required": ["words", "accent_word", "accent", "position", "follow_face"],
                 "properties": {
                     "words": {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 5,
                         "items": {"type": "integer"},
+                    },
+                    "follow_face": {
+                        "type": "boolean",
+                        "description": (
+                            "Блок едет за головой говорящего вместо того, чтобы "
+                            "стоять на месте. Редкий приём для ОДНОГО смыслового "
+                            "пика: не больше двух блоков на ролик, лишние мы "
+                            "снимаем сами."
+                        ),
                     },
                     "accent_word": {
                         "type": ["integer", "null"],

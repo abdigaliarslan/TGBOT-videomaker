@@ -100,7 +100,7 @@ def test_valid_direct_plan_passes():
     plan = {
         "hook_end_word": 3,
         "drop_words": [0, 7],
-        "blocks": [{"words": [1, 2, 3], "accent_word": 2, "accent": "accent", "position": "auto"}],
+        "blocks": [{"words": [1, 2, 3], "accent_word": 2, "accent": "accent", "position": "auto", "follow_face": False}],
     }
     assert ok(plan, DIRECT_SCHEMA)
 
@@ -109,7 +109,7 @@ def test_direct_plan_with_null_accent_passes():
     plan = {
         "hook_end_word": None,
         "drop_words": [],
-        "blocks": [{"words": [0], "accent_word": None, "accent": None, "position": "auto"}],
+        "blocks": [{"words": [0], "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
     }
     assert ok(plan, DIRECT_SCHEMA)
 
@@ -122,7 +122,7 @@ def test_blocks_as_string_is_caught():
 def test_invented_effect_is_caught():
     plan = {
         "hook_end_word": None, "drop_words": [],
-        "blocks": [{"words": [0], "accent_word": 0, "accent": "радуга", "position": "auto"}],
+        "blocks": [{"words": [0], "accent_word": 0, "accent": "радуга", "position": "auto", "follow_face": False}],
     }
     assert any("не из набора" in e for e in jsonshape.check(plan, DIRECT_SCHEMA))
 
@@ -130,7 +130,7 @@ def test_invented_effect_is_caught():
 def test_too_many_words_in_block_is_caught():
     plan = {
         "hook_end_word": None, "drop_words": [],
-        "blocks": [{"words": [0, 1, 2, 3, 4, 5, 6], "accent_word": None, "accent": None, "position": "auto"}],
+        "blocks": [{"words": [0, 1, 2, 3, 4, 5, 6], "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
     }
     assert any("максимум" in e for e in jsonshape.check(plan, DIRECT_SCHEMA))
 

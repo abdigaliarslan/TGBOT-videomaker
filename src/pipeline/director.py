@@ -21,8 +21,10 @@ from typing import Any, Iterable, Sequence
 
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import (
+    ANCHOR_TRACK_MAX,
     BLOCK_MAX_WORDS,
     EDL,
+    AnchorTrack,
     CaptionBlock,
     CaptionWord,
     Cut,
@@ -417,7 +419,26 @@ def edl_from_plan(
                     for i in idxs
                 ],
                 position=raw.get("position") or "auto",
+                # Модель отвечает булевым флагом, а не структурой: НУЖЕН ли приём
+                # здесь — вопрос смысла и её работа, а насколько выше головы
+                # висит текст — ремесло, и оно живёт в значениях по умолчанию
+                # (§0). Заодно модели нечего сломать: диапазонов, которые она
+                # может нарушить, у неё просто нет.
+                anchor_track=AnchorTrack() if raw.get("follow_face") else None,
             )
+        )
+
+    # Потолок держим здесь, а не ретраем валидатора: лишняя привязка — не
+    # ошибка формы, а перебор с приёмом, и снять её дешевле, чем гонять модель
+    # по кругу. Остаются ПЕРВЫЕ: у ролика один смысловой пик, и он в начале
+    # чаще, чем в конце.
+    anchored = [b for b in captions if b.anchor_track is not None]
+    for extra in anchored[ANCHOR_TRACK_MAX:]:
+        extra.anchor_track = None
+    if len(anchored) > ANCHOR_TRACK_MAX:
+        log.info(
+            "привязка к голове: модель попросила %d блоков, оставлено %d",
+            len(anchored), ANCHOR_TRACK_MAX,
         )
 
     return EDL(

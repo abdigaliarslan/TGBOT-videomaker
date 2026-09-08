@@ -171,7 +171,8 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
     from src.core.edl import EDL
     from src.core.preset import load_preset
     from src.core.render_plan import build_plan
-    from src.pipeline.crop import autocrop
+    from src.core.track import load_track
+    from src.pipeline.crop import autocrop, framing_spans
     from src.pipeline.cut import apply_cuts
     from src.pipeline.probe import probe
     from src.pipeline.render import arender_remotion, render_ass
@@ -191,14 +192,30 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
         edl.preset = preset
 
         info = probe(src_path)
+        style = load_preset(preset)
         cut_path = apply_cuts(edl, src_path, work / "cut.mp4", info=info, cfg=settings)
-        vertical = autocrop(cut_path, work / "vertical.mp4", work_dir=work, cfg=settings)
+        # Пресет и крупность передаются ЯВНО. Без них перерендер брал цветокор из
+        # `cfg.default_preset`, а не из пресета задачи, и снимал весь ролик одной
+        # крупностью — то есть §0.4 «сохранённый EDL + другой пресет = новое
+        # видео» выполнялся только для субтитров. `autocrop` про эту деградацию
+        # предупреждает в своём докстринге; правка была за владельцем вызова.
+        vertical = autocrop(
+            cut_path, work / "vertical.mp4", work_dir=work, cfg=settings,
+            preset=style, framing=framing_spans(edl),
+            track_out=work / "track.json",
+        )
         staged_info = probe(vertical)
 
+        # Трек считается заново, а не берётся из кеша задачи. MOTION_PLAN просит
+        # кешировать его в MinIO и не пересчитывать, но здесь всё равно заново
+        # идёт и нарезка, и кроп — а трек живёт в координатах ВЫХОДНОГО кадра,
+        # которые от пресета зависят (другая крупность — другое окно). Кеш дал бы
+        # экономию на одном проходе YuNet ценой трека, который врёт про кадр.
         plan = build_plan(
             edl, str(vertical), fps=int(round(staged_info.fps)),
             width=staged_info.width, height=staged_info.height,
-            preset=load_preset(preset), cfg=settings,
+            preset=style, cfg=settings,
+            track=load_track(work / "track.json"),
         )
         out = work / "result.mp4"
         if settings.render_backend == "ass":
@@ -240,10 +257,20 @@ async def startup(ctx: dict[str, Any]) -> None:
     setup_logging(settings.log_level)
     repo.init_engine(settings)
     await storage.ensure_bucket_async()
+    import asyncio
+
+    # Всё тяжёлое качаем на старте, а не внутри пользовательской задачи:
+    # иначе первый ролик на новом языке упирается в 1.2 ГБ загрузки, а
+    # оборвавшаяся закачка вешает задачу целиком.
+    from src.pipeline.asr import prewarm
+
+    try:
+        await asyncio.to_thread(prewarm)
+    except Exception as e:  # noqa: BLE001 — без прогрева работать можно, просто медленнее
+        log.warning("прогрев ASR не удался (%s) — модели подтянутся на первом ролике", e)
+
     if settings.render_backend == "remotion":
         # Chromium скачивается один раз при старте, а не на каждый рендер (M5 ⚠).
-        import asyncio
-
         from src.pipeline.render import ensure_browser, ensure_bundle
 
         await asyncio.to_thread(ensure_browser)

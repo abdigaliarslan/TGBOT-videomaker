@@ -1,0 +1,592 @@
+{
+ "version": 1,
+ "source_duration": 20.067,
+ "words": [
+  {
+   "idx": 0,
+   "text": "Я",
+   "start": 0.3,
+   "end": 1.06,
+   "prob": 0.273
+  },
+  {
+   "idx": 1,
+   "text": "думаю,",
+   "start": 1.06,
+   "end": 1.26,
+   "prob": 0.989
+  },
+  {
+   "idx": 2,
+   "text": "что",
+   "start": 1.42,
+   "end": 1.5,
+   "prob": 0.866
+  },
+  {
+   "idx": 3,
+   "text": "каждый",
+   "start": 1.5,
+   "end": 1.74,
+   "prob": 0.995
+  },
+  {
+   "idx": 4,
+   "text": "человек",
+   "start": 1.74,
+   "end": 2.24,
+   "prob": 0.977
+  },
+  {
+   "idx": 5,
+   "text": "в",
+   "start": 2.24,
+   "end": 2.54,
+   "prob": 0.811
+  },
+  {
+   "idx": 6,
+   "text": "этом",
+   "start": 2.54,
+   "end": 2.66,
+   "prob": 0.901
+  },
+  {
+   "idx": 7,
+   "text": "мире",
+   "start": 2.66,
+   "end": 2.82,
+   "prob": 0.92
+  },
+  {
+   "idx": 8,
+   "text": "должен",
+   "start": 2.82,
+   "end": 3.08,
+   "prob": 0.99
+  },
+  {
+   "idx": 9,
+   "text": "понять",
+   "start": 3.08,
+   "end": 3.56,
+   "prob": 0.993
+  },
+  {
+   "idx": 10,
+   "text": "одну",
+   "start": 3.56,
+   "end": 4.1,
+   "prob": 0.916
+  },
+  {
+   "idx": 11,
+   "text": "истину",
+   "start": 4.1,
+   "end": 4.58,
+   "prob": 0.917
+  },
+  {
+   "idx": 12,
+   "text": "того,",
+   "start": 4.58,
+   "end": 4.86,
+   "prob": 0.931
+  },
+  {
+   "idx": 13,
+   "text": "что",
+   "start": 5.04,
+   "end": 5.2,
+   "prob": 0.963
+  },
+  {
+   "idx": 14,
+   "text": "не",
+   "start": 5.2,
+   "end": 6.26,
+   "prob": 0.903
+  },
+  {
+   "idx": 15,
+   "text": "стоит",
+   "start": 6.36,
+   "end": 6.6,
+   "prob": 0.999
+  },
+  {
+   "idx": 16,
+   "text": "бежать",
+   "start": 6.6,
+   "end": 7.32,
+   "prob": 0.756
+  },
+  {
+   "idx": 17,
+   "text": "за",
+   "start": 7.32,
+   "end": 8.06,
+   "prob": 0.991
+  },
+  {
+   "idx": 18,
+   "text": "одной",
+   "start": 8.06,
+   "end": 8.28,
+   "prob": 0.978
+  },
+  {
+   "idx": 19,
+   "text": "целью,",
+   "start": 8.28,
+   "end": 8.82,
+   "prob": 0.991
+  },
+  {
+   "idx": 20,
+   "text": "когда",
+   "start": 8.82,
+   "end": 9.0,
+   "prob": 0.989
+  },
+  {
+   "idx": 21,
+   "text": "есть",
+   "start": 9.0,
+   "end": 9.48,
+   "prob": 0.994
+  },
+  {
+   "idx": 22,
+   "text": "несколько",
+   "start": 9.48,
+   "end": 9.98,
+   "prob": 0.978
+  },
+  {
+   "idx": 23,
+   "text": "других",
+   "start": 9.98,
+   "end": 11.1,
+   "prob": 0.984
+  },
+  {
+   "idx": 24,
+   "text": "целей.",
+   "start": 12.19,
+   "end": 13.57,
+   "prob": 0.91
+  },
+  {
+   "idx": 25,
+   "text": "То",
+   "start": 13.91,
+   "end": 13.95,
+   "prob": 0.821
+  },
+  {
+   "idx": 26,
+   "text": "есть",
+   "start": 13.95,
+   "end": 14.13,
+   "prob": 0.999
+  },
+  {
+   "idx": 27,
+   "text": "если",
+   "start": 14.13,
+   "end": 14.43,
+   "prob": 0.639
+  },
+  {
+   "idx": 28,
+   "text": "ты",
+   "start": 14.43,
+   "end": 14.57,
+   "prob": 0.992
+  },
+  {
+   "idx": 29,
+   "text": "думаешь",
+   "start": 14.57,
+   "end": 15.01,
+   "prob": 0.991
+  },
+  {
+   "idx": 30,
+   "text": "о",
+   "start": 15.01,
+   "end": 15.33,
+   "prob": 0.632
+  },
+  {
+   "idx": 31,
+   "text": "том,",
+   "start": 15.33,
+   "end": 15.65,
+   "prob": 0.955
+  },
+  {
+   "idx": 32,
+   "text": "что",
+   "start": 15.83,
+   "end": 16.05,
+   "prob": 0.989
+  },
+  {
+   "idx": 33,
+   "text": "можно",
+   "start": 16.05,
+   "end": 16.57,
+   "prob": 0.924
+  },
+  {
+   "idx": 34,
+   "text": "делать",
+   "start": 16.57,
+   "end": 17.63,
+   "prob": 0.981
+  },
+  {
+   "idx": 35,
+   "text": "сегодня,",
+   "start": 17.63,
+   "end": 18.25,
+   "prob": 0.994
+  },
+  {
+   "idx": 36,
+   "text": "завтра...",
+   "start": 18.51,
+   "end": 19.47,
+   "prob": 0.492
+  }
+ ],
+ "cuts": [
+  {
+   "src_in": 0.0,
+   "src_out": 0.15,
+   "reason": "drop_silence",
+   "framing": "wide"
+  },
+  {
+   "src_in": 0.15,
+   "src_out": 4.715,
+   "reason": "hook",
+   "framing": "wide"
+  },
+  {
+   "src_in": 4.715,
+   "src_out": 5.125,
+   "reason": "drop_filler",
+   "framing": "wide"
+  },
+  {
+   "src_in": 5.125,
+   "src_out": 11.35,
+   "reason": "keep",
+   "framing": "wide"
+  },
+  {
+   "src_in": 11.35,
+   "src_out": 12.04,
+   "reason": "drop_silence",
+   "framing": "wide"
+  },
+  {
+   "src_in": 12.04,
+   "src_out": 19.72,
+   "reason": "keep",
+   "framing": "wide"
+  },
+  {
+   "src_in": 19.72,
+   "src_out": 20.067,
+   "reason": "drop_silence",
+   "framing": "wide"
+  }
+ ],
+ "captions": [
+  {
+   "words": [
+    {
+     "word_idx": 0,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 1,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 2,
+     "emphasis": "none",
+     "emoji": null
+    }
+   ],
+   "position": "top",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.0115
+  },
+  {
+   "words": [
+    {
+     "word_idx": 3,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 4,
+     "emphasis": "accent",
+     "emoji": null
+    },
+    {
+     "word_idx": 5,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 6,
+     "emphasis": "none",
+     "emoji": null
+    }
+   ],
+   "position": "top",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.0111
+  },
+  {
+   "words": [
+    {
+     "word_idx": 7,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 8,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 9,
+     "emphasis": "accent",
+     "emoji": null
+    }
+   ],
+   "position": "top",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.0105
+  },
+  {
+   "words": [
+    {
+     "word_idx": 10,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 11,
+     "emphasis": "shout",
+     "emoji": null
+    }
+   ],
+   "position": "top",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.0176
+  },
+  {
+   "words": [
+    {
+     "word_idx": 14,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 15,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 16,
+     "emphasis": "accent",
+     "emoji": null
+    }
+   ],
+   "position": "auto",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.0426
+  },
+  {
+   "words": [
+    {
+     "word_idx": 17,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 18,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 19,
+     "emphasis": "accent",
+     "emoji": null
+    }
+   ],
+   "position": "auto",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.0419
+  },
+  {
+   "words": [
+    {
+     "word_idx": 20,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 21,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 22,
+     "emphasis": "accent",
+     "emoji": null
+    }
+   ],
+   "position": "auto",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.0575
+  },
+  {
+   "words": [
+    {
+     "word_idx": 23,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 24,
+     "emphasis": "shout",
+     "emoji": null
+    }
+   ],
+   "position": "auto",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.0485
+  },
+  {
+   "words": [
+    {
+     "word_idx": 25,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 26,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 27,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 28,
+     "emphasis": "none",
+     "emoji": null
+    }
+   ],
+   "position": "auto",
+   "layout": "stack",
+   "anchor_track": {
+    "source": "face",
+    "offset_y": -0.14,
+    "offset_x": 0.0,
+    "follow_x": true,
+    "follow_y": true
+   },
+   "bg_luma": 0.0443
+  },
+  {
+   "words": [
+    {
+     "word_idx": 29,
+     "emphasis": "accent",
+     "emoji": null
+    },
+    {
+     "word_idx": 30,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 31,
+     "emphasis": "none",
+     "emoji": null
+    }
+   ],
+   "position": "auto",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.0447
+  },
+  {
+   "words": [
+    {
+     "word_idx": 32,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 33,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 34,
+     "emphasis": "accent",
+     "emoji": null
+    }
+   ],
+   "position": "auto",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.0553
+  },
+  {
+   "words": [
+    {
+     "word_idx": 35,
+     "emphasis": "none",
+     "emoji": null
+    },
+    {
+     "word_idx": 36,
+     "emphasis": "accent",
+     "emoji": null
+    }
+   ],
+   "position": "auto",
+   "layout": "stack",
+   "anchor_track": null,
+   "bg_luma": 0.047
+  }
+ ],
+ "broll": [],
+ "sfx": [],
+ "music": null,
+ "preset": "glass"
+}
