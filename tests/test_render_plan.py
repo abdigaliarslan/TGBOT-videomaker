@@ -799,6 +799,28 @@ def test_presets_carry_a_contrast_rule():
         assert rule.luma_dark < rule.luma_light
 
 
+def test_glass_word_states_are_on_or_off():
+    """С2: сказанное слово не гаснет, будущего не видно вовсе.
+
+    У эталона (`STYLE_PLAN.md`) промежуточных состояний нет: слово либо
+    проявилось и стоит в полную силу, либо его ещё нет. Наши 0.7 на прошедшем и
+    0.18 на будущем давали третий и четвёртый оттенок серого в каждом кадре —
+    аналога им в эталоне не нашлось ни на одном из 709 кадров.
+
+    Место под будущее слово при этом остаётся: `ghost_opacity` гасит слово, не
+    вынимая его из потока (Captions.tsx), иначе блок переезжал бы по мере
+    набора — а он у эталона стоит.
+    """
+    colors = load_preset("glass").colors
+    assert colors.past_opacity == 1.0
+    assert colors.ghost_opacity == 0.0
+    # Акцент — приглушённое золото, замеренное медианой по глифам эталона,
+    # а не кислотно-жёлтый.
+    assert colors.accent.upper() == "#F3D28F"
+    r, g, b = hex_to_rgb(colors.accent)
+    assert r > g > b, "золото: красного больше зелёного, зелёного больше синего"
+
+
 def _luminance(color: str) -> float:
     """Относительная яркость цвета по WCAG — та же формула, что в Captions.tsx."""
     channels = [c / 255 for c in hex_to_rgb(color)]

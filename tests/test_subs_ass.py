@@ -9,7 +9,7 @@ import pytest
 from src.core.edl import EDL, CaptionBlock, CaptionWord, Cut, Emphasis, Word
 from src.core.preset import Preset, load_preset, to_ass_alpha, to_ass_colour
 from src.core.render_plan import build_plan, wrap_words, PlanWord
-from src.pipeline.subs_ass import ass_time, build_ass, escape
+from src.pipeline.subs_ass import _render_word, ass_time, build_ass, escape
 
 
 def edl_with_accent() -> EDL:
@@ -233,6 +233,28 @@ def test_accent_word_keeps_one_size_in_every_state():
     base = load_preset("glass").scaled(p.height).font.size
     assert word.size and word.size > base
     assert sizes.pop() == round(word.size / base * 100)
+
+
+def test_accent_keeps_its_colour_after_it_is_spoken():
+    """С2: цвет — это РОЛЬ слова, а не его состояние.
+
+    Пока акцентный цвет жил только в `active`, золото вспыхивало ровно на время
+    произнесения и тут же сменялось белым (замерено на кадре 55 эталонного
+    плана: «человек» выделен, но белый). У эталона выделенное слово держит свой
+    цвет весь блок, а состояние выражено присутствием.
+
+    Обычное слово при этом состоянию по-прежнему подчиняется: у него свой цвет
+    в `past`, и правка не имеет права его съесть.
+    """
+    preset = load_preset("glass")
+    accent = to_ass_colour(preset.colors.accent)
+    word = PlanWord(text="важно", start=0.0, end=1.0, emphasis="accent", word_idx=0, size=100.0)
+    for state in ("active", "past"):
+        assert accent in _render_word(word, state, preset, 30, 1000), state
+
+    plain = PlanWord(text="и", start=0.0, end=1.0, emphasis="none", word_idx=1, size=100.0)
+    assert to_ass_colour(preset.colors.past) in _render_word(plain, "past", preset, 30, 1000)
+    assert accent not in _render_word(plain, "past", preset, 30, 1000)
 
 
 def test_ass_uses_the_size_python_measured_not_the_emphasis():

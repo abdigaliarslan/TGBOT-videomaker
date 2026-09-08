@@ -113,13 +113,18 @@ def pop_window_ms(preset: Preset, fps: int, dialogue_ms: int) -> int:
     return total if total * max(1, fps) >= MIN_ANIM_FRAMES * 1000 else 0
 
 
-def _word_colour(word: PlanWord, preset: Preset) -> str:
+def _word_colour(word: PlanWord, preset: Preset, plain: str | None = None) -> str:
+    """Цвет слова по его РОЛИ. `plain` — чем красить невыделенное слово.
+
+    Выделение цветом не зависит от состояния (С2), а обычное слово состоянию
+    подчиняется: у него свой цвет в `past`, и терять его нельзя.
+    """
     c = preset.colors
     if word.emphasis == "accent":
         return to_ass_colour(c.accent)
     if word.emphasis == "shout":
         return to_ass_colour(c.shout)
-    return to_ass_colour(c.active)
+    return plain if plain is not None else to_ass_colour(c.active)
 
 
 def _render_word(word: PlanWord, state: str, preset: Preset, fps: int, dialogue_ms: int) -> str:
@@ -173,7 +178,15 @@ def _render_word(word: PlanWord, state: str, preset: Preset, fps: int, dialogue_
         if word.emphasis == "shout" and a.shout_rotate:
             tags.append(f"\\frz{a.shout_rotate:g}")
     elif state == "past":
-        tags = [to_ass_alpha(c.past_opacity), f"\\c{to_ass_colour(c.past)}", size]
+        # Цвет по РОЛИ, а не по состоянию (С2): выделенное слово держит своё
+        # золото весь блок. Пока здесь стоял `c.past`, оно белело сразу после
+        # произнесения — ровно как в Remotion до той же правки, и оба рендерера
+        # ошибались одинаково.
+        tags = [
+            to_ass_alpha(c.past_opacity),
+            f"\\c{_word_colour(word, preset, to_ass_colour(c.past))}",
+            size,
+        ]
     else:  # ghost — слово ещё не прозвучало
         tags = [to_ass_alpha(c.ghost_opacity), f"\\c{to_ass_colour(c.ghost)}", size]
 

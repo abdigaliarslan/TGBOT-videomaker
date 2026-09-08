@@ -10,12 +10,12 @@
     "letter_spacing": -0.015
   },
   "colors": {
-    "active": "#FFFFFF",
-    "past": "#FFFFFF",
-    "ghost": "#FFFFFF",
-    "past_opacity": 0.7,
-    "ghost_opacity": 0.18,
-    "accent": "#FFD54A",
+    "active": "#FDFAF2",
+    "past": "#FDFAF2",
+    "ghost": "#FDFAF2",
+    "past_opacity": 1.0,
+    "ghost_opacity": 0.0,
+    "accent": "#F3D28F",
     "shout": "#FF6A3D",
     "outline": "#05070A",
     "shadow": "#000000"
@@ -49,8 +49,8 @@
     "luma_light": 0.8,
     "panel_opacity_dark": 0.0,
     "panel_opacity_light": 0.0,
-    "text_dark": "#FFFFFF",
-    "text_light": "#FFFFFF"
+    "text_dark": "#FDFAF2",
+    "text_light": "#FDFAF2"
   },
   "animation": {
     "pop_scale": 1.05,
