@@ -17,7 +17,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import (
@@ -352,7 +352,13 @@ def deterministic_edl(
     cut_pauses: bool = True,
     cfg: Settings | None = None,
 ) -> EDL:
-    """Фолбэк-режиссёр: без акцентов и b-roll, но ролик собирается всегда (§3)."""
+    """Фолбэк-режиссёр: без b-roll и без разбора смысла, но ролик собирается всегда (§3).
+
+    Выделение здесь всё же расставляется — детерминированно (`lead_word`). Это
+    не разбор смысла, а защита от стены ровного крупного текста: после С1 кегль
+    внутри блока стал иерархией, и блок без выделенного слова читается хуже,
+    чем блок с приблизительно выбранным.
+    """
     cfg = cfg or default_settings
     drop = hesitation_indices(words) if cut_pauses else set()
     cuts = (
@@ -368,11 +374,53 @@ def deterministic_edl(
         preset=preset or cfg.default_preset,
     )
     kept = [w.idx for w in words if _is_kept(w, cuts)]
-    edl.captions = [
-        CaptionBlock(words=[CaptionWord(word_idx=i) for i in group])
-        for group in split_blocks(words, kept, cfg=cfg)
-    ]
+    by_idx = {w.idx: w for w in words}
+    blocks: list[CaptionBlock] = []
+    for group in split_blocks(words, kept, cfg=cfg):
+        # Иерархию кегля держим и здесь: без неё запасной режиссёр отдаёт стену
+        # ровного крупного текста, а это заметнее, чем отсутствие b-roll.
+        lead = lead_word(group, by_idx)
+        blocks.append(
+            CaptionBlock(
+                words=[
+                    CaptionWord(
+                        word_idx=i,
+                        emphasis=Emphasis.ACCENT if i == lead else Emphasis.NONE,
+                    )
+                    for i in group
+                ]
+            )
+        )
+    edl.captions = blocks
     return edl
+
+
+def lead_word(idxs: Sequence[int], by_idx: Mapping[int, Word]) -> int | None:
+    """Какое слово поднять, если режиссёр не назвал ни одного (С3).
+
+    После С1 кегль внутри блока — это иерархия: выделенное слово набирается в
+    2.3 раза крупнее соседей. Блок, в котором не выделено НИЧЕГО, выходит ровной
+    стеной крупного текста — замерено на эталонном плане, где таких блоков 17 %
+    (2 из 12), и на кадре это «Я думаю что» тремя словами по 185 px.
+
+    Выбор — самое длинное слово, при равенстве самое раннее. Это не разбор
+    смысла, а его дешёвый заменитель: служебные слова русского языка коротки
+    («я», «что», «в», «и»), а смысловое обычно длиннее. На эталонном плане
+    правило даёт «думаю» из «я думаю что» и «истину» из «одну истину».
+
+    Выбор кладётся В EDL, а не считается при рендере: EDL остаётся единственным
+    источником правды (§0), сохранённый EDL пересобирается кадр в кадр
+    (инвариант 4), и режиссёр волен его переписать.
+    """
+    best: tuple[int, int] | None = None
+    for i in idxs:
+        w = by_idx.get(i)
+        if w is None:
+            continue
+        n = len(w.text.strip())
+        if best is None or n > best[0]:
+            best = (n, i)
+    return best[1] if best else None
 
 
 def _is_kept(w: Word, cuts: Sequence[Cut]) -> bool:
@@ -393,6 +441,7 @@ def edl_from_plan(
     """Собирает EDL из ответа LLM. Всё, что связано со временем, считаем тут."""
     cfg = cfg or default_settings
     known = {w.idx for w in words}
+    by_idx = {w.idx: w for w in words}
 
     drop = {int(i) for i in plan.get("drop_words") or [] if int(i) in known}
     drop |= hesitation_indices(words)  # заминки режем в любом случае
@@ -412,6 +461,11 @@ def edl_from_plan(
         emphasis_map: dict[int, Emphasis] = {}
         if isinstance(accent_word, int) and accent_word in idxs and accent_kind in ("accent", "shout"):
             emphasis_map[accent_word] = Emphasis(accent_kind)
+        else:
+            # Режиссёр не назвал слово — поднимаем сами (С3, см. `lead_word`).
+            fallback = lead_word(idxs, by_idx)
+            if fallback is not None:
+                emphasis_map[fallback] = Emphasis.ACCENT
         captions.append(
             CaptionBlock(
                 words=[

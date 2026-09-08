@@ -91,8 +91,11 @@ async def test_two_bad_plans_fall_back_to_deterministic():
     edl = await direct(ws, 4.5, llm=llm, language="ru", cfg=cfg())
     assert validate_edl(edl) == []
     assert len(llm.fake.calls) == 2
-    # фолбэк не расставляет акценты
-    assert all(cw.emphasis.value == "none" for b in edl.captions for cw in b.words)
+    # Фолбэк не ЧИТАЕТ смысл, но иерархию кегля держит: без неё блок выходит
+    # стеной ровного крупного текста (С1 сделал кегль иерархией). Ровно одно
+    # слово на блок, выбранное детерминированно, — см. `lead_word`.
+    for block in edl.captions:
+        assert sum(1 for cw in block.words if cw.emphasis.value != "none") == 1
 
 
 async def test_llm_outage_falls_back_without_raising():

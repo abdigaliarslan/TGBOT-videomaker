@@ -202,7 +202,56 @@ def test_edl_from_plan_ignores_accent_outside_block():
     }
     edl = edl_from_plan(ws, 3.0, plan, cfg=cfg())
     assert validate_edl(edl) == []
-    assert all(cw.emphasis.value == "none" for b in edl.captions for cw in b.words)
+    # Слово 3 не входит в первый блок — модель промахнулась, и её выбор не
+    # honоurится: во втором блоке оно остаётся обычным.
+    second = {cw.word_idx: cw.emphasis.value for cw in edl.captions[1].words}
+    assert second[3] == "none", "промах модели не должен превращаться в выделение"
+    # Пустым блок при этом не остаётся: своё слово поднимает `lead_word` (С3).
+    for block in edl.captions:
+        assert sum(1 for cw in block.words if cw.emphasis.value != "none") == 1
+
+
+def test_every_block_gets_a_lead_word():
+    """С3: блок без выделенного слова — стена ровного крупного текста.
+
+    До С1 это было безразлично: все слова шли одним кеглем. После С1 кегль внутри
+    блока стал иерархией (выделенное слово в 2.3 раза крупнее), и блок, в котором
+    режиссёр никого не поднял, читается заметно хуже соседних. На эталонном плане
+    таких блоков было 17 % — 2 из 12.
+    """
+    ws = mk(
+        [("я", 0.0, 0.3), ("думаю", 0.35, 0.8), ("что", 0.85, 1.1),
+         ("одну", 1.2, 1.6), ("истину", 1.65, 2.2)]
+    )
+    plan = {
+        "hook_end_word": None,
+        "drop_words": [],
+        "blocks": [
+            {"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto"},
+            {"words": [3, 4], "accent_word": None, "accent": None, "position": "auto"},
+        ],
+    }
+    edl = edl_from_plan(ws, 3.0, plan, cfg=cfg())
+    assert validate_edl(edl) == []
+    picked = [
+        next(cw.word_idx for cw in b.words if cw.emphasis.value != "none")
+        for b in edl.captions
+    ]
+    # Служебные слова русского коротки, смысловое обычно длиннее — этого хватает.
+    assert [ws[i].text for i in picked] == ["думаю", "истину"]
+
+
+def test_the_directors_word_beats_the_fallback():
+    """Запасной выбор — именно запасной: названное моделью слово его отменяет."""
+    ws = mk([("я", 0.0, 0.3), ("думаю", 0.35, 0.8), ("что", 0.85, 1.1)])
+    plan = {
+        "hook_end_word": None,
+        "drop_words": [],
+        "blocks": [{"words": [0, 1, 2], "accent_word": 2, "accent": "shout", "position": "auto"}],
+    }
+    edl = edl_from_plan(ws, 2.0, plan, cfg=cfg())
+    marked = {cw.word_idx: cw.emphasis.value for cw in edl.captions[0].words}
+    assert marked == {0: "none", 1: "none", 2: "shout"}
 
 
 def test_words_table_marks_pauses():
