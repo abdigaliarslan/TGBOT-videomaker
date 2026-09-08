@@ -40,6 +40,17 @@ EPS = 1e-3
 DROP_MARGIN = 5e-3
 SENTENCE_END = re.compile(r"[.!?…]+[\"»)]*$")
 
+# Крупность (Ф6). Смена происходит на резе и только на нём, поэтому единственное,
+# что здесь нужно решить, — на каком именно резе.
+#
+# FRAMING_MIN_HOLD: сколько секунд крупность обязана простоять, прежде чем её
+# можно менять. Русская речь даёт рез каждые 2-4 секунды; без выдержки крупность
+# скакала бы почти на каждом, и монтаж превратился бы в мигание.
+# FRAMING_MIN_SEGMENT: короткому куску своя крупность не достаётся — зритель
+# успеет заметить только скачок, но не сам план.
+FRAMING_MIN_HOLD = 2.2
+FRAMING_MIN_SEGMENT = 0.8
+
 # Ярус-1: заминки, режутся всегда, даже без LLM.
 HESITATIONS = {
     "ээ", "эээ", "эм", "эмм", "мм", "ммм", "аа", "ааа", "мгм", "эээм",
@@ -68,6 +79,29 @@ def _normalize(text: str) -> str:
 def hesitation_indices(words: Sequence[Word]) -> set[int]:
     """Заминки — их режем без всякой LLM."""
     return {w.idx for w in words if _normalize(w.text) in HESITATIONS}
+
+
+def assign_framing(cuts: Sequence[Cut]) -> None:
+    """Проставляет крупность оставленным кускам. На месте, по готовым резам.
+
+    LLM здесь не участвует и в схему `framing` не входит: чередование планов —
+    это ремесло монтажёра, полностью выводимое из уже принятых решений о резах.
+    Модели тут нечего добавить, а возможность ошибиться — есть.
+
+    Правило: хук снимаем крупно (это единственный кусок, который обязан удержать
+    зрителя), дальше крупность чередуется, но не чаще FRAMING_MIN_HOLD секунд и
+    только на кусках длиннее FRAMING_MIN_SEGMENT. Выброшенные куски остаются со
+    своим значением по умолчанию: их никто не увидит.
+    """
+    current = "wide"
+    hold = 0.0
+    for cut in sorted((c for c in cuts if c.kept), key=lambda c: c.src_in):
+        if cut.reason == "hook":
+            current, hold = "tight", 0.0
+        elif hold >= FRAMING_MIN_HOLD and cut.duration >= FRAMING_MIN_SEGMENT:
+            current, hold = ("wide" if current == "tight" else "tight"), 0.0
+        cut.framing = current  # type: ignore[assignment]
+        hold += cut.duration
 
 
 def build_cuts(
@@ -205,6 +239,9 @@ def build_cuts(
                 reason="drop_filler" if has_dropped else "drop_silence",
             )
         )
+    # Крупность — по готовым резам (Ф6). Вырожденные выходы выше отдают один
+    # kept-кусок без хука, и `wide` по умолчанию для них уже верно.
+    assign_framing(cuts)
     return cuts
 
 

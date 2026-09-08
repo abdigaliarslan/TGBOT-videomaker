@@ -21,6 +21,15 @@ log = logging.getLogger(__name__)
 
 ALIGN = {"bottom": 2, "center": 5, "top": 8}
 
+# Мягкая тень вместо контура (Ф1). Жирный шрифт с чёрным кантом читается как
+# дефолтный шаблон монтажки, а под панелью кант вдобавок избыточен. В ASS нет
+# многослойного text-shadow, поэтому эквивалент CSS-гало `0 0 Npx` собирается из
+# тонкой обводки, размытой `\blur`: это подложка под буквой, а не кант.
+# Доли от кегля: было 0.07 канта без размытия.
+OUTLINE_RATIO = 0.03
+BLUR_RATIO = 0.06
+SHADOW_RATIO = 0.045
+
 
 def ass_time(seconds: float) -> str:
     seconds = max(0.0, seconds)
@@ -143,8 +152,8 @@ def build_ass(plan: RenderPlan) -> str:
             f"{round(f.letter_spacing * f.size, 1)}",  # Spacing
             "0",  # Angle
             "1",  # BorderStyle: обводка + тень
-            f"{max(2, round(f.size * 0.07))}",  # Outline
-            f"{max(1, round(f.size * 0.035))}",  # Shadow
+            f"{max(1, round(f.size * OUTLINE_RATIO))}",  # Outline — гало, а не кант
+            f"{max(1, round(f.size * SHADOW_RATIO))}",  # Shadow
             "2",  # Alignment (перебивается \an в репликах)
             "80",  # MarginL
             "80",  # MarginR
@@ -171,10 +180,14 @@ Style: {style}
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
+    # `\blur` ставится один раз в начале реплики: теги ASS живут до конца строки,
+    # а размывает он и обводку, и тень — то есть ровно то, что должно быть мягким.
+    blur = max(2, round(f.size * BLUR_RATIO))
+
     lines: list[str] = []
     for block in plan.blocks:
         for start, end, text, align in _block_dialogues(block, preset):
-            body = "{" + f"\\an{align}" + "}" + text
+            body = "{" + f"\\an{align}\\blur{blur}" + "}" + text
             lines.append(
                 f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Main,,0,0,0,,{body}"
             )

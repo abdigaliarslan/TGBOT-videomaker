@@ -1,4 +1,4 @@
-"""Тесты плана рендера: пересчёт времени, перенос строк, разъезд с b-roll."""
+"""Тесты плана рендера: пересчёт времени, перенос строк, разъезд с b-roll, геометрия."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from src.core.edl import (
     Emphasis,
     Word,
 )
+from src.core.geometry import Rect, broll_rect
 from src.core.preset import load_preset
 from src.core.render_plan import RenderPlan, build_plan
 
@@ -160,3 +161,80 @@ def test_plan_json_has_no_none_video():
     plan = build_plan(sample_edl(), "v.mp4", cfg=cfg())
     assert plan.to_dict()["video"] == "v.mp4"
     assert plan.to_dict()["fps"] == 30
+
+
+# ------------------------------------------------------------------ геометрия (Ф4)
+
+
+def test_every_block_carries_a_rect_inside_the_frame():
+    """Рендерер получает готовый прямоугольник, а не половину кадра (AUDIT §8.4)."""
+    plan = build_plan(sample_edl(), "v.mp4", cfg=cfg())
+    assert plan.blocks
+    for b in plan.blocks:
+        assert b.rect is not None
+        assert 0 <= b.rect.x and b.rect.right <= plan.width + 1e-6
+        assert 0 <= b.rect.y and b.rect.bottom <= plan.height + 1e-6
+
+
+def test_block_rect_follows_the_resolved_position():
+    """Прямоугольник считается ПОСЛЕ разъезда с картинкой, а не до него."""
+    top = build_plan(broll_edl("bottom_right"), "v.mp4", cfg=cfg()).blocks[0]
+    bottom = build_plan(broll_edl("top_right"), "v.mp4", cfg=cfg()).blocks[0]
+    assert top.position == "top" and bottom.position == "bottom"
+    assert top.rect is not None and bottom.rect is not None
+    assert top.rect.y < bottom.rect.y
+
+
+def test_block_rect_scales_with_the_frame():
+    tall = build_plan(sample_edl(), "v.mp4", height=1920, width=1080, cfg=cfg())
+    short = build_plan(sample_edl(), "v.mp4", height=960, width=540, cfg=cfg())
+    assert tall.blocks[0].rect.width > short.blocks[0].rect.width  # type: ignore[union-attr]
+    assert short.blocks[0].rect.right <= 540 + 1e-6  # type: ignore[union-attr]
+
+
+def test_broll_carries_the_rect_of_its_anchor():
+    plan = build_plan(broll_edl("bottom_right"), "v.mp4", cfg=cfg())
+    preset = load_preset("glass")
+    assert plan.broll[0].rect == broll_rect("bottom_right", preset, (plan.width, plan.height))
+
+
+def test_fullscreen_to_inset_rect_is_the_corner_it_ends_in():
+    edl = broll_edl("fullscreen")
+    edl.broll[0].anim = BrollAnim.FULLSCREEN_TO_INSET
+    plan = build_plan(edl, "v.mp4", cfg=cfg())
+    rect = plan.broll[0].rect
+    assert rect is not None and rect.width < plan.width
+
+
+def test_rects_survive_the_json_round_trip():
+    plan = build_plan(broll_edl("bottom_right"), "v.mp4", cfg=cfg())
+    again = RenderPlan.from_dict(plan.to_dict())
+    assert again.blocks[0].rect == plan.blocks[0].rect.rounded()  # type: ignore[union-attr]
+    assert again.broll[0].rect == plan.broll[0].rect.rounded()  # type: ignore[union-attr]
+
+
+def test_plan_without_rects_still_loads():
+    """Планы, собранные до Ф4, читаются: прямоугольников просто нет."""
+    data = build_plan(broll_edl("bottom_right"), "v.mp4", cfg=cfg()).to_dict()
+    for item in data["blocks"] + data["broll"]:
+        item.pop("rect")
+    plan = RenderPlan.from_dict(data)
+    assert plan.blocks[0].rect is None
+    assert plan.broll[0].rect is None
+
+
+def test_missing_font_metrics_do_not_break_the_plan():
+    """Нет метрик — нет прямоугольника, но ролик всё равно рендерится."""
+    preset = load_preset("glass").model_copy(deep=True)
+    preset.font.file = None
+    plan = build_plan(sample_edl(), "v.mp4", preset=preset, cfg=cfg())
+    assert plan.blocks and plan.blocks[0].rect is None
+
+
+def test_caption_and_broll_rects_are_comparable():
+    """Разводить субтитр с картинкой теперь можно пересечением, а не половинами."""
+    plan = build_plan(broll_edl("bottom_right"), "v.mp4", cfg=cfg())
+    caption = plan.blocks[0].rect
+    picture = plan.broll[0].rect
+    assert isinstance(caption, Rect) and isinstance(picture, Rect)
+    assert not caption.overlaps(picture)

@@ -143,6 +143,28 @@ class Animation(BaseModel):
     accent_scale: float = 1.18
     shout_scale: float = 1.34
     shout_rotate: float = -4.0  # градусы
+    # Ход движения в пикселях при высоте кадра 1920. Раньше эти два числа были
+    # константами в TSX (`font.size * 0.28` и `height * 0.09`) и Python о них не
+    # знал; здесь они данные, которые пересчитывает scaled().
+    block_shift_px: int = 24  # подъём блока субтитров на входе
+    broll_slide_px: int = 173  # ход карточки в slide_up
+
+
+# Все поля пресета, измеренные в пикселях при высоте кадра 1920. Держим их одним
+# списком: появилось новое пиксельное поле — впиши сюда, иначе на превью 720p оно
+# останется в масштабе 1920 и композиция поедет. Всё, чего здесь нет, от высоты
+# кадра не зависит по своей природе: миллисекунды, множители, доли, цвета.
+_PIXEL_FIELDS: tuple[tuple[str, str], ...] = (
+    ("font", "size"),
+    ("caption", "margin"),
+    ("panel", "padding_x"),
+    ("panel", "padding_y"),
+    ("panel", "radius"),
+    ("panel", "blur"),
+    ("panel", "border_width"),
+    ("animation", "block_shift_px"),
+    ("animation", "broll_slide_px"),
+)
 
 
 class Preset(BaseModel):
@@ -162,17 +184,23 @@ class Preset(BaseModel):
     background: str = "#000000"
 
     def scaled(self, height: int) -> "Preset":
-        """Размеры заданы для 1920 по высоте; под другой кадр — пропорционально."""
+        """Размеры заданы для 1920 по высоте; под другой кадр — пропорционально.
+
+        Пересчитывается всё пиксельное разом по `_PIXEL_FIELDS`. Раньше список
+        был зашит в тело метода и покрывал шесть полей из девяти: рамка панели и
+        ход анимаций оставались в масштабе 1920 и на превью 720p прыгали в
+        полтора раза сильнее остальной композиции.
+        """
         if height == 1920:
             return self
         k = height / 1920
         clone = self.model_copy(deep=True)
-        clone.font.size = max(12, round(self.font.size * k))
-        clone.caption.margin = round(self.caption.margin * k)
-        clone.panel.padding_x = round(self.panel.padding_x * k)
-        clone.panel.padding_y = round(self.panel.padding_y * k)
-        clone.panel.radius = round(self.panel.radius * k)
-        clone.panel.blur = round(self.panel.blur * k)
+        for section, name in _PIXEL_FIELDS:
+            value = getattr(getattr(self, section), name)
+            # Ноль — это «выключено», он остаётся нулём. А единица это не размер,
+            # а волосок: округление в ноль стирает край панели совсем.
+            setattr(getattr(clone, section), name, 0 if value == 0 else max(1, round(value * k)))
+        clone.font.size = max(12, clone.font.size)
         return clone
 
 

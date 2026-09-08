@@ -10,8 +10,10 @@ from __future__ import annotations
 import pytest
 
 from src.core.config import Settings
-from src.core.edl import Word, validate_edl
+from src.core.edl import Cut, Word, validate_edl
 from src.pipeline.director import (
+    FRAMING_MIN_HOLD,
+    assign_framing,
     build_cuts,
     deterministic_edl,
     edl_from_plan,
@@ -214,3 +216,62 @@ def test_deterministic_edl_valid_for_many_shapes(n):
     ws = mk([(f"w{i}", i * 0.45, i * 0.45 + 0.35) for i in range(n)])
     edl = deterministic_edl(ws, n * 0.45 + 1.0, cfg=cfg())
     assert validate_edl(edl) == []
+
+
+# ------------------------------------------------------------------ крупность (Ф6)
+
+
+def cuts_of(spec: list[tuple[float, float, str]]) -> list[Cut]:
+    return [Cut(src_in=a, src_out=b, reason=r) for a, b, r in spec]
+
+
+def test_hook_is_shot_tight():
+    """Хук — единственный кусок, который обязан удержать зрителя."""
+    cuts = cuts_of([(0.0, 0.2, "drop_silence"), (0.2, 5.0, "hook"), (5.0, 11.0, "keep")])
+    assign_framing(cuts)
+    assert cuts[1].framing == "tight"
+
+
+def test_framing_alternates_on_long_cuts():
+    cuts = cuts_of([(0.0, 5.0, "hook"), (5.0, 11.0, "keep"), (11.0, 18.0, "keep")])
+    assign_framing(cuts)
+    assert [c.framing for c in cuts] == ["tight", "wide", "tight"]
+
+
+def test_framing_holds_through_short_cuts():
+    """Череда коротких кусков не должна давать мигание крупности."""
+    cuts = cuts_of([(i * 0.5, i * 0.5 + 0.5, "keep") for i in range(10)])
+    assign_framing(cuts)
+    assert len({c.framing for c in cuts}) == 1
+
+
+def test_framing_waits_for_min_hold():
+    """Смена не раньше FRAMING_MIN_HOLD секунд после предыдущей."""
+    cuts = cuts_of([(0.0, 1.2, "keep"), (1.2, 2.4, "keep"), (2.4, 9.0, "keep")])
+    assign_framing(cuts)
+    changes = [i for i in range(1, len(cuts)) if cuts[i].framing != cuts[i - 1].framing]
+    assert changes == [2]
+    assert cuts[0].duration < FRAMING_MIN_HOLD <= sum(c.duration for c in cuts[:2])
+
+
+def test_framing_ignores_dropped_cuts():
+    """Вырезанный кусок не участвует ни в выдержке, ни в чередовании."""
+    cuts = cuts_of([(0.0, 3.0, "keep"), (3.0, 9.0, "drop_silence"), (9.0, 12.0, "keep")])
+    assign_framing(cuts)
+    assert cuts[1].framing == "wide"  # значение по умолчанию, его никто не увидит
+    assert cuts[0].framing != cuts[2].framing
+
+
+def test_build_cuts_fills_framing():
+    ws = mk([("раз", 0.5, 0.9), ("два", 1.1, 1.5), ("три", 5.0, 5.4), ("четыре", 5.6, 6.0)])
+    cuts = build_cuts(ws, 7.0, hook_end_word=1, cfg=cfg())
+    assert all(c.framing in ("wide", "tight") for c in cuts)
+    assert next(c for c in cuts if c.reason == "hook").framing == "tight"
+
+
+def test_edl_from_plan_fills_framing():
+    ws = mk([(f"сл{i}", i * 0.4, i * 0.4 + 0.3) for i in range(9)])
+    plan = {"hook_end_word": 2, "drop_words": [], "blocks": [{"words": list(range(9))}]}
+    edl = edl_from_plan(ws, 5.0, plan, cfg=cfg())
+    assert {c.framing for c in edl.kept_cuts} <= {"wide", "tight"}
+    assert any(c.framing == "tight" for c in edl.kept_cuts)

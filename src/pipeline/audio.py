@@ -12,7 +12,19 @@ from src.core.proc import capture, ffmpeg
 log = logging.getLogger(__name__)
 
 ASR_SAMPLE_RATE = 16_000
-LOUDNORM_BASE = "loudnorm=I=-14:TP=-1.5:LRA=11"
+
+# Цель по умолчанию для нарезки (M6). Звуковой пост (Ф2) просит свою из пресета:
+# −16 LUFS — то, что ждут соцсети, −14 осталось историческим значением этапа cut.
+LOUDNORM_TARGET_LUFS = -14.0
+LOUDNORM_TP = -1.5  # потолок истинного пика, дБTP
+LOUDNORM_LRA = 11.0
+
+
+def loudnorm_base(target_lufs: float = LOUDNORM_TARGET_LUFS) -> str:
+    return f"loudnorm=I={target_lufs:g}:TP={LOUDNORM_TP:g}:LRA={LOUDNORM_LRA:g}"
+
+
+LOUDNORM_BASE = loudnorm_base()
 
 
 def extract_wav(src: str | Path, dst: str | Path, *, sample_rate: int = ASR_SAMPLE_RATE) -> Path:
@@ -29,8 +41,15 @@ def extract_wav(src: str | Path, dst: str | Path, *, sample_rate: int = ASR_SAMP
     return dst
 
 
-def measure_loudness(src: str | Path) -> dict[str, float] | None:
-    """Первый проход loudnorm: замер. None, если замерить не удалось."""
+def measure_loudness(
+    src: str | Path, *, target_lufs: float = LOUDNORM_TARGET_LUFS
+) -> dict[str, float] | None:
+    """Первый проход loudnorm: замер. None, если замерить не удалось.
+
+    Цель нужна уже здесь: loudnorm печатает `target_offset` относительно неё, и
+    подставлять замер одной цели в фильтр с другой — значит промахнуться мимо
+    обеих.
+    """
     code, out, err = capture(
         [
             "ffmpeg",
@@ -39,7 +58,7 @@ def measure_loudness(src: str | Path) -> dict[str, float] | None:
             "-i",
             str(src),
             "-af",
-            f"{LOUDNORM_BASE}:print_format=json",
+            f"{loudnorm_base(target_lufs)}:print_format=json",
             "-f",
             "null",
             "-",
@@ -64,19 +83,66 @@ def measure_loudness(src: str | Path) -> dict[str, float] | None:
     return parsed or None
 
 
-def loudnorm_filter(measured: dict[str, float] | None = None) -> str:
+def loudnorm_filter(
+    measured: dict[str, float] | None = None, *, target_lufs: float = LOUDNORM_TARGET_LUFS
+) -> str:
     """Строка фильтра. С замером — двухпроходный (точный), без — однопроходный."""
+    base = loudnorm_base(target_lufs)
     need = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
     if not measured or not all(k in measured for k in need):
-        return LOUDNORM_BASE
+        return base
     # -70 в input_i означает «тишина»: линейный режим на такой дорожке ломает звук.
     if measured["input_i"] <= -70.0:
-        return LOUDNORM_BASE
+        return base
     return (
-        f"{LOUDNORM_BASE}:measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
+        f"{base}:measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
         f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
         f":offset={measured['target_offset']}:linear=true"
     )
+
+
+def measure_ebur128(src: str | Path) -> dict[str, float] | None:
+    """Итоговая громкость дорожки по EBU R128: I (LUFS), LRA (LU), пик (dBFS).
+
+    Отдельно от `measure_loudness`: тот считает вход для нормализации, а этот
+    проверяет РЕЗУЛЬТАТ. Проверять нормализатор его же замером бессмысленно —
+    нужен независимый счётчик, и это ровно та команда, которой DoD Ф2 меряется
+    руками (`ffmpeg -i x -af ebur128 -f null -`).
+    """
+    code, out, err = capture(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-i",
+            str(src),
+            "-af",
+            "ebur128=peak=true",
+            "-f",
+            "null",
+            "-",
+        ]
+    )
+    if code != 0:
+        log.warning("ebur128-замер не удался (код %s)", code)
+        return None
+    text = out + err
+    # В логе ebur128 печатает и покадровые строки с тем же «I:», поэтому цепляемся
+    # за блок Summary в конце, а не за первое совпадение.
+    tail = text[text.rfind("Summary:") :] if "Summary:" in text else text
+    values: dict[str, float] = {}
+    for key, pattern in (
+        ("i", r"\bI:\s*(-?[\d.]+)\s*LUFS"),
+        ("lra", r"\bLRA:\s*(-?[\d.]+)\s*LU"),
+        ("peak", r"Peak:\s*(-?[\d.]+)\s*dBFS"),
+    ):
+        m = re.search(pattern, tail)
+        if m:
+            try:
+                values[key] = float(m.group(1))
+            except ValueError:
+                continue
+    return values or None
 
 
 def detect_silence(

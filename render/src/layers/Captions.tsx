@@ -3,20 +3,36 @@
  * glass-панель, контейнер растёт под контент сам.
  *
  * Анимация — код, а не модель (§0.2). Пресет задаёт только числа.
+ *
+ * Всё время считается в кадрах от округлённых до сетки границ. Секунды в плане
+ * лежат с точностью до миллисекунды и между кадрами не попадают, поэтому по
+ * времени первый отрисованный кадр приходился на середину подъёма: слово
+ * стартовало с альфы 0.09-0.45, и момент появления гулял от ролика к ролику.
  */
 
 import React from "react";
 import { interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
 import type { PlanBlock, PlanWord, Preset } from "../types";
-import { rgba } from "../style";
+import { animFrames, easeOut, motionPx, popBump, rgba, springFrames } from "../style";
 
 type WordState = "ghost" | "active" | "past";
 
-const stateOf = (word: PlanWord, t: number): WordState => {
-  if (t < word.start) return "ghost";
-  if (t <= word.end) return "active";
+const stateOf = (word: PlanWord, frame: number, fps: number): WordState => {
+  if (frame < Math.round(word.start * fps)) return "ghost";
+  if (frame <= Math.round(word.end * fps)) return "active";
   return "past";
 };
+
+/**
+ * Нижняя граница нахлёста блоков: уходящий блок обязан быть ещё виден, когда
+ * пришёл новый, иначе между репликами моргает пустой кадр. Пресеты просят
+ * 100-140 мс — этого мало на любом fps, поэтому берём максимум с 220 мс.
+ */
+const MIN_OVERLAP_MS = 220;
+
+/** Хвост блока в кадрах. Считается в одном месте: им живут и Block, и фильтр. */
+const blockOutFrames = (preset: Preset, fps: number): number =>
+  animFrames(Math.max(preset.animation.block_out_ms, MIN_OVERLAP_MS), fps);
 
 const emphasisScale = (word: PlanWord, preset: Preset): number => {
   if (word.emphasis === "accent") return preset.animation.accent_scale;
@@ -30,35 +46,61 @@ const emphasisColor = (word: PlanWord, preset: Preset): string => {
   return preset.colors.active;
 };
 
+/**
+ * Мягкая тень вместо обводки.
+ *
+ * Жирный шрифт с чёрным контуром читается как дефолтный шаблон монтажки, а под
+ * панелью обводка вдобавок избыточна. Читаемость держат четыре слоя: гало без
+ * смещения работает как размытый контур, дальше контактная тень, средняя и
+ * широкая подложка, которая гасит светлый фон под всей строкой.
+ */
+const softShadow = (preset: Preset): string => {
+  const s = preset.font.size;
+  const c = preset.colors.shadow;
+  return [
+    `0 0 ${Math.round(s * 0.07)}px ${rgba(c, 0.5)}`,
+    `0 ${Math.max(1, Math.round(s * 0.012))}px ${Math.round(s * 0.03)}px ${rgba(c, 0.55)}`,
+    `0 ${Math.round(s * 0.05)}px ${Math.round(s * 0.1)}px ${rgba(c, 0.42)}`,
+    `0 ${Math.round(s * 0.11)}px ${Math.round(s * 0.26)}px ${rgba(c, 0.3)}`,
+  ].join(", ");
+};
+
 const Word: React.FC<{ word: PlanWord; preset: Preset }> = ({ word, preset }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const t = frame / fps;
-  const state = stateOf(word, t);
+  const state = stateOf(word, frame, fps);
   const a = preset.animation;
 
-  // Пружина стартует в момент, когда слово прозвучало. Ghost-слова уже
+  // Пружина стартует в кадре, когда слово прозвучало. Ghost-слова уже
   // нарисованы на своих местах, поэтому контейнер не прыгает при появлении.
-  const framesSinceStart = frame - word.start * fps;
+  const framesSinceStart = frame - Math.round(word.start * fps);
+  const config = {
+    damping: a.spring_damping,
+    stiffness: a.spring_stiffness,
+    mass: a.spring_mass,
+  };
   const pop =
     framesSinceStart >= 0
       ? spring({
           frame: framesSinceStart,
           fps,
-          config: {
-            damping: a.spring_damping,
-            stiffness: a.spring_stiffness,
-            mass: a.spring_mass,
-          },
-          durationInFrames: Math.max(2, Math.round((a.pop_ms / 1000) * fps)),
+          // Натуральная длительность: сжатая пружина обрывается на максимуме
+          // скорости (было 5 кадров при 17 натуральных для glass).
+          durationInFrames: springFrames(fps, config),
+          config,
         })
       : 0;
 
   const base = emphasisScale(word, preset);
-  // 0 → обычный размер, 1 → размер акцента с лёгким перелётом.
+  // Рост до размера акцента ведёт пружина, а транзиентный «пшик» — время.
+  // На пружине пик приходился на 0.55 её значения, то есть на третий кадр:
+  // масштаб успевал вернуться раньше, чем глаз замечал прибавку.
+  const bump = state === "ghost" ? 0 : popBump(framesSinceStart / animFrames(a.pop_ms, fps));
   const scale =
-    state === "ghost" ? 1 : interpolate(pop, [0, 1], [1, base], { extrapolateRight: "clamp" }) *
-      interpolate(pop, [0, 0.55, 1], [1, a.pop_scale, 1], { extrapolateRight: "clamp" });
+    state === "ghost"
+      ? 1
+      : interpolate(pop, [0, 1], [1, base], { extrapolateRight: "clamp" }) *
+        (1 + (a.pop_scale - 1) * bump);
 
   const rotate =
     word.emphasis === "shout" && state !== "ghost"
@@ -72,6 +114,8 @@ const Word: React.FC<{ word: PlanWord; preset: Preset }> = ({ word, preset }) =>
         ? preset.colors.past
         : preset.colors.ghost;
 
+  // ghost_opacity = 0 (glass) гасит слово, но не убирает его из потока: место
+  // под него зарезервировано, и панель не меняет размер, когда слово зазвучит.
   const opacity =
     state === "active" ? 1 : state === "past" ? preset.colors.past_opacity : preset.colors.ghost_opacity;
 
@@ -84,16 +128,12 @@ const Word: React.FC<{ word: PlanWord; preset: Preset }> = ({ word, preset }) =>
         transform: `scale(${scale}) rotate(${rotate}deg)`,
         transformOrigin: "center bottom",
         willChange: "transform, opacity",
-        // Обводка обязательна: субтитр должен читаться на любом кадре.
-        WebkitTextStroke: `${Math.round(preset.font.size * 0.02)}px ${preset.colors.outline}`,
-        paintOrder: "stroke fill",
-        textShadow: `0 ${Math.round(preset.font.size * 0.05)}px ${Math.round(
-          preset.font.size * 0.09,
-        )}px ${rgba(preset.colors.shadow, 0.55)}`,
+        textShadow: softShadow(preset),
       }}
     >
       {word.text}
-      {word.emoji ? <span style={{ WebkitTextStroke: "0" }}> {word.emoji}</span> : null}
+      {/* Эмодзи — цветной глиф: тень под ним читается как грязь, гасим. */}
+      {word.emoji ? <span style={{ textShadow: "none" }}> {word.emoji}</span> : null}
     </span>
   );
 };
@@ -101,23 +141,38 @@ const Word: React.FC<{ word: PlanWord; preset: Preset }> = ({ word, preset }) =>
 const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const t = frame / fps;
   const a = preset.animation;
 
-  const inS = a.block_in_ms / 1000;
-  const outS = a.block_out_ms / 1000;
-  const appear = interpolate(t, [block.start - inS, block.start], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-  const disappear = interpolate(t, [block.end - outS, block.end], [1, 0], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  const startFrame = Math.round(block.start * fps);
+  const endFrame = Math.round(block.end * fps);
+  const inFrames = animFrames(a.block_in_ms, fps);
+  const outFrames = blockOutFrames(preset, fps);
+
+  // Блок появляется от своего начала и уходит ПОСЛЕ своего конца. Раньше он
+  // гас за block_out_ms до конца, то есть таял прямо на последнем слове, а
+  // между соседними блоками (`a.end == b.start` после build_plan) оставалась
+  // дыра. Теперь уходящий блок ещё виден, когда приходит новый: нахлёст равен
+  // outFrames. Обе кривые одной природы — тормозят к своему конечному
+  // состоянию, поэтому выход не линейный и не щёлкает.
+  const appear = easeOut(
+    interpolate(frame, [startFrame, startFrame + inFrames], [0, 1], {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    }),
+  );
+  const disappear =
+    1 -
+    easeOut(
+      interpolate(frame, [endFrame, endFrame + outFrames], [0, 1], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      }),
+    );
   const presence = Math.min(appear, disappear);
   if (presence <= 0) return null;
 
   const p = preset.panel;
+  const shift = motionPx(a, "block_shift_px", Math.round(preset.font.size * 0.28));
 
   return (
     <div
@@ -138,9 +193,7 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
             ? `${p.border_width}px solid ${rgba(p.border_color, p.border_opacity)}`
             : undefined,
         opacity: presence,
-        transform: `translateY(${(1 - presence) * preset.font.size * 0.28}px) scale(${
-          0.965 + presence * 0.035
-        })`,
+        transform: `translateY(${(1 - presence) * shift}px) scale(${0.965 + presence * 0.035})`,
         maxWidth: "88%",
         willChange: "transform, opacity",
       }}
@@ -175,12 +228,14 @@ const SAFE_AREA_RATIO = 0.07;
 export const Captions: React.FC<{ blocks: PlanBlock[]; preset: Preset }> = ({ blocks, preset }) => {
   const frame = useCurrentFrame();
   const { fps, height } = useVideoConfig();
-  const t = frame / fps;
   const margin = Math.max(preset.caption.margin, Math.round(height * SAFE_AREA_RATIO));
-  const lead = preset.animation.block_in_ms / 1000;
-  const tail = preset.animation.block_out_ms / 1000;
+  // Хвост ровно тот же, что у Block: блок живёт на outFrames дольше своего
+  // конца и обязан пережить фильтр, иначе нахлёст срежется здесь.
+  const tail = blockOutFrames(preset, fps);
 
-  const visible = blocks.filter((b) => t >= b.start - lead && t <= b.end + tail);
+  const visible = blocks.filter(
+    (b) => frame >= Math.round(b.start * fps) && frame <= Math.round(b.end * fps) + tail,
+  );
   if (visible.length === 0) return null;
 
   const justify = (position: string) =>
@@ -188,6 +243,7 @@ export const Captions: React.FC<{ blocks: PlanBlock[]; preset: Preset }> = ({ bl
 
   return (
     <>
+      {/* Порядок сохраняем: во время нахлёста уходящий блок лежит под приходящим. */}
       {visible.map((block, i) => (
         <div
           key={`${block.start}-${i}`}

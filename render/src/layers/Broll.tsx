@@ -2,15 +2,26 @@
  * M7: вставные картинки. Три анимации входа, включая fullscreen → inset.
  *
  * Картинка никогда не рисуется в центре по умолчанию: там лицо (§7 DoD).
+ *
+ * Всё время — в кадрах от округлённых до сетки границ: `item.start` лежит с
+ * точностью до миллисекунды и на сетку не попадает, поэтому первый
+ * отрисованный кадр давал `framesIn ∈ [0,1)` — карточка стартовала не с нуля,
+ * а с альфы 0.09-0.45, и момент появления гулял от ролика к ролику (§8.3).
  */
 
 import React from "react";
 import { Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
 import type { Anchor, PlanBroll, Preset } from "../types";
-import { easeOut } from "../style";
+import { animFrames, easeOut, motionPx, springFrames } from "../style";
 
 const INSET_RATIO = 0.44; // доля ширины кадра под картинку в углу
 const MARGIN = 0.05; // отступ от края в долях ширины
+
+/** Появление и уход карточки. Обе фазы одной природы — тормозят к своему концу. */
+const FADE_MS = 220;
+
+/** Пружина входа: ведёт только геометрию, альфу ведёт FADE_MS. */
+const ENTER_SPRING = { damping: 14, stiffness: 200, mass: 0.8 };
 
 type Box = { left: number; top: number; width: number; height: number };
 
@@ -37,37 +48,54 @@ const anchorBox = (anchor: Anchor, W: number, H: number): Box => {
 const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
-  const t = frame / fps;
   if (!item.asset) return null;
-  if (t < item.start || t > item.end) return null;
 
-  const framesIn = frame - item.start * fps;
+  const startFrame = Math.round(item.start * fps);
+  const endFrame = Math.round(item.end * fps);
+  if (frame < startFrame || frame > endFrame) return null;
+
+  const framesIn = frame - startFrame;
+  const fade = animFrames(FADE_MS, fps);
+  // Геометрию ведёт пружина натуральной длительности: сжатая в 1.8 раза
+  // обрывалась на максимуме скорости и вставала как вкопанная.
   const enter = spring({
     frame: framesIn,
     fps,
-    config: { damping: 14, stiffness: 200, mass: 0.8 },
-    durationInFrames: Math.max(3, Math.round(0.34 * fps)),
+    durationInFrames: springFrames(fps, ENTER_SPRING),
+    config: ENTER_SPRING,
   });
-  const exit = interpolate(t, [item.end - 0.22, item.end], [1, 0], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  const appear = easeOut(
+    interpolate(framesIn, [0, fade], [0, 1], {
+      extrapolateLeft: "clamp",
+      extrapolateRight: "clamp",
+    }),
+  );
+  const leave =
+    1 -
+    easeOut(
+      interpolate(frame, [endFrame - fade, endFrame], [0, 1], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      }),
+    );
 
   const target = anchorBox(item.anchor, width, height);
   let box: Box = target;
-  let opacity = enter * exit;
+  const opacity = appear * leave;
   let scale = 1;
   let translateY = 0;
 
   if (item.anim === "pop_in") {
     scale = interpolate(enter, [0, 1], [0.72, 1], { extrapolateRight: "clamp" });
   } else if (item.anim === "slide_up") {
-    translateY = interpolate(enter, [0, 1], [height * 0.09, 0], { extrapolateRight: "clamp" });
+    const slide = motionPx(preset.animation, "broll_slide_px", Math.round(height * 0.09));
+    translateY = interpolate(enter, [0, 1], [slide, 0], { extrapolateRight: "clamp" });
   } else if (item.anim === "fullscreen_to_inset") {
     // Первые 40% времени картинка держит весь кадр, потом уезжает в угол.
-    const hold = Math.min(0.9, (item.end - item.start) * 0.4);
+    const holdFrames = Math.min(Math.round(0.9 * fps), Math.round((endFrame - startFrame) * 0.4));
+    const travelFrames = animFrames(420, fps);
     const k = easeOut(
-      interpolate(t, [item.start + hold, item.start + hold + 0.42], [0, 1], {
+      interpolate(framesIn, [holdFrames, holdFrames + travelFrames], [0, 1], {
         extrapolateLeft: "clamp",
         extrapolateRight: "clamp",
       }),
@@ -80,7 +108,6 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
       width: full.width + (dest.width - full.width) * k,
       height: full.height + (dest.height - full.height) * k,
     };
-    opacity = Math.min(1, enter * 2) * exit;
   }
 
   const inset = box.width < width * 0.9;
@@ -102,9 +129,11 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
         willChange: "transform, opacity",
       }}
     >
+      {/* Сток кладёт объект в верхнюю треть кадра: центрированный cover срезает
+          ему голову, поэтому смотрим выше центра. */}
       <Img
         src={staticFile(item.asset)}
-        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+        style={{ width: "100%", height: "100%", objectFit: "cover", objectPosition: "center 30%" }}
       />
     </div>
   );

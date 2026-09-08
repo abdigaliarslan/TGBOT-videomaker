@@ -21,6 +21,7 @@ from src.core.render_plan import build_plan
 from src.llm.client import LLMClient
 from src.pipeline import broll as broll_mod
 from src.pipeline.asr import ASRResult, transcribe
+from src.pipeline.audio_post import build_audio
 from src.pipeline.crop import autocrop
 from src.pipeline.cut import apply_cuts
 from src.pipeline.director import clean_transcript, direct, make_metadata
@@ -38,6 +39,7 @@ STAGES = [
     ("direct", "Собираю монтаж", 0.45),
     ("broll", "Подбираю картинки", 0.52),
     ("cut", "Режу паузы", 0.66),
+    ("audio", "Свожу звук", 0.70),
     ("crop", "Кадрирую 9:16", 0.78),
     ("render", "Рисую субтитры", 0.97),
     ("done", "Готово", 1.0),
@@ -62,6 +64,7 @@ class JobResult:
     broll_used: int = 0
     metadata: dict[str, Any] | None = None
     transcript_fixes: int = 0
+    audio: dict[str, Any] | None = None  # что сделал звуковой пост, None — не запускался
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -74,6 +77,7 @@ class JobResult:
             "broll": self.broll_used,
             "edl_from_llm": self.edl_from_llm,
             "transcript_fixes": self.transcript_fixes,
+            "audio": self.audio,
             "metadata": self.metadata,
             "timings": self.timings,
             "llm": self.llm_report,
@@ -166,6 +170,7 @@ async def process_video(
         if errors:
             raise JobError("Не удалось собрать монтажный лист: " + "; ".join(errors[:3]))
         edl_from_llm = bool(llm and llm.ready and any(u.prompt == "direct" for u in llm.usages))
+        style = load_preset(preset or edl.preset)
 
         # ---------------------------------------------------------- b-roll
         broll_used = 0
@@ -195,6 +200,28 @@ async def process_video(
             raise JobError("Нарезка оборвалась — файл повреждён. Пришлите видео ещё раз.")
         mark("cut", t)
 
+        # ---------------------------------------------------------- звук (Ф2)
+        # Между нарезкой и рендером, на cut.mp4: дорожка обязана лежать на том же
+        # выходном таймлайне, что и план. Кроп длительность не меняет.
+        audio_path: str | None = None
+        audio_report: dict[str, Any] | None = None
+        if cfg.audio_post_enabled:
+            await _notify(progress, "audio")
+            t = time.perf_counter()
+            try:
+                track = build_audio(edl, cut_path, work / "audio.wav", preset=style, cfg=cfg)
+                if track is not None:
+                    audio_path = str(track.path)
+                    audio_report = {
+                        "music": track.music,
+                        "sfx": track.sfx,
+                        "lufs_in": track.lufs_in,
+                        "target_lufs": track.target_lufs,
+                    }
+            except Exception as e:  # noqa: BLE001 — без звукового поста ролик всё равно едет
+                log.warning("звуковой пост пропущен: %s", e)
+            mark("audio", t)
+
         await _notify(progress, "crop")
         t = time.perf_counter()
         staged = cut_path
@@ -217,8 +244,9 @@ async def process_video(
             fps=int(round(staged_info.fps)) or cfg.render_fps,
             width=staged_info.width,
             height=staged_info.height,
-            preset=load_preset(preset or edl.preset),
+            preset=style,
             apply_cuts=cut_pauses,
+            audio_path=audio_path,
             cfg=cfg,
         )
         (work / "plan.json").write_text(
@@ -264,6 +292,7 @@ async def process_video(
             broll_used=broll_used,
             metadata=metadata,
             transcript_fixes=fixes,
+            audio=audio_report,
         )
         log.info("джоб готов: %s", json.dumps(result.summary(), ensure_ascii=False))
         return result
@@ -320,6 +349,25 @@ async def process_from_edl(
         raise JobError("Нарезка оборвалась — файл повреждён.")
     mark("cut", t)
 
+    style = load_preset(edl.preset)
+    audio_path: str | None = None
+    audio_report: dict[str, Any] | None = None
+    if cfg.audio_post_enabled:
+        t = time.perf_counter()
+        try:
+            track = build_audio(edl, cut_path, work / "audio.wav", preset=style, cfg=cfg)
+            if track is not None:
+                audio_path = str(track.path)
+                audio_report = {
+                    "music": track.music,
+                    "sfx": track.sfx,
+                    "lufs_in": track.lufs_in,
+                    "target_lufs": track.target_lufs,
+                }
+        except Exception as e:  # noqa: BLE001 — сравнение фаз важнее звука
+            log.warning("звуковой пост пропущен: %s", e)
+        mark("audio", t)
+
     t = time.perf_counter()
     staged = cut_path
     if vertical:
@@ -339,8 +387,9 @@ async def process_from_edl(
         fps=int(round(staged_info.fps)) or cfg.render_fps,
         width=staged_info.width,
         height=staged_info.height,
-        preset=load_preset(edl.preset),
+        preset=style,
         apply_cuts=cut_pauses,
+        audio_path=audio_path,
         cfg=cfg,
     )
     (work / "plan.json").write_text(
@@ -362,4 +411,5 @@ async def process_from_edl(
         asr=ASRResult(words=list(edl.words), language="", backend="edl", model="—"),
         info=info,
         timings=timings,
+        audio=audio_report,
     )

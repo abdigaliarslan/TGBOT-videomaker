@@ -12,6 +12,52 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Модели по умолчанию для каждого провайдера (§4).
+#
+# `smart` — главный вызов, от него зависит качество продукта, поэтому там
+# самая сильная модель линейки. `cheap` — правки индексами и метаданные.
+# `vision` — план b-roll по кадрам.
+PROVIDER_MODELS: dict[str, dict[str, str]] = {
+    "anthropic": {
+        "cheap": "claude-haiku-4-5",
+        "smart": "claude-opus-5",
+        "vision": "claude-sonnet-5",
+    },
+    "deepseek": {
+        "cheap": "deepseek-v4-flash",
+        # Замерено на задаче `direct` (одинаковый транскрипт, один и тот же план
+        # на выходе): v4-pro — 135.6 с и 8545 выходных токенов ($0.034),
+        # v4-flash — 8.6 с и 1186 токенов ($0.0016). В 16 раз быстрее и в 21 раз
+        # дешевле при том же результате. Кто из них лучше НА САМОМ ДЕЛЕ, решит
+        # только эвал-сет из §7; до него v4-pro включается одной строкой:
+        # LLM_TIER_SMART=deepseek-v4-pro
+        "smart": "deepseek-v4-flash",
+        "vision": "deepseek-v4-flash-vision-exp",
+    },
+    # ⚠ На бесплатном тире Gemini модели Pro недоступны совсем: ключ отвечает
+    # 429 с `limit: 0` на квоте `generate_content_free_tier_requests`. Это не
+    # исчерпанный лимит, а его отсутствие. Flash-модели при этом работают, в
+    # том числе с картинками.
+    #
+    # Доступность flash-моделей на бесплатном ключе тоже разная. Замерено, по
+    # 6 одинаковых запросов на модель:
+    #   gemini-3.5-flash       6/6, 4.9 с   ← самая надёжная
+    #   gemini-3.1-flash-lite  6/6, 3.3 с
+    #   gemini-3.8-flash       3/6 (503)
+    #   gemini-3.7-flash       2/6 (503)
+    #   gemini-3.6-flash       0/6 (400 на thinkingConfig, см. providers.py)
+    # «503 high demand» — это загрузка, а не наша ошибка: на платном ключе
+    # картина другая. Поэтому в defaults остаются сильнейшие модели линейки, а
+    # бесплатный ключ переводится на надёжные двумя строками в .env:
+    #   LLM_TIER_SMART=gemini-3.5-flash
+    #   LLM_TIER_VISION=gemini-3.5-flash
+    "gemini": {
+        "cheap": "gemini-3.1-flash-lite",
+        "smart": "gemini-3.1-pro-preview",
+        "vision": "gemini-3.7-flash",
+    },
+}
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -34,6 +80,10 @@ class Settings(BaseSettings):
     bot_api_data_dir_host: Path = REPO_ROOT / "data" / "telegram-bot-api"
     bot_api_data_dir_container: str = "/var/lib/telegram-bot-api"
 
+    # Заливка готового ролика в Telegram — это десятки мегабайт. Дефолтных
+    # 60 секунд не хватает, и ролик не доходит при успешном монтаже.
+    bot_upload_timeout_s: float = 900.0
+
     admin_ids: list[int] = Field(default_factory=list)
 
     # ------------------------------------------------------------------ инфраструктура
@@ -49,25 +99,46 @@ class Settings(BaseSettings):
     work_dir: Path = REPO_ROOT / "data" / "work"
 
     # ------------------------------------------------------------------ LLM (§4)
+    #
+    # §4 требует ОДИН абстрактный клиент и тиры вместо имён моделей в логике.
+    # Провайдер — такая же деталь реализации, как имя модели: меняется здесь.
+    llm_provider: Literal["anthropic", "deepseek", "gemini"] = "anthropic"
+
     anthropic_api_key: str = ""
-    # Тиры, а не имена моделей, в вызывающем коде. Меняются здесь, не в логике.
-    llm_tier_cheap: str = "claude-haiku-4-5-20251001"
-    llm_tier_smart: str = "claude-opus-5"
-    llm_tier_vision: str = "claude-sonnet-5"
+    deepseek_api_key: str = ""
+    gemini_api_key: str = ""
+
+    anthropic_base_url: str = "https://api.anthropic.com"
+    deepseek_base_url: str = "https://api.deepseek.com"
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+
+    # Пусто → модель по умолчанию для выбранного провайдера (см. PROVIDER_MODELS).
+    llm_tier_cheap: str = ""
+    llm_tier_smart: str = ""
+    llm_tier_vision: str = ""
+
+    # Размышления reasoning-моделей: считаются в max_tokens и оплачиваются как
+    # выход. На структурных задачах не нужны — см. комментарий в providers.py.
+    llm_thinking: bool = False
     llm_max_retries: int = 1  # §4: ретрай ровно один
     llm_timeout_s: float = 180.0
     # Нет ключа → детерминированный режиссёр (§3, «фолбэк»). Ролик всё равно соберётся.
     llm_enabled: bool = True
 
     # ------------------------------------------------------------------ ASR (M1)
-    # whisperx — форсированное выравнивание, нужен torch+CUDA.
-    # faster_whisper — CTranslate2, работает на CPU, тайминги слов из самой модели.
+    # auto → whisperx, если установлен: границы слов считает wav2vec2 по звуку,
+    # 46 мс средней ошибки против 234 мс у faster_whisper (числа и цена —
+    # в комментарии к pick_backend в pipeline/asr.py). faster_whisper остаётся
+    # фолбэком: втрое легче по памяти и не требует модели выравнивания.
     asr_backend: Literal["auto", "whisperx", "faster_whisper"] = "auto"
+    # small, а не medium: с whisperx размер модели Whisper на тайминги не влияет
+    # (замерено — побуквенно те же границы), а medium стоит вдвое дороже.
     whisper_model: str = "small"
     whisper_language: str = "ru"  # пусто = автоопределение
     whisper_device: str = "auto"  # auto|cpu|cuda
     whisper_compute_type: str = "auto"  # auto|int8|float16|float32
-    whisper_cpu_threads: int = 8
+    # 4, а не «все ядра»: пиковое потребление важнее пары секунд. См. ffmpeg_threads.
+    whisper_cpu_threads: int = 4
     whisper_beam_size: int = 5
     # Сегменты со средней вероятностью слов ниже порога — галлюцинации (музыка/шум).
     whisper_min_confidence: float = 0.55
@@ -96,10 +167,32 @@ class Settings(BaseSettings):
     render_width: int = 1080
     render_height: int = 1920
     render_backend: Literal["ass", "remotion"] = "remotion"
-    render_concurrency: int = 2
+    # Каждый поток рендера — отдельная вкладка Chromium плюс кодирование.
+    # На ноутбуке два потока дают тот самый скачок тока, после которого машина
+    # гаснет без записи в журнал. На машине с нормальным питанием ставится обратно.
+    render_concurrency: int = 1
+
+    # Потолок потоков ffmpeg. 0 = отдать решение ffmpeg (все ядра) — так можно
+    # на сервере, но не на ноутбуке.
+    ffmpeg_threads: int = 4
+
+    # Качество финального файла. Замерено: при crf=18 двадцатисекундный ролик
+    # весит 22 МБ (8.9 Мбит/с) и заливается в Telegram дольше, чем монтируется.
+    # Телеграм всё равно пережимает — отдавать визуально-безупречный поток
+    # некуда. 22 даёт примерно вдвое меньший файл без заметной разницы.
+    render_crf: int = 22
     default_preset: str = "glass"
     # Шрифты ставятся в контейнер рендера (§5 M5 ⚠), тут — путь для локального прогона.
     fonts_dir: Path = REPO_ROOT / "assets" / "fonts"
+
+    # ------------------------------------------------------------------ звук (Ф2)
+    # Этап audio_post между нарезкой и рендером: loudnorm, подложка, дакинг, эффекты.
+    audio_post_enabled: bool = True
+    # Свой трек кладут сюда, имя файла включают в секции audio пресета. Репозиторий
+    # музыки не везёт: чужая лицензия в чужом продукте — это не «мелочь потом».
+    music_dir: Path = REPO_ROOT / "assets" / "music"
+    # Эффекты синтезируются процедурно и лежат готовыми; папка пустая — соберутся сами.
+    sfx_dir: Path = REPO_ROOT / "assets" / "sfx"
 
     # ------------------------------------------------------------------ b-roll (M7)
     pexels_api_key: str = ""
@@ -138,19 +231,38 @@ class Settings(BaseSettings):
         return self.max_video_minutes * 60.0
 
     @property
+    def llm_api_key(self) -> str:
+        return {
+            "anthropic": self.anthropic_api_key,
+            "deepseek": self.deepseek_api_key,
+            "gemini": self.gemini_api_key,
+        }.get(self.llm_provider, "")
+
+    @property
+    def llm_base_url(self) -> str:
+        return {
+            "anthropic": self.anthropic_base_url,
+            "deepseek": self.deepseek_base_url,
+            "gemini": self.gemini_base_url,
+        }[self.llm_provider]
+
+    @property
     def llm_ready(self) -> bool:
-        """LLM реально доступна: есть ключ и не выключено флагом."""
-        return bool(self.anthropic_api_key) and self.llm_enabled
+        """LLM реально доступна: есть ключ выбранного провайдера и не выключено."""
+        return bool(self.llm_api_key) and self.llm_enabled
 
     def model_for_tier(self, tier: str) -> str:
-        try:
-            return {
-                "cheap": self.llm_tier_cheap,
-                "smart": self.llm_tier_smart,
-                "vision": self.llm_tier_vision,
-            }[tier]
-        except KeyError:
-            raise ValueError(f"unknown model tier: {tier!r}") from None
+        """Тир → имя модели. Пустая настройка = значение по умолчанию провайдера."""
+        if tier not in ("cheap", "smart", "vision"):
+            raise ValueError(f"неизвестный тир модели: {tier!r}")
+        override = {
+            "cheap": self.llm_tier_cheap,
+            "smart": self.llm_tier_smart,
+            "vision": self.llm_tier_vision,
+        }[tier]
+        if override:
+            return override
+        return PROVIDER_MODELS[self.llm_provider][tier]
 
     def bot_api_path_to_local(self, path: str) -> Path:
         """Локальный Bot API отдаёт путь внутри своего контейнера (M0 ⚠).

@@ -3,11 +3,13 @@
 Бэкенд выбирается один раз и абстрагирован, потому что стек Whisper ломается
 на мажорных апдейтах (§5 M1 ⚠), а версии зафиксированы в pyproject.toml.
 
-- `whisperx`     — форсированное выравнивание wav2vec2, самые точные границы слов,
-                   но требует torch + (практически) CUDA.
+- `whisperx`     — форсированное выравнивание wav2vec2: границы слов считаются
+                   отдельной моделью по звуку, а не берутся у Whisper. Требует
+                   torch, но CPU ему достаточно — замеры в `pick_backend`.
+                   Это рабочий бэкенд по умолчанию.
 - `faster_whisper` — CTranslate2, работает на CPU, тайминги слов берутся из
-                   cross-attention самой модели. Это рабочий бэкенд по умолчанию
-                   на машинах без GPU.
+                   cross-attention самой модели. Втрое легче по памяти, но
+                   промахивается по границам слов на четверть секунды. Фолбэк.
 
 CLI: python -m src.pipeline.asr <file> > words.json
 """
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +31,11 @@ from src.pipeline.audio import ASR_SAMPLE_RATE, extract_wav
 log = logging.getLogger(__name__)
 
 Backend = Literal["whisperx", "faster_whisper"]
+
+# Загрузка весов с CDN умеет вставать намертво: соединение живо, данные не идут.
+# Без таймаута это вешает задачу целиком, и пользователь смотрит на замерший
+# прогресс-бар. Пусть лучше упадёт — сработает откат на другой бэкенд.
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "20")
 
 # Модели тяжёлые (сотни МБ) — грузим один раз на процесс.
 _MODEL_CACHE: dict[tuple, Any] = {}
@@ -87,14 +95,31 @@ def pick_backend(requested: str = "auto") -> Backend:
         return "faster_whisper"
     # auto: whisperx, если установлен — даже на CPU.
     #
-    # Измерено на фикстуре tests/fixtures/speech.mp4 (15.5 с, 12 ядер, без GPU,
-    # модель small; эталон — границы речи по энергии сигнала):
+    # Точность границ — на фикстуре tests/fixtures/speech.mp4 (15.5 с, эталон:
+    # границы речи по энергии сигнала, tests/asr_accuracy.py):
     #
-    #   faster_whisper   0.23x реалтайма, среднее отклонение 230 мс, максимум 716 мс
-    #   whisperx         0.30x реалтайма, среднее отклонение  46 мс, максимум 101 мс
+    #   бэкенд/модель            среднее |Δ|   максимум
+    #   faster_whisper/small       234 мс       829 мс
+    #   faster_whisper/medium      185 мс       669 мс
+    #   whisperx/small              46 мс       101 мс
+    #   whisperx/medium             46 мс       101 мс
     #
-    # +30% времени за пятикратную точность границ слов. Для пословных субтитров
-    # это решающе: на 230 мс подсветка уезжает на слово вперёд.
+    # Границы слов у whisperx считает wav2vec2 по звуку, а не Whisper по своему
+    # кросс-аттеншену, поэтому размер модели Whisper на них не влияет вовсе:
+    # small и medium дали ПОБУКВЕННО одинаковые тайминги. Отсюда и выбор
+    # whisper_model="small" по умолчанию — medium стоит времени и памяти, а
+    # попадание в речь не улучшает.
+    #
+    # Цена — на эталонном ролике 20 с (12 ядер, без GPU, int8, 4 потока;
+    # «тёплый» = модели уже загружены прогревом воркера):
+    #
+    #   бэкенд/модель          холодный   тёплый   пик RSS
+    #   faster_whisper/small     16.8 с    ~4 с     1.0 ГБ
+    #   whisperx/small           31.3 с    ~9 с     2.8 ГБ
+    #
+    # Вдвое дороже по времени и втрое по памяти — за пятикратную точность
+    # границ. Для пословных субтитров это решающе: 234 мс это ровно то, на
+    # сколько подсветка уезжает вперёд по слову.
     if _has_whisperx():
         return "whisperx"
     return "faster_whisper"
@@ -210,16 +235,33 @@ def _transcribe_faster_whisper(wav: Path, *, language: str | None, model_name: s
     )
 
 
+def _whisperx_model(model_name: str, language: str | None):
+    """Модель whisperx из кеша. Ключ включает язык: он влияет на загрузку."""
+    import whisperx  # type: ignore[import-not-found]
+
+    device, compute = _device_and_compute()
+    key = ("wx", model_name, device, compute, language or "")
+    model = _MODEL_CACHE.get(key)
+    if model is None:
+        log.info("загружаю whisperx %s (%s/%s)", model_name, device, compute)
+        # threads обязателен: без него whisperx берёт все ядра, а это тот самый
+        # пик тока, из-за которого ноутбук гаснет (см. _ffmpeg_cmd в core/proc.py).
+        model = whisperx.load_model(
+            model_name,
+            device,
+            compute_type=compute,
+            language=language or None,
+            threads=settings.whisper_cpu_threads,
+        )
+        _MODEL_CACHE[key] = model
+    return model
+
+
 def _transcribe_whisperx(wav: Path, *, language: str | None, model_name: str) -> ASRResult:
     import whisperx  # type: ignore[import-not-found]
 
     device, compute = _device_and_compute()
-    key = ("wx", model_name, device, compute)
-    model = _MODEL_CACHE.get(key)
-    if model is None:
-        log.info("загружаю whisperx %s (%s/%s)", model_name, device, compute)
-        model = whisperx.load_model(model_name, device, compute_type=compute)
-        _MODEL_CACHE[key] = model
+    model = _whisperx_model(model_name, language)
 
     audio = whisperx.load_audio(str(wav))
     result = model.transcribe(audio, batch_size=8, language=language or None)
@@ -228,7 +270,17 @@ def _transcribe_whisperx(wav: Path, *, language: str | None, model_name: str) ->
     align_key = ("wx-align", lang, device)
     aligned_model = _MODEL_CACHE.get(align_key)
     if aligned_model is None:
-        aligned_model = whisperx.load_align_model(language_code=lang, device=device)
+        try:
+            aligned_model = whisperx.load_align_model(language_code=lang, device=device)
+        except Exception as e:  # noqa: BLE001 — сеть, отсутствие модели, что угодно
+            # Выравнивание — улучшение точности, а не условие работы. Ролик
+            # важнее лишних 200 мс на границах слов.
+            log.warning(
+                "модель выравнивания для языка %r недоступна (%s) — "
+                "считаю на faster-whisper, границы слов будут грубее",
+                lang, e,
+            )
+            return _transcribe_faster_whisper(wav, language=lang, model_name=model_name)
         _MODEL_CACHE[align_key] = aligned_model
     align_model, metadata = aligned_model
 
@@ -306,6 +358,47 @@ def transcribe(
         result.dropped_segments,
     )
     return result
+
+
+def prewarm(language: str | None = None, model: str | None = None) -> None:
+    """Скачать и загрузить модели заранее — на старте воркера, а не в задаче.
+
+    Модель выравнивания зависит от ЯЗЫКА и качается при первом ролике на этом
+    языке: для русского это ~1.2 ГБ. Если делать это внутри задачи, пользователь
+    смотрит на замерший прогресс-бар, а зависшая закачка (такое бывает) вешает
+    задачу целиком. То же правило, что и для Chromium в рендере.
+    """
+    lang = (settings.whisper_language if language is None else language) or ""
+    model_name = model or settings.whisper_model
+    chosen = pick_backend(settings.asr_backend)
+    log.info("прогрев ASR: бэкенд=%s модель=%s язык=%s", chosen, model_name, lang or "auto")
+
+    if chosen == "faster_whisper":
+        _transcribe_faster_whisper  # noqa: B018 — модель грузится при первом вызове
+        from faster_whisper import WhisperModel
+
+        device, compute = _device_and_compute()
+        key = ("fw", model_name, device, compute, settings.whisper_cpu_threads)
+        if key not in _MODEL_CACHE:
+            _MODEL_CACHE[key] = WhisperModel(
+                model_name, device=device, compute_type=compute,
+                cpu_threads=settings.whisper_cpu_threads,
+            )
+        return
+
+    import whisperx  # type: ignore[import-not-found]
+
+    device, _compute = _device_and_compute()
+    _whisperx_model(model_name, lang or None)
+
+    if not lang:
+        # Язык определяется по звуку — модель выравнивания заранее не выбрать.
+        log.info("прогрев: язык не задан, модель выравнивания подтянется на первом ролике")
+        return
+    align_key = ("wx-align", lang, device)
+    if align_key not in _MODEL_CACHE:
+        _MODEL_CACHE[align_key] = whisperx.load_align_model(language_code=lang, device=device)
+    log.info("прогрев ASR завершён")
 
 
 def words_from_json(payload: dict | list) -> list[Word]:

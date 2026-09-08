@@ -127,6 +127,30 @@ def test_pop_animation_present_on_active_word():
     assert "\\t(0," in ass
 
 
+# ------------------------------------------------------------------ мягкая тень
+
+
+def style_fields() -> list[str]:
+    """Единственная строка Style: → список полей по формату V4+."""
+    line = next(x for x in build_ass(plan()).splitlines() if x.startswith("Style:"))
+    return line.split(":", 1)[1].strip().split(",")
+
+
+def test_outline_is_a_halo_not_a_contour():
+    """Ф1: чёрный кант убран, ширина обводки втрое меньше кегля × 0.07."""
+    size = load_preset("glass").font.size
+    outline = float(style_fields()[16])
+    assert 0 < outline <= size * 0.04
+
+
+def test_outline_is_blurred_into_a_shadow():
+    """Без \\blur тонкая обводка осталась бы просто тонким кантом."""
+    ass = build_ass(plan())
+    assert "\\blur" in ass
+    shadow = float(style_fields()[17])
+    assert shadow > 0  # тень никуда не делась: она и держит читаемость
+
+
 def test_position_tag_from_block():
     ass = build_ass(plan())
     assert "\\an2" in ass  # пресет glass ставит субтитры внизу

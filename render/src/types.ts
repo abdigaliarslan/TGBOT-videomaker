@@ -14,6 +14,21 @@ export type Anchor =
   | "center"
   | "fullscreen";
 
+/**
+ * Прямоугольник в пикселях кадра, левый верхний угол — начало координат.
+ *
+ * Считает его Python (`src/core/geometry.py`) по метрикам шрифта: до этого
+ * геометрия жила константами здесь, в компонентах, и Python не мог предсказать,
+ * куда попадёт строка. Необязательный: план, собранный до Ф4, прямоугольников
+ * не содержит и раскладывается по-старому.
+ */
+export type Rect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 export type PlanWord = {
   text: string;
   start: number;
@@ -28,6 +43,8 @@ export type PlanBlock = {
   end: number;
   position: Position;
   lines: PlanWord[][];
+  /** Куда блок попадёт в кадре вместе с панелью. */
+  rect?: Rect | null;
 };
 
 export type PlanBroll = {
@@ -37,6 +54,8 @@ export type PlanBroll = {
   anchor: Anchor;
   asset: string | null;
   query: string;
+  /** Место картинки в покое: `fullscreen_to_inset` едет с полного кадра сюда. */
+  rect?: Rect | null;
 };
 
 
@@ -92,6 +111,9 @@ export type Preset = {
     accent_scale: number;
     shout_scale: number;
     shout_rotate: number;
+    /** Ход движения в пикселях кадра 1920; пересчитывает Preset.scaled(). */
+    block_shift_px?: number;
+    broll_slide_px?: number;
   };
   /** Геометрия в долях кадра: раньше эти числа были константами в компонентах. */
   geometry: {
@@ -101,6 +123,33 @@ export type Preset = {
     broll_margin_ratio: number;
     broll_top_ratio: number;
     broll_bottom_ratio: number;
+  };
+  /**
+   * Секции, которые исполняет не Remotion, а ffmpeg и Python: цветокор, кроп,
+   * звуковой пост. В плане они есть всегда (пресет уезжает в него целиком),
+   * рендереру не нужны — поэтому необязательные.
+   */
+  grade?: {
+    enabled: boolean;
+    contrast: number;
+    saturation: number;
+    gamma: number;
+    vignette: number;
+  };
+  crop?: {
+    face_height_ratio: number;
+    tight_face_height_ratio: number;
+    eye_line_ratio: number;
+    headroom_ratio: number;
+    max_scale: number;
+  };
+  audio?: {
+    target_lufs: number;
+    music_gain_db: number;
+    duck_db: number;
+    sfx_gain_db: number;
+    music_fade_s: number;
+    music: string | null;
   };
   background: string;
 };

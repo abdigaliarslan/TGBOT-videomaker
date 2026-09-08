@@ -1,19 +1,29 @@
-"""EDL → план рендера. Единственное место, где считается время для картинки.
+"""EDL → план рендера. Единственное место, где считается время и геометрия.
 
 Рендерер (хоть ASS, хоть Remotion) не принимает решений и не считает арифметику:
-он получает готовые секунды, готовые строки и готовый пресет и рисует буквально
-(§0). Поэтому обе реализации рендера едят одну и ту же структуру.
+он получает готовые секунды, готовые строки, готовые прямоугольники и готовый
+пресет и рисует буквально (§0). Поэтому обе реализации рендера едят одну и ту же
+структуру.
+
+Прямоугольники (`PlanBlock.rect`, `PlanBroll.rect`) появились в Ф4: до них
+геометрия жила константами в TSX, а Python оперировал половинами кадра и не мог
+ни предсказать положение строки, ни развести субтитр с картинкой (AUDIT §8.4).
+Считает их `src/core/geometry.py` в пикселях кадра.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, Emphasis, Timeline
+from src.core.geometry import Rect, broll_rect, caption_rect, resting_anchor
 from src.core.preset import Preset, load_preset
 from src.core.text import display_text
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -32,6 +42,9 @@ class PlanBlock:
     end: float
     position: Literal["top", "center", "bottom"]
     lines: list[list[PlanWord]]
+    # Куда блок попадёт в кадре, вместе с панелью. `None` — метрик шрифта нет,
+    # рендерер раскладывает по-старому.
+    rect: Rect | None = None
 
     @property
     def words(self) -> list[PlanWord]:
@@ -46,6 +59,9 @@ class PlanBroll:
     anchor: str
     asset: str | None
     query: str
+    # Место картинки В ПОКОЕ. `fullscreen_to_inset` стартует с полного кадра,
+    # но живёт здесь, и разводить с субтитром надо именно это место.
+    rect: Rect | None = None
 
 
 @dataclass(slots=True)
@@ -79,10 +95,22 @@ class RenderPlan:
                     end=b["end"],
                     position=b["position"],
                     lines=[[PlanWord(**w) for w in line] for line in b["lines"]],
+                    rect=_rect_from(b.get("rect")),
                 )
                 for b in data.get("blocks", [])
             ],
-            broll=[PlanBroll(**x) for x in data.get("broll", [])],
+            broll=[
+                PlanBroll(
+                    start=x["start"],
+                    end=x["end"],
+                    anim=x["anim"],
+                    anchor=x["anchor"],
+                    asset=x.get("asset"),
+                    query=x.get("query", ""),
+                    rect=_rect_from(x.get("rect")),
+                )
+                for x in data.get("broll", [])
+            ],
             meta=data.get("meta", {}),
         )
 
@@ -102,12 +130,29 @@ class RenderPlan:
                     "end": round(b.end, 3),
                     "position": b.position,
                     "lines": [[asdict(w) for w in line] for line in b.lines],
+                    "rect": b.rect.to_dict() if b.rect else None,
                 }
                 for b in self.blocks
             ],
-            "broll": [asdict(x) for x in self.broll],
+            "broll": [
+                {
+                    "start": round(x.start, 3),
+                    "end": round(x.end, 3),
+                    "anim": x.anim,
+                    "anchor": x.anchor,
+                    "asset": x.asset,
+                    "query": x.query,
+                    "rect": x.rect.to_dict() if x.rect else None,
+                }
+                for x in self.broll
+            ],
             "meta": self.meta,
         }
+
+
+def _rect_from(data: dict[str, Any] | None) -> Rect | None:
+    """План без прямоугольников (старый или от чужого инструмента) читается как есть."""
+    return Rect.from_dict(data) if data else None
 
 
 # --------------------------------------------------------------------------- перенос строк
@@ -186,6 +231,20 @@ def build_plan(
     tl = edl.timeline() if apply_cuts else Timeline([], edl.source_duration)
     duration = tl.duration
     by_idx = {w.idx: w for w in edl.words}
+    frame = (width, height)
+
+    def rect_of_broll(anchor: str, anim: str) -> Rect | None:
+        return broll_rect(resting_anchor(anchor, anim), ps, frame)
+
+    def rect_of_block(block: PlanBlock) -> Rect | None:
+        # Метрик шрифта может не быть (свой TTF без выгрузки, пресет без
+        # font.file). Это не повод не отрендерить ролик: рендерер разложит
+        # текст сам, как делал до Ф4, — просто без гарантий по геометрии.
+        try:
+            return caption_rect(block, ps, frame)
+        except (FileNotFoundError, ValueError) as err:
+            log.warning("геометрия субтитра не посчитана (%s), рендерер разложит сам", err)
+            return None
 
     # B-roll считаем раньше субтитров: блокам нужно знать, какая половина кадра
     # занята картинкой, чтобы уехать в свободную.
@@ -197,14 +256,16 @@ def build_plan(
         window = tl.word_window(w)
         if window is None:
             continue
+        anim = b.anim.value if hasattr(b.anim, "value") else str(b.anim)
         broll.append(
             PlanBroll(
                 start=round(window[0], 3),
                 end=round(min(window[0] + b.duration, duration), 3),
-                anim=b.anim.value if hasattr(b.anim, "value") else str(b.anim),
+                anim=anim,
                 anchor=b.anchor,
                 asset=b.asset,
                 query=b.query,
+                rect=rect_of_broll(b.anchor, anim),
             )
         )
 
@@ -247,19 +308,21 @@ def build_plan(
         start = pwords[0].start
         end = pwords[-1].end + cfg.sub_tail
         hits_bottom, hits_top = occupied(start, end)
-        blocks.append(
-            PlanBlock(
-                start=start,
-                end=end,
-                position=_resolve_position(
-                    block.position,
-                    ps.caption.position,
-                    collides_bottom=hits_bottom,
-                    collides_top=hits_top,
-                ),
-                lines=wrap_words(pwords, ps.caption.max_line_chars),
-            )
+        plan_block = PlanBlock(
+            start=start,
+            end=end,
+            position=_resolve_position(
+                block.position,
+                ps.caption.position,
+                collides_bottom=hits_bottom,
+                collides_top=hits_top,
+            ),
+            lines=wrap_words(pwords, ps.caption.max_line_chars),
         )
+        # Прямоугольник считается последним: он зависит и от переноса строк, и от
+        # того, в какую половину кадра блок уехал от картинки.
+        plan_block.rect = rect_of_block(plan_block)
+        blocks.append(plan_block)
 
     # Блоки не должны накладываться: следующий начинается — предыдущий уходит.
     for a, b in zip(blocks, blocks[1:]):
