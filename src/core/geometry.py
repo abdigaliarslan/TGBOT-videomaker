@@ -834,6 +834,8 @@ def caption_positions(preset: Any) -> tuple[str, ...]:
     base = getattr(preset.caption, "position", "bottom")
     if base not in CAPTION_POSITIONS:
         base = "bottom"
+    if getattr(preset.caption, "pinned", False):
+        return (base,)
     return tuple(dict.fromkeys(("top", "bottom", base)))
 
 
@@ -867,8 +869,18 @@ def caption_zone(preset: Any, frame_size: tuple[int, int], position: str | None 
     """
     width, height = frame_size
     lines = max(1, int(getattr(preset.caption, "max_lines", 3) or 3))
+    # Потолок роста (С1) — теперь он и есть худший случай: блок поднимается,
+    # пока не упрётся либо в бюджет ширины, либо в этот потолок, и упереться в
+    # потолок он может в КАЖДОЙ строке (три коротких слова, каждое на своей).
+    # Забыть его значило бы вернуть ровно ту ошибку, из-за которой резерв уже
+    # промахивался: картинка вставала внутрь текста.
+    grow = float(getattr(preset.caption, "fill_max_scale", 1.0) or 1.0)
     biggest = (
-        max(emphasis_size("accent", preset), emphasis_size("shout", preset))
+        max(
+            emphasis_size("accent", preset),
+            emphasis_size("shout", preset),
+            preset.font.size * max(1.0, grow),
+        )
         * preset.caption.line_height
     )
     panel = preset.panel

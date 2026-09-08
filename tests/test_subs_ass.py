@@ -223,7 +223,16 @@ def test_accent_word_keeps_one_size_in_every_state():
         assert m, chunk
         sizes.add(int(m.group(1)))
     assert len(sizes) == 1, f"акцентное слово меняет кегль по состояниям: {sizes}"
-    assert sizes.pop() == round(load_preset("glass").animation.accent_scale * 100)
+    # Число берётся из ПЛАНА, а не из `accent_scale`. После С1 кегль в плане —
+    # это выделение, домноженное на рост блока под ширину строки, и сверять его
+    # с одним лишь `accent_scale` значило бы проверять формулу, которой больше
+    # нет. Инвариант же прежний: ASS рисует ровно тот кегль, который посчитал
+    # Python, и один на все состояния.
+    p = plan()
+    word = next(w for b in p.blocks for line in b.lines for w in line if w.text == "важно")
+    base = load_preset("glass").scaled(p.height).font.size
+    assert word.size and word.size > base
+    assert sizes.pop() == round(word.size / base * 100)
 
 
 def test_ass_uses_the_size_python_measured_not_the_emphasis():

@@ -686,12 +686,66 @@ def test_block_rect_holds_every_line(name: str):
 
 
 def test_accent_is_a_size_and_not_a_scale():
-    """Акцент приезжает в план кеглем: рендереру нечего домножать."""
+    """Акцент приезжает в план кеглем: рендереру нечего домножать.
+
+    Абсолютные кегли здесь не проверяются: после С1 блок растёт под ширину
+    строки, и оба слова уезжают вверх ОДНИМ множителем. Проверяется то, что
+    этот рост не трогает, — отношение между выделенным словом и соседом.
+    """
     preset = load_preset("glass").scaled(FRAME[1])
-    words = plan_words([("тише", "none", None), ("громче", "accent", None)], preset)
+    words = plan_words([("тише", "none", None), ("ор", "accent", None)], preset)
+    wrap_block(words, preset, FRAME[0])
+    assert words[0].size and words[1].size
+    assert words[1].size / words[0].size == pytest.approx(
+        preset.animation.accent_scale, abs=0.01
+    )
+
+    # Исключение ровно одно и оно старше С1: слово, которое не влезает в строку
+    # даже в одиночку, ужимается под бюджет (`fit_size`). Тогда отношение
+    # проседает — но выделенное слово обязано остаться КРУПНЕЕ соседа.
+    long_words = plan_words([("тише", "none", None), ("громче", "accent", None)], preset)
+    wrap_block(long_words, preset, FRAME[0])
+    assert long_words[1].size > long_words[0].size
+    assert long_words[1].size / long_words[0].size < preset.animation.accent_scale
+
+
+def test_block_grows_until_the_line_fills_the_budget():
+    """С1: кегль подбирается ПОД строку, а не задан числом в пресете.
+
+    У эталона (`STYLE_PLAN.md`) «также» из пяти букв набрано вдвое крупнее, чем
+    «звуковые» из восьми, и строка в обоих случаях добирает 65-83 % ширины
+    кадра. Фиксированным кеглем это не выражается: при 88 px наша строка
+    занимала 27 % ширины, и иерархии в кадре не читалось.
+
+    Проверяются оба конца правила: строка добирает бюджет, и короткая строка
+    из-за этого набрана крупнее длинной.
+    """
+    preset = load_preset("glass").scaled(FRAME[1])
+    budget = caption_text_width(preset, FRAME[0])
+
+    short = plan_words([("также", "accent", None)], preset)
+    _, short_w = wrap_block(short, preset, FRAME[0])
+    long_ = plan_words([("звуковые", "accent", None)], preset)
+    _, long_w = wrap_block(long_, preset, FRAME[0])
+
+    assert short_w[0] / budget > 0.7, f"короткая строка не добрала бюджет: {short_w[0]:.0f}"
+    assert long_w[0] / budget > 0.9, f"длинная строка не добрала бюджет: {long_w[0]:.0f}"
+    assert short[0].size > long_[0].size * 1.5, "короткое слово обязано быть крупнее"
+    # И то и другое кратно выше прежнего фиксированного кегля.
+    assert long_[0].size > preset.font.size * 1.5
+
+
+def test_a_preset_without_growth_keeps_its_kegel():
+    """Рост включает ТЕМА, а не код: `bold` обязан остаться прежним.
+
+    Дефолт `fill_max_scale` — 1.0, и на нём кегль слова равен кеглю пресета,
+    ровно как до С1.
+    """
+    preset = load_preset("bold").scaled(FRAME[1])
+    assert preset.caption.fill_max_scale == 1.0
+    words = plan_words([("слово", "none", None)], preset)
     wrap_block(words, preset, FRAME[0])
     assert words[0].size == pytest.approx(preset.font.size)
-    assert words[1].size == pytest.approx(preset.font.size * preset.animation.accent_scale)
 
 
 def test_long_word_shrinks_instead_of_overflowing():

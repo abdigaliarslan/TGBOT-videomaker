@@ -368,20 +368,55 @@ def wrap_block(
     floor_ratio = max(0.05, min(1.0, preset.caption.min_word_scale))
     max_lines = max(1, preset.caption.max_lines)
 
+    # Пол общий для всего блока и считается от кегля строки, а не от кегля
+    # самого слова: иначе крику с его 1.42 разрешено остаться в полтора раза
+    # крупнее соседей и не влезть.
+    floor = ruler.base_size * floor_ratio
+    grow_max = max(1.0, float(preset.caption.fill_max_scale))
+    ceiling = ruler.base_size * grow_max
+
+    roles = [emphasis_size(w.emphasis, preset) for w in words]
+    biggest_role = max(roles)
+
+    def lay(scale: float) -> list[list[PlanWord]]:
+        """Проставить кегли этим масштабом и разложить. Побочный эффект намеренный."""
+        for w, role in zip(words, roles):
+            w.size = round(ruler.fit_size(w, role * scale, floor), 2)
+        return _greedy(words, ruler)
+
     scale = 1.0
-    lines: list[list[PlanWord]] = []
-    while True:
-        # Пол общий для всего блока и считается от кегля строки, а не от кегля
-        # самого слова: иначе крику с его 1.42 разрешено остаться в полтора раза
-        # крупнее соседей и не влезть.
-        floor = ruler.base_size * floor_ratio
-        for w in words:
-            own = emphasis_size(w.emphasis, preset) * scale
-            w.size = round(ruler.fit_size(w, own, floor), 2)
-        lines = _greedy(words, ruler)
-        if len(lines) <= max_lines or scale <= floor_ratio:
-            break
+    lines = lay(scale)
+    while len(lines) > max_lines and scale > floor_ratio:
         scale = max(floor_ratio, scale * 0.94)
+        lines = lay(scale)
+
+    # Рост (С1). Блок поднимается, пока строка не упрётся в бюджет ширины или
+    # пока следующий шаг не выдавит лишнюю строку. Этим одним правилом
+    # получается вся наблюдаемая у эталона картина: короткая строка набрана
+    # крупнее длинной, потому что упирается она позже.
+    #
+    # Ищем двоичным поиском, а не шагом вверх: шаг пришлось бы делать мелким
+    # (перенос ступенчатый — одно слово, перескочившее строкой выше, убирает
+    # целую строку), и на блок уходило бы под сотню раскладок. Поиск
+    # детерминирован, иначе поехала бы сверка с Chromium.
+    #
+    # Потолок ограничивает МАСШТАБ блока, а не каждое слово: общий потолок на
+    # слово схлопывает иерархию — акцент и сосед упираются в одно число, после
+    # чего более длинный акцент ужимается `fit_size` ПОД соседа (замерено:
+    # «громче» 212.1 против «тише» 246.4, то есть выделенное слово оказалось
+    # мельче обычного).
+    hi = max(scale, ceiling / biggest_role) if biggest_role > 0 else scale
+    if grow_max > 1.0 and hi > scale and len(lines) <= max_lines:
+        lo = scale
+        for _ in range(18):
+            mid = (lo + hi) / 2
+            if len(lay(mid)) <= max_lines:
+                lo = mid
+            else:
+                hi = mid
+        scale = lo
+        lines = lay(scale)
+
     return lines, [ruler.line_width(line) for line in lines]
 
 

@@ -69,10 +69,15 @@ def test_max_video_seconds_derived():
     assert Settings(max_video_minutes=2.5).max_video_seconds == 150.0
 
 
-def test_llm_ready_requires_key_and_flag():
-    assert Settings(anthropic_api_key="", llm_enabled=True).llm_ready is False
-    assert Settings(anthropic_api_key="k", llm_enabled=False).llm_ready is False
-    assert Settings(anthropic_api_key="k", llm_enabled=True).llm_ready is True
+def test_llm_ready_requires_key_of_the_selected_provider():
+    def s(**kw):
+        return Settings(_env_file=None, llm_provider="anthropic", **kw)
+
+    assert s(anthropic_api_key="", llm_enabled=True).llm_ready is False
+    assert s(anthropic_api_key="k", llm_enabled=False).llm_ready is False
+    assert s(anthropic_api_key="k", llm_enabled=True).llm_ready is True
+    # ключ другого провайдера не считается
+    assert Settings(_env_file=None, llm_provider="deepseek", anthropic_api_key="k").llm_ready is False
 
 
 # ------------------------------------------------------------------ пресеты

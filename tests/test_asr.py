@@ -88,8 +88,9 @@ def test_finalize_gives_zero_length_words_a_duration():
 #
 # Оба бэкенда растягивают последнее слово перед паузой на саму паузу, а нарезка
 # считает паузы как зазор МЕЖДУ словами — и не видит спрятанную. Замер на
-# эталонном ролике: без обрезки whisperx вырезает 0.97 с из 20.01, с обрезкой —
-# 3.43 с (tests/asr_accuracy.py --media).
+# эталонном ролике: без обрезки whisperx вырезает 0.98 с из 20.01, с обрезкой —
+# 3.44 с (build_cuts на выводе ASR; это замер, не зависящий от той же энергии,
+# по которой работает сама обрезка).
 
 
 def _wav(path, spans, *, duration=2.0, sr=16000):
@@ -217,6 +218,90 @@ def test_trim_gives_up_on_signal_without_dynamics(tmp_path):
     wav = _wav(tmp_path / "a.wav", [(0.0, 2.0)])
     words = [Word(idx=0, text="раз", start=0.0, end=2.0)]
     assert trim_word_silence(words, wav) == 0
+
+
+# ------------------------------------------------------ whisperx без whisperx
+#
+# Оба случая ниже — про поведение НОВОГО дефолтного бэкенда, которое иначе видно
+# только на живых моделях: потерянное слово и падение посреди прогона.
+
+
+def _fake_whisperx(monkeypatch, segments, *, boom: Exception | None = None):
+    """Подставить модуль whisperx: настоящий тут не нужен, нужна его форма."""
+    import sys
+    import types
+
+    import numpy as np
+
+    from src.pipeline import asr
+
+    mod = types.ModuleType("whisperx")
+
+    class _Model:
+        def transcribe(self, audio, **kw):
+            if boom is not None:
+                raise boom
+            return {"language": "ru", "segments": [{"text": "x"}]}
+
+    mod.load_model = lambda *a, **k: _Model()
+    mod.load_audio = lambda *a, **k: np.zeros(16000, dtype="float32")
+    mod.load_align_model = lambda **k: ("align", "meta")
+    mod.align = lambda *a, **k: {"segments": segments}
+    monkeypatch.setitem(sys.modules, "whisperx", mod)
+    monkeypatch.setattr(asr, "_MODEL_CACHE", {})
+    monkeypatch.setattr(asr, "_has_whisperx", lambda: True)
+    return mod
+
+
+def test_whisperx_counts_and_logs_words_it_could_not_align(tmp_path, monkeypatch, caplog):
+    """Слово без границ выбрасывается — но не молча: зритель увидит его пропажу."""
+    from src.pipeline import asr
+
+    segments = [
+        {
+            "text": "раз 100% два",
+            "words": [
+                {"word": "раз", "start": 0.1, "end": 0.4, "score": 0.9},
+                {"word": "100%", "start": None, "end": None, "score": 0.9},
+                {"word": "два", "start": 0.6, "end": 0.9, "score": 0.9},
+            ],
+        }
+    ]
+    _fake_whisperx(monkeypatch, segments)
+    wav = _wav(tmp_path / "a.wav", [(0.0, 2.0)])
+    with caplog.at_level("WARNING"):
+        res = asr._transcribe_whisperx(wav, language="ru", model_name="small")
+    assert [w.text for w in res.words] == ["раз", "два"]
+    assert res.meta["unaligned_words"] == 1
+    assert any("100%" in r.getMessage() for r in caplog.records)
+
+
+def test_whisperx_falls_back_on_any_failure_not_only_the_align_model(tmp_path, monkeypatch):
+    """OOM, оборванная закачка, битый кеш — задача обязана доехать на фолбэке.
+
+    Раньше откат стоял только вокруг load_align_model, а job.py вызывает
+    transcribe() без обработчика: любой другой отказ whisperx ронял задачу целиком.
+    """
+    from src.core.edl import Word
+    from src.pipeline import asr
+
+    _fake_whisperx(monkeypatch, [], boom=RuntimeError("out of memory"))
+    called: list[str] = []
+
+    def fake_fw(wav, *, language, model_name):
+        called.append(model_name)
+        return asr.ASRResult(
+            words=[Word(idx=0, text="раз", start=0.0, end=0.5)],
+            language=language or "",
+            backend="faster_whisper",
+            model=model_name,
+        )
+
+    monkeypatch.setattr(asr, "_transcribe_faster_whisper", fake_fw)
+    wav = _wav(tmp_path / "a.wav", [(0.0, 2.0)])
+    res = asr._transcribe_whisperx(wav, language="ru", model_name="small")
+    assert res.backend == "faster_whisper"
+    assert called == ["small"]
 
 
 # ------------------------------------------------------------- сам измеритель

@@ -447,10 +447,14 @@ def test_line_box_is_never_shorter_than_the_strut():
     assert line_box_height([35.0], preset) == pytest.approx(93.28, abs=0.05)
     assert line_box_height([35.0], preset) == pytest.approx(strut)
     assert line_box_height([], preset) == pytest.approx(strut)
-    # Крупное слово бокс поднимает: 88×1.18×1.06 = 110.07 (Chromium 110.06).
-    assert line_box_height(
-        [preset.font.size * preset.animation.accent_scale], preset
-    ) == pytest.approx(110.07, abs=0.05)
+    # Крупное слово бокс поднимает — своим кеглем на межстрочный шаг. Литерала
+    # здесь больше нет: 110.07 было снято с Chromium при `accent_scale` 1.18
+    # (измерено 110.06), а С1 сделал это число данными темы.
+    big = preset.font.size * preset.animation.accent_scale
+    assert line_box_height([big], preset) == pytest.approx(
+        big * preset.caption.line_height, abs=0.05
+    )
+    assert line_box_height([big], preset) > strut
 
 
 def test_pixel_rounding_matches_the_renderer():
@@ -694,7 +698,10 @@ def test_caption_zone_reserves_the_worst_case_block():
     """
     preset = load_preset("glass")
     zone = caption_zone(preset, FRAME, "bottom")
-    lines = (["раз", "два"], ["три", "четыре"], ["пять"])
+    # Строк ровно столько, сколько разрешает пресет: жёсткая тройка описывала
+    # блок сверх контракта, как только тема опустила `max_lines` (С1 — у glass
+    # их две, как у эталона).
+    lines = (["раз", "два"], ["три", "четыре"], ["пять"])[: preset.caption.max_lines]
     for emphasis in ("accent", "shout"):
         every = PlanBlock(
             start=0.0,
