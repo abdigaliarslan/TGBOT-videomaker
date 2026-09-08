@@ -1039,9 +1039,18 @@ def test_track_switching_faces_does_not_move_the_window():
 
 
 def test_grade_filter_from_preset():
-    got = grade_filter(load_preset("glass").grade)
-    assert got.startswith("eq=contrast=1.08:saturation=1.12:gamma=0.98")
-    assert "vignette=angle=0.63" in got
+    """Фильтр собирается из данных пресета, а не из чисел, зашитых в тест.
+
+    Числа в JSON — предмет настройки: виньетку уже опускали с 0.63 до 0.22,
+    когда замер показал, что на 9:16 она гасит макушку и полосу субтитров.
+    Тест, повторяющий значение, ловит правку данных, а не поломку кода.
+    """
+    grade = load_preset("glass").grade
+    got = grade_filter(grade)
+    assert got.startswith(
+        f"eq=contrast={grade.contrast:g}:saturation={grade.saturation:g}:gamma={grade.gamma:g}"
+    )
+    assert f"vignette=angle={grade.vignette:g}" in got
 
 
 def test_grade_filter_disabled_is_empty():

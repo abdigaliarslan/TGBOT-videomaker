@@ -22,7 +22,7 @@ from src.llm.client import LLMClient
 from src.pipeline import broll as broll_mod
 from src.pipeline.asr import ASRResult, transcribe
 from src.pipeline.audio_post import build_audio
-from src.pipeline.crop import autocrop
+from src.pipeline.crop import autocrop, framing_spans
 from src.pipeline.cut import apply_cuts
 from src.pipeline.director import clean_transcript, direct, make_metadata
 from src.pipeline.luma import measure_bg_luma
@@ -244,7 +244,12 @@ async def process_video(
         if vertical:
             staged = autocrop(
                 cut_path, work / "vertical.mp4", work_dir=work,
-                out_width=cfg.render_width, out_height=cfg.render_height, cfg=cfg,
+                out_width=cfg.render_width, out_height=cfg.render_height,
+                # Пресет несёт цветокор (Ф3), крупность — смену плана на резе (Ф6).
+                # Без них обе фазы написаны, но выключены: кроп берёт пресет из
+                # конфига и снимает весь ролик одной крупностью.
+                preset=style, framing=framing_spans(edl, applied_cuts=cut_pauses),
+                cfg=cfg,
             )
         if not is_playable(staged):
             raise JobError("Кадрирование оборвалось — файл повреждён. Пришлите видео ещё раз.")
@@ -393,7 +398,9 @@ async def process_from_edl(
     if vertical:
         staged = autocrop(
             cut_path, work / "vertical.mp4", work_dir=work,
-            out_width=cfg.render_width, out_height=cfg.render_height, cfg=cfg,
+            out_width=cfg.render_width, out_height=cfg.render_height,
+            preset=style, framing=framing_spans(edl, applied_cuts=cut_pauses),
+            cfg=cfg,
         )
     if not is_playable(staged):
         raise JobError("Кадрирование оборвалось — файл повреждён.")
