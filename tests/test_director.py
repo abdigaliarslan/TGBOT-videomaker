@@ -109,9 +109,15 @@ def test_cuts_never_exceed_source():
     assert cuts[-1].src_out <= 10.0 + 1e-6
 
 
-def test_hesitation_detection():
-    ws = mk([("ну", 0.0, 0.2), ("ээ", 0.3, 0.5), ("Мм,", 0.6, 0.8), ("работа", 1.0, 1.5)])
-    assert hesitation_indices(ws) == {1, 2}  # «ну» — ярус-2, режется только по решению LLM
+def test_only_long_hesitations_are_cut():
+    """Режем заминку, только если она СЛЫШНА как затяжка.
+
+    Каждое выброшенное слово — отдельный рез: спаны через выброс не
+    склеиваются. Значит «Мм» на 0.15 с стоит зрителю видимого скачка, а
+    экономит полкадра, и цена не сходится. «ну» — не заминка вовсе.
+    """
+    ws = mk([("ну", 0.0, 0.2), ("ээ", 0.3, 0.9), ("Мм,", 1.0, 1.15), ("работа", 1.3, 1.8)])
+    assert hesitation_indices(ws, cfg()) == {1}
 
 
 # ------------------------------------------------------------------ блоки
@@ -154,7 +160,7 @@ def test_lonely_tail_word_is_glued():
 
 def test_deterministic_edl_is_always_valid():
     ws = mk(
-        [("привет", 0.5, 1.0), ("это", 1.1, 1.3), ("ээ", 1.35, 1.55), ("тест", 4.0, 4.5),
+        [("привет", 0.5, 1.0), ("это", 1.1, 1.3), ("ээ", 1.35, 1.95), ("тест", 4.0, 4.5),
          ("монтажа", 4.6, 5.2), ("бота.", 5.3, 5.9)]
     )
     edl = deterministic_edl(ws, 8.0, cfg=cfg())
@@ -177,7 +183,10 @@ def test_edl_from_plan_is_valid():
     }
     edl = edl_from_plan(ws, 5.0, plan, cfg=cfg())
     assert validate_edl(edl) == []
-    assert [cw.word_idx for b in edl.captions for cw in b.words] == [0, 1, 2, 3, 5, 6, 7, 8]
+    # «сл4» модель просила выбросить, но это не заминка — слово остаётся в
+    # кадре и досыпается обратно в субтитры (`cover_missing`), иначе звучало бы
+    # без текста.
+    assert [cw.word_idx for b in edl.captions for cw in b.words] == [0, 1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_edl_from_plan_drops_unknown_indices():

@@ -166,8 +166,31 @@ async def test_dropped_words_are_excluded_from_captions_and_cuts():
     llm = client_with(plan)
     edl = await direct(ws, 4.5, llm=llm, language="ru", cfg=cfg())
     assert validate_edl(edl) == []
+    # Модель просила выбросить «сл4», но выброс — не её решение: режутся только
+    # затяжные заминки. Каждое выброшенное слово даёт отдельный рез, а десяток
+    # таких резов делал ролик рваным до неразборчивости.
     captioned = [cw.word_idx for b in edl.captions for cw in b.words]
-    assert 4 not in captioned
+    assert 4 in captioned, "смысловое слово обязано остаться в субтитрах"
+    assert not any(c.reason == "drop_filler" for c in edl.cuts)
+
+
+async def test_a_long_filler_is_still_cut():
+    """Затяжную заминку режем — это второе исключение из «не режем»."""
+    ws = words(9)
+    # Заминка обязана уложиться в свой слот: слово 5 начинается в 2.0.
+    ws[4] = Word(idx=4, text="эээ", start=1.6, end=1.98)
+    plan = {
+        "hook_end_word": 2,
+        "drop_words": [],
+        "blocks": [
+            {"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [3, 5], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [6, 7, 8], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+        ],
+    }
+    edl = await direct(ws, 4.5, llm=client_with(plan), language="ru", cfg=cfg())
+    assert validate_edl(edl) == []
+    assert 4 not in [cw.word_idx for b in edl.captions for cw in b.words]
     assert any(c.reason == "drop_filler" for c in edl.cuts)
 
 

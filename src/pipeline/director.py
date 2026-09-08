@@ -69,6 +69,7 @@ FRAMING_MIN_SEGMENT = 0.8
 # Ярус-1: заминки, режутся всегда, даже без LLM.
 HESITATIONS = {
     "ээ", "эээ", "эм", "эмм", "мм", "ммм", "аа", "ааа", "мгм", "эээм",
+    "ии", "иии", "ыы", "ыыы", "ээм", "ааэ",
     "uh", "uhh", "um", "umm", "erm", "hmm", "mmm",
 }
 
@@ -91,9 +92,21 @@ def _normalize(text: str) -> str:
     return re.sub(r"[^\w']+", "", text.lower(), flags=re.UNICODE)
 
 
-def hesitation_indices(words: Sequence[Word]) -> set[int]:
-    """Заминки — их режем без всякой LLM."""
-    return {w.idx for w in words if _normalize(w.text) in HESITATIONS}
+def hesitation_indices(words: Sequence[Word], cfg: Settings | None = None) -> set[int]:
+    """Заминки — их режем без всякой LLM, но только ЗАТЯЖНЫЕ.
+
+    Каждое выброшенное слово — отдельный рез: спаны через выброс не склеиваются
+    (`build_cuts`, `between_dropped`). Значит короткое «эм» на 0.15 с стоит
+    зрителю видимого скачка, а экономит полкадра. Порог `cut_min_filler`
+    оставляет только те заминки, которые слышны как затяжка.
+    """
+    cfg = cfg or default_settings
+    floor = cfg.cut_min_filler
+    return {
+        w.idx
+        for w in words
+        if _normalize(w.text) in HESITATIONS and (w.end - w.start) >= floor
+    }
 
 
 def assign_framing(cuts: Sequence[Cut]) -> None:
@@ -360,7 +373,7 @@ def deterministic_edl(
     чем блок с приблизительно выбранным.
     """
     cfg = cfg or default_settings
-    drop = hesitation_indices(words) if cut_pauses else set()
+    drop = hesitation_indices(words, cfg) if cut_pauses else set()
     cuts = (
         build_cuts(words, source_duration, drop=drop, cfg=cfg)
         if cut_pauses
@@ -393,6 +406,62 @@ def deterministic_edl(
         )
     edl.captions = blocks
     return edl
+
+
+def cover_missing(
+    blocks: list[CaptionBlock], kept: Sequence[int], by_idx: Mapping[int, Word]
+) -> list[CaptionBlock]:
+    """Досыпать в субтитры слова, которые модель исключила, а мы оставили.
+
+    Модель строит блоки и список на выброс ВМЕСТЕ: раз слово выброшено, в блок
+    она его не кладёт. Её выброс мы больше не принимаем (режем только затяжные
+    заминки), и такое слово осталось бы звучать без субтитра — валидатор ловит
+    это как «слова не попали ни в один блок».
+
+    Слово подсаживается к соседу по индексу: после `i-1`, иначе перед `i+1`,
+    иначе отдельным блоком. Переполненный блок режется на куски, и каждому
+    куску, оставшемуся без выделения, `lead_word` возвращает главное слово —
+    иначе после разреза половина блока вышла бы стеной ровного текста (С3).
+    """
+    present = {cw.word_idx for b in blocks for cw in b.words}
+    for i in [i for i in kept if i not in present]:
+        placed = False
+        for b in blocks:
+            idxs = [cw.word_idx for cw in b.words]
+            if i - 1 in idxs:
+                b.words.insert(idxs.index(i - 1) + 1, CaptionWord(word_idx=i))
+                placed = True
+                break
+            if i + 1 in idxs:
+                b.words.insert(idxs.index(i + 1), CaptionWord(word_idx=i))
+                placed = True
+                break
+        if not placed:
+            blocks.append(CaptionBlock(words=[CaptionWord(word_idx=i)]))
+
+    blocks.sort(key=lambda b: b.words[0].word_idx if b.words else 0)
+
+    out: list[CaptionBlock] = []
+    for b in blocks:
+        if len(b.words) <= BLOCK_MAX_WORDS:
+            out.append(b)
+            continue
+        for k in range(0, len(b.words), BLOCK_MAX_WORDS):
+            out.append(
+                CaptionBlock(
+                    words=b.words[k : k + BLOCK_MAX_WORDS],
+                    position=b.position,
+                    anchor_track=b.anchor_track,
+                )
+            )
+    for b in out:
+        if any(cw.emphasis != Emphasis.NONE for cw in b.words):
+            continue
+        lead = lead_word([cw.word_idx for cw in b.words], by_idx)
+        for cw in b.words:
+            if cw.word_idx == lead:
+                cw.emphasis = Emphasis.ACCENT
+    return out
 
 
 def lead_word(idxs: Sequence[int], by_idx: Mapping[int, Word]) -> int | None:
@@ -443,8 +512,19 @@ def edl_from_plan(
     known = {w.idx for w in words}
     by_idx = {w.idx: w for w in words}
 
-    drop = {int(i) for i in plan.get("drop_words") or [] if int(i) in known}
-    drop |= hesitation_indices(words)  # заминки режем в любом случае
+    # Что вырезать — решает НЕ модель. Раньше ей было позволено выбросить до
+    # четверти слов (паразиты, повторы, самоисправления), а каждое выброшенное
+    # слово даёт отдельный рез: спаны через выброс не склеиваются, и ролик
+    # выходил рваным до неразборчивости. Теперь режутся только затяжные
+    # заминки, а список модели сужается до них же.
+    drop = hesitation_indices(words, cfg)
+    asked = {int(i) for i in plan.get("drop_words") or [] if int(i) in known}
+    ignored = asked - drop
+    if ignored:
+        log.info(
+            "режиссёр: %d слов на выброс не приняты — режем только затяжные заминки",
+            len(ignored),
+        )
 
     hook_end = plan.get("hook_end_word")
     hook_end = int(hook_end) if isinstance(hook_end, int) and hook_end in known else None
@@ -481,6 +561,17 @@ def edl_from_plan(
                 anchor_track=AnchorTrack() if raw.get("follow_face") else None,
             )
         )
+
+    # Слова, которые модель исключила из блоков ради СВОЕГО выброса, а мы
+    # оставили в кадре. Без этого они звучали бы без субтитра.
+    #
+    # Именно эти, а не все пропущенные: слово, которое модель просто забыла, —
+    # это битый ответ, и его чинит ретрай (`direct`), а не мы. Молча дописав
+    # забытое, мы бы выключили единственную проверку, которая ловит модель на
+    # потере текста.
+    restored = sorted(i for i in ignored if _is_kept(by_idx[i], cuts))
+    if restored:
+        captions = cover_missing(captions, restored, by_idx)
 
     # Потолок держим здесь, а не ретраем валидатора: лишняя привязка — не
     # ошибка формы, а перебор с приёмом, и снять её дешевле, чем гонять модель
