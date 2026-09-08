@@ -64,11 +64,10 @@ const stateOf = (word: PlanWord, frame: number, fps: number): WordState => {
  * 0.06, так что ЧИТАЕМЫЙ нахлёст держится в полосе, а за неё выходит только
  * формальное окно.
  */
-const blockOutFrames = (preset: Preset, fps: number): number =>
-  animFrames(
-    Math.max(preset.animation.block_out_ms, animNum(preset.animation, "block_overlap_min_ms", 220)),
-    fps,
-  );
+const blockOutFrames = (preset: Preset, fps: number): number => {
+  const a = preset.animation;
+  return animFrames(Math.max(a.block_out_ms, animNum(a, "block_overlap_min_ms", 220)), fps);
+};
 
 const emphasisScale = (word: PlanWord, preset: Preset): number => {
   if (word.emphasis === "accent") return preset.animation.accent_scale;

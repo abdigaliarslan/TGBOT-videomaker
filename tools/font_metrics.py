@@ -38,27 +38,30 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FONTS_DIR = REPO_ROOT / "assets" / "fonts"
 OUT_DIR = REPO_ROOT / "src" / "core" / "presets" / "metrics"
 
-# Репертуар: что вообще может приехать в субтитр. Русский и латиница с
-# диакритикой, цифры, типографская пунктуация, валюты. Всё остальное (эмодзи,
-# иероглифы) рисуется фолбэк-шрифтом системы, и мерить его по этому TTF
-# бессмысленно — для него в geometry.py отдельная ветка.
-CHAR_RANGES: tuple[tuple[int, int], ...] = (
-    (0x0020, 0x007E),  # ASCII
-    (0x00A0, 0x024F),  # Latin-1, Latin Extended-A/B
-    (0x0400, 0x052F),  # кириллица и дополнение
-    (0x2010, 0x205E),  # тире, кавычки, многоточие, №
-    (0x20A0, 0x20BF),  # валюты
-    (0x2116, 0x2116),  # №
-    (0x2190, 0x21FF),  # стрелки
-    (0x2200, 0x22FF),  # математика (× ÷ ≈ ≠)
-)
+# Репертуар — свойство ШРИФТА, а не гипотеза о тексте. Раньше здесь лежал
+# список диапазонов «что вообще может приехать в субтитр», и он был у́же cmap:
+# из 1312 символов Montserrat выгружались 806. Остальные 506 (греческий, ™, ▲,
+# ▶, ◆, ℓ, ⅓, тонкие пробелы, Latin Extended Additional) молча уходили в оценку
+# — FALLBACK_ADVANCE_EM или, если символ попадал в эмодзи-диапазон,
+# EMOJI_ADVANCE_EM, — и 452 из них промахивались мимо DoD «меньше 2 px» на
+# 15-80 px каждый. Символ, который в шрифте ЕСТЬ, обязан меряться шрифтом:
+# оценка нужна только для того, чего в нём нет.
+#
+# Цена вопроса — килобайты: выгрузка всего cmap вместо диапазонов добавляет к
+# JSON около трети, кернинг при этом не растёт (факторизация по классам).
+# Нижняя граница нужна одна: управляющие символы (U+0000-U+001F) в кадр не
+# попадают, а `_collapse` в geometry.py сводит пробельные к U+0020.
+MIN_CODEPOINT = 0x0020
 
 
-def repertoire() -> list[str]:
-    out: list[str] = []
-    for lo, hi in CHAR_RANGES:
-        out.extend(chr(c) for c in range(lo, hi + 1))
-    return out
+def repertoire(cmap: dict[int, str] | None = None) -> list[str]:
+    """Символы для выгрузки: весь cmap шрифта, кроме управляющих.
+
+    Без шрифта список пуст: вне шрифта репертуара не существует.
+    """
+    if not cmap:
+        return []
+    return [chr(c) for c in sorted(cmap) if c >= MIN_CODEPOINT]
 
 
 # --------------------------------------------------------------------------- кернинг
@@ -225,7 +228,7 @@ def extract(path: Path) -> dict[str, Any]:
     upem = font["head"].unitsPerEm
     os2 = font["OS/2"]
 
-    chars = [c for c in repertoire() if ord(c) in cmap]
+    chars = repertoire(cmap)
     ligatures = {
         text: glyph
         for text, glyph in _ligatures(font, cmap).items()

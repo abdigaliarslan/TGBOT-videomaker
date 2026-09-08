@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import pytest
 
 from src.pipeline.probe import probe
@@ -171,7 +173,7 @@ def test_trim_keeps_timings_monotonic(tmp_path):
         Word(idx=2, text="три", start=1.7, end=2.0),
     ]
     trim_word_silence(words, wav)
-    for a, b in zip(words, words[1:]):
+    for a, b in pairwise(words):
         assert a.end <= b.start + 1e-6
         assert a.end > a.start
 
@@ -189,6 +191,24 @@ def test_trim_survives_a_file_it_cannot_read(tmp_path):
     assert (words[0].start, words[0].end) == (0.0, 1.0)
 
 
+def test_trim_survives_a_truncated_pcm(tmp_path):
+    """Усечённый wav (нечётное число байт) — не повод ронять готовый транскрипт.
+
+    Раньше `wave` открывал такой файл штатно, а np.frombuffer падал уже за
+    пределами try — то есть задача умирала ПОСЛЕ успешного распознавания.
+    """
+    from src.core.edl import Word
+    from src.pipeline.asr import trim_word_silence
+
+    wav = _wav(tmp_path / "a.wav", [(0.0, 0.5), (1.5, 2.0)])
+    cut = tmp_path / "cut.wav"
+    cut.write_bytes(wav.read_bytes()[:-1])
+    words = [Word(idx=0, text="раз", start=0.0, end=1.0)]
+    changed = trim_word_silence(words, cut)  # главное — что не бросает
+    assert changed >= 0
+    assert 0.0 <= words[0].start < words[0].end <= 1.0
+
+
 def test_trim_gives_up_on_signal_without_dynamics(tmp_path):
     """Ровный уровень: порога «речь/тишина» нет, и выдумывать его нельзя."""
     from src.core.edl import Word
@@ -197,6 +217,76 @@ def test_trim_gives_up_on_signal_without_dynamics(tmp_path):
     wav = _wav(tmp_path / "a.wav", [(0.0, 2.0)])
     words = [Word(idx=0, text="раз", start=0.0, end=2.0)]
     assert trim_word_silence(words, wav) == 0
+
+
+# ------------------------------------------------------------- сам измеритель
+#
+# Измеритель — часть доказательной базы выбора бэкенда, поэтому он проверяется
+# так же, как код продукта: сломанный измеритель печатает «0 мс» и выглядит как
+# успех.
+
+
+def _has_ffmpeg() -> bool:
+    import shutil
+
+    return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+
+@pytest.mark.skipif(not _has_ffmpeg(), reason="нужен ffmpeg/ffprobe")
+def test_speech_edges_finds_the_pause_in_a_clip_that_starts_with_speech(tmp_path):
+    """Ролик БЕЗ ведущей тишины: единственная пауза обязана попасть в эталон.
+
+    Отсев ведущей тишины раньше стоял на сравнении `starts[0] < ends[0]`, которое
+    истинно всегда, и выбрасывал первое настоящее возобновление речи. На таком
+    ролике измеритель оставался без точек и печатал идеальный ноль.
+    """
+    from tests.asr_accuracy import speech_edges
+
+    wav = _wav(tmp_path / "a.wav", [(0.0, 2.0), (3.0, 5.0)], duration=5.0)
+    onsets, offsets = speech_edges(wav)
+    assert [round(e, 1) for _s, e in onsets] == [3.0]
+    assert [round(s, 1) for s, _e in offsets] == [2.0]
+
+
+@pytest.mark.skipif(not _has_ffmpeg(), reason="нужен ffmpeg/ffprobe")
+def test_speech_edges_drops_leading_and_trailing_silence(tmp_path):
+    """Тишина в начале файла — не уход в паузу, тишина в конце — не возобновление."""
+    from tests.asr_accuracy import speech_edges
+
+    wav = _wav(tmp_path / "a.wav", [(1.0, 2.0), (3.0, 4.0)], duration=5.0)
+    onsets, offsets = speech_edges(wav)
+    assert [round(e, 1) for _s, e in onsets] == [3.0]  # 1.0 — начало файла, 5.0 — конец
+    assert [round(s, 1) for s, _e in offsets] == [2.0, 4.0]
+
+
+def test_measure_media_does_not_reward_a_backend_that_never_heard_the_audio(tmp_path):
+    """Сопоставление по порядку, а не «ближайшее слово».
+
+    «Бэкенд», печатающий слово каждые 100 мс, на ближайшем слове набирал 37 мс и
+    выглядел точнее настоящих: метрика мерила плотность границ, а не выравнивание.
+    """
+    if not _has_ffmpeg():
+        pytest.skip("нужен ffmpeg/ffprobe")
+    from src.core.edl import Word
+    from tests.asr_accuracy import _stats, measure_media
+
+    wav = _wav(tmp_path / "a.wav", [(0.0, 2.0), (3.0, 5.0)], duration=5.0)
+    dense = [
+        Word(idx=i, text="x", start=round(i * 0.1, 3), end=round(i * 0.1 + 0.09, 3))
+        for i in range(50)
+    ]
+    (d_on, _miss_on), _off = measure_media(dense, wav)
+    stats = _stats(d_on)
+    assert stats is not None
+    assert stats[0] > 0.030 * 1000, "плотная сетка слов не должна выглядеть точной"
+
+
+def test_stats_says_nothing_to_measure_instead_of_zero():
+    """Пустой список — это «мерить нечего», а не «отклонение 0 мс»."""
+    from tests.asr_accuracy import _stats
+
+    assert _stats([]) is None
+    assert _stats([0.1])[0] == pytest.approx(100.0)
 
 
 # ------------------------------------------------------------------ на моделях (slow)
@@ -226,9 +316,13 @@ def test_word_timings_match_speech(fixture_video):
 
     Не на том, что стоит в .env: локальная настройка — это не свойство продукта,
     а faster_whisper на этой же фикстуре даёт 216 мс и завалил бы проверку по
-    причине, к коду отношения не имеющей. Расхождение печатается: молча мерить
-    не то, что поедет в прод, тоже нельзя.
+    причине, к коду отношения не имеющей. Но и молчать о расхождении нельзя:
+    зелёная галочка на бэкенде, которым машина не пользуется, — худший вариант,
+    поэтому расхождение поднимается предупреждением (pytest покажет его в
+    сводке), а не печатается в поток, который никто не читает.
     """
+    import warnings
+
     from src.core.config import settings
     from src.pipeline.asr import pick_backend, transcribe
 
@@ -240,7 +334,12 @@ def test_word_timings_match_speech(fixture_video):
         )
     configured = pick_backend(settings.asr_backend)
     if configured != backend:
-        print(f"\n⚠ настройки форсируют {configured}, DoD меряется на {backend}")
+        warnings.warn(
+            f"ASR_BACKEND в настройках даёт {configured}, а DoD меряется на {backend}: "
+            f"на этой машине продукт поедет на другом бэкенде, чем проверяет тест",
+            UserWarning,
+            stacklevel=2,
+        )
 
     video, truth = fixture_video
     result = transcribe(video, language="en", model="small", backend=backend)
@@ -258,7 +357,11 @@ def test_word_timings_match_speech(fixture_video):
     for phrase in truth["phrases"]:
         expected = [norm(w) for w in phrase["words"]]
         first = next(
-            (i for i in range(cursor, len(result.words)) if norm(result.words[i].text) == expected[0]),
+            (
+                i
+                for i in range(cursor, len(result.words))
+                if norm(result.words[i].text) == expected[0]
+            ),
             None,
         )
         assert first is not None, f"фраза не найдена в транскрипте: {phrase['text']!r}"
@@ -275,19 +378,27 @@ def test_word_timings_match_speech(fixture_video):
     mean = sum(deltas) / len(deltas)
     worst = max(deltas)
     print(f"\nотклонение: среднее {mean * 1000:.0f} мс, максимум {worst * 1000:.0f} мс")
-    assert mean <= TOLERANCE_MEAN, f"среднее отклонение {mean * 1000:.0f} мс > {TOLERANCE_MEAN * 1000:.0f} мс"
+    assert mean <= TOLERANCE_MEAN, (
+        f"среднее отклонение {mean * 1000:.0f} мс > {TOLERANCE_MEAN * 1000:.0f} мс"
+    )
     assert worst <= TOLERANCE_MAX, f"максимум {worst * 1000:.0f} мс > {TOLERANCE_MAX * 1000:.0f} мс"
 
 
 @pytest.mark.slow
 def test_asr_output_feeds_director(fixture_video):
-    """Транскрипт из ASR должен без правок собираться в валидный EDL."""
+    """Транскрипт из ASR должен без правок собираться в валидный EDL.
+
+    Здесь бэкенд НАМЕРЕННО берётся из настроек, а не форсируется: это проверка
+    того пути, по которому пойдёт задача на этой машине. Какой бэкенд сработал —
+    печатается, чтобы «3 passed» не скрывало, что мерили и что гоняли.
+    """
     from src.core.edl import validate_edl
     from src.pipeline.asr import transcribe
     from src.pipeline.director import deterministic_edl
 
     video, truth = fixture_video
     result = transcribe(video, language="en", model="small")
+    print(f"\nEDL собран на бэкенде из настроек: {result.backend}/{result.model}")
     edl = deterministic_edl(result.words, truth["duration"])
     assert validate_edl(edl) == []
     assert edl.out_duration < truth["duration"], "паузы должны были сократить ролик"

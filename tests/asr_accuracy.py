@@ -23,13 +23,13 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import resource
 import subprocess
 import sys
 import time
+from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -45,16 +45,31 @@ SILENCE_MIN = 0.35
 # Порог тишины для silencedetect. −35 дБ отделяет речь от комнатного шума на
 # записи с телефона; на синтезированной фикстуре сгодился бы любой.
 SILENCE_NOISE = "-35dB"
+# «Тишина доходит до конца файла» — с точностью до кадра огибающей silencedetect
+# (10 мс) плюс запас.
+EDGE_EPS = 0.05
 
 
 def norm(s: str) -> str:
     return "".join(ch for ch in s.lower() if ch.isalnum())
 
 
-def _stats(deltas: list[float]) -> tuple[float, float]:
-    """Среднее |Δ| и максимум в миллисекундах."""
+def _stats(deltas: list[float]) -> tuple[float, float] | None:
+    """Среднее |Δ| и максимум в миллисекундах. None — мерить нечего.
+
+    Именно None, а не (0, 0): пустой список значит «точек эталона не осталось»,
+    и напечатанный ноль читался бы как идеальная точность — ровно наоборот.
+    """
     a = [abs(d) for d in deltas]
-    return (sum(a) / len(a) * 1000.0, max(a) * 1000.0) if a else (0.0, 0.0)
+    return (sum(a) / len(a) * 1000.0, max(a) * 1000.0) if a else None
+
+
+def _fmt(stats: tuple[float, float] | None, label: str, n: int, missed: int) -> str:
+    if stats is None:
+        return f"{label} ({n}): мерить нечего — точек эталона не осталось"
+    mean, worst = stats
+    tail = f", без слова: {missed}" if missed else ""
+    return f"{label} ({n}): среднее |Δ| = {mean:.0f} мс, максимум = {worst:.0f} мс{tail}"
 
 
 # ------------------------------------------------------------------ режим фикстуры
@@ -98,14 +113,34 @@ def measure_fixture(words, truth) -> list[float]:
 # ------------------------------------------------------------------ режим по энергии
 
 
-def speech_edges(media: Path) -> tuple[list[float], list[float]]:
-    """Границы речи по энергии: (возобновления после паузы, уходы в паузу)."""
+def audio_duration(media: Path) -> float:
+    """Длительность звуковой дорожки. 0.0 — если ffprobe не смог."""
+    p = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=duration", "-of", "csv=p=0", str(media),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    try:
+        return float(p.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return 0.0
+
+
+def speech_edges(media: Path) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Паузы по энергии: (по концам которых меряются начала, по началам — концы).
+
+    Возвращаются именно ПАУЗЫ (start, end), а не отдельные моменты: без второй
+    границы не отличить слово, начавшееся ДО паузы и растянутое на неё, от
+    первого слова после неё — а это две разные ошибки бэкенда.
+    """
     p = subprocess.run(
         [
             "ffmpeg", "-hide_banner", "-nostdin", "-i", str(media),
             "-af", f"silencedetect=noise={SILENCE_NOISE}:d={SILENCE_MIN}", "-f", "null", "-",
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     text = p.stdout + p.stderr
     starts = [float(x) for x in re.findall(r"silence_start:\s*(-?[\d.]+)", text)]
@@ -114,39 +149,96 @@ def speech_edges(media: Path) -> tuple[list[float], list[float]]:
         return [], []
     # Тишина в начале файла — не «уход в паузу», а его отсутствие; тишина в конце
     # — не «возобновление». Считать по ним отклонение значит мерить длину файла.
-    first_onset = ends[0]
-    onsets = ends[1:] if starts and starts[0] < first_onset else ends
-    offsets = [s for s in starts if s > first_onset]
-    return onsets, offsets
+    #
+    # Отделять их надо ПО ВРЕМЕНИ, а не по порядку в списке: silence_start своей
+    # паузы всегда идёт раньше её silence_end, поэтому сравнение starts[0] с
+    # ends[0] истинно на любом файле и выбрасывало бы первую же точку эталона —
+    # на ролике, который начинается с речи, мерить становилось нечего.
+    # Ведущая тишина — та, до которой не было речи: либо файл начинается с неё
+    # (starts[0] == 0), либо до неё звучало меньше, чем длится минимальная пауза
+    # (щелчок, стук микрофона — фразой это быть не может).
+    duration = audio_duration(media)
+    leading = bool(starts) and starts[0] < SILENCE_MIN
+    pauses = list(zip(starts, ends, strict=False))
+    body = pauses[1:] if leading else pauses
+    onsets = [
+        (s, e)
+        for s, e in body
+        # хвостовой флаш silencedetect на конце потока — не возобновление речи
+        if not (duration and duration - e <= EDGE_EPS)
+    ]
+    return onsets, body
 
 
-def measure_media(words, media: Path) -> tuple[list[float], list[float]]:
-    """|Δ| границ слов относительно энергии. Возвращает (по началам, по концам)."""
+def _match_in_order(words, pauses: list[tuple[float, float]], label: str, *, onset: bool):
+    """Сопоставить паузы со словами ПО ПОРЯДКУ транскрипта.
+
+    Ближайшее по времени слово брать нельзя: оно не обязано быть тем самым.
+    Метрика тогда меряет не выравнивание, а ПЛОТНОСТЬ границ — фиктивный
+    «бэкенд», печатающий слово каждые 100 мс и не слышавший звука, набирает на
+    «ближайшем» 37 мс по началам и 23 мс по концам, то есть «точнее» настоящих
+    (на сопоставлении по порядку он же даёт 946 мс, как и должен).
+
+    Поэтому слово выбирается по порядку и ровно один раз:
+    - `onset` — первое слово, НАЧАВШЕЕСЯ не раньше паузы; отклонение считается
+      от её конца (момента, когда речь возобновилась);
+    - иначе — последнее слово, КОНЧИВШЕЕСЯ не позже паузы; отклонение считается
+      от её начала (момента, когда речь смолкла).
+
+    Слово, начавшееся до паузы и растянутое за её конец, не подходит ни туда, ни
+    сюда: точка остаётся без слова и попадает в счётчик промахов, а не в среднее.
+    """
+    deltas: list[float] = []
+    missed = 0
+    cursor = 0
+    for s, e in pauses:
+        t = e if onset else s
+        chosen = None
+        for i in range(cursor, len(words)):
+            w = words[i]
+            v = w.start if onset else w.end
+            if v > t + MATCH_WINDOW:
+                break
+            if v < t - MATCH_WINDOW:
+                continue
+            if onset:
+                if w.start >= s:  # слово из-за паузы, а не растянутое через неё
+                    chosen = i
+                    break
+            elif w.end <= e:
+                chosen = i  # последнее подходящее в окне
+        if chosen is None:
+            missed += 1
+            print(f"  {label} {t:6.2f}: слова в ±{MATCH_WINDOW:.0f} с нет")
+            continue
+        w = words[chosen]
+        cursor = chosen + 1
+        d = (w.start if onset else w.end) - t
+        deltas.append(d)
+        print(f"  {label} {t:6.2f} → {(w.start if onset else w.end):6.2f} ({d:+.3f})  {w.text!r}")
+    return deltas, missed
+
+
+def measure_media(words, media: Path) -> tuple[tuple[list[float], int], tuple[list[float], int]]:
+    """|Δ| границ слов относительно энергии. Возвращает (по началам, по концам).
+
+    Каждая половина — (отклонения в секундах, число точек эталона без слова).
+    Число промахов возвращается вместе с отклонениями не для красоты: окно
+    ±MATCH_WINDOW обрезает распределение сверху, и промах больше секунды иначе
+    просто исчез бы из статистики, улучшив её.
+    """
     onsets, offsets = speech_edges(media)
     if not onsets and not offsets:
         print("  !! silencedetect не нашёл пауз — на этом ролике мерить нечего")
-        return [], []
-
-    def match(points: list[float], attr: str, label: str) -> list[float]:
-        deltas: list[float] = []
-        for t in points:
-            near = [w for w in words if abs(getattr(w, attr) - t) < MATCH_WINDOW]
-            if not near:
-                print(f"  {label} {t:6.2f}: слова в ±{MATCH_WINDOW:.0f} с нет")
-                continue
-            best = min(near, key=lambda w: abs(getattr(w, attr) - t))
-            d = getattr(best, attr) - t
-            deltas.append(d)
-            print(f"  {label} {t:6.2f} → {getattr(best, attr):6.2f} ({d:+.3f})  {best.text!r}")
-        return deltas
+        return ([], 0), ([], 0)
 
     # Возобновление речи — событие однозначное, и именно на нём видно, что
     # подсветка уехала. Уход в паузу мягче: хвост слова затухает постепенно, и
     # порог срабатывает раньше, чем слово физически кончилось. Поэтому числа
     # печатаются раздельно, а решение принимается по началам.
-    d_on = match(onsets, "start", "возобновление")
-    d_off = match(offsets, "end", "уход в паузу ")
-    return d_on, d_off
+    on = _match_in_order(words, onsets, "возобновление", onset=True)
+    off = _match_in_order(words, offsets, "уход в паузу ", onset=False)
+    return on, off
 
 
 # ------------------------------------------------------------------ прогон
@@ -242,24 +334,18 @@ def main() -> int:
 
     if truth is not None:
         deltas = measure_fixture(words, truth)
-        mean, worst = _stats(deltas)
-        print(f"\nсреднее |Δ| = {mean:.0f} мс, максимум = {worst:.0f} мс")
+        stats = _stats(deltas)
+        print("\n" + (f"среднее |Δ| = {stats[0]:.0f} мс, максимум = {stats[1]:.0f} мс"
+                      if stats else "мерить нечего: ни одна фраза не сошлась с транскриптом"))
     else:
-        d_on, d_off = measure_media(words, media)
-        on_mean, on_worst = _stats(d_on)
-        off_mean, off_worst = _stats(d_off)
-        print(
-            f"\nвозобновление речи ({len(d_on)}): среднее |Δ| = {on_mean:.0f} мс, "
-            f"максимум = {on_worst:.0f} мс"
-        )
-        print(
-            f"уход в паузу     ({len(d_off)}): среднее |Δ| = {off_mean:.0f} мс, "
-            f"максимум = {off_worst:.0f} мс"
-        )
+        (d_on, miss_on), (d_off, miss_off) = measure_media(words, media)
+        print()
+        print(_fmt(_stats(d_on), "возобновление речи", len(d_on), miss_on))
+        print(_fmt(_stats(d_off), "уход в паузу     ", len(d_off), miss_off))
 
     # Не только точность: пропущенное слово или перекрытие ломает EDL целиком,
     # а по средним отклонениям этого не видно.
-    bad = sum(1 for a, b in zip(words, words[1:]) if a.end > b.start + 1e-6)
+    bad = sum(1 for a, b in pairwise(words) if a.end > b.start + 1e-6)
     print(f"немонотонных пар: {bad}")
     return 0
 

@@ -134,23 +134,58 @@ def dialogues(p) -> list[str]:
     return [line for line in build_ass(p).splitlines() if line.startswith("Dialogue:")]
 
 
-@pytest.mark.parametrize("fps", [24, 30, 60])
-def test_pop_lasts_at_least_eight_frames(fps):
-    """Пол в восемь кадров — закон обоих рендереров, а не только Remotion.
+def _dialogue_ms(line: str) -> int:
+    """Длительность реплики в миллисекундах по её собственным меткам времени."""
+    m = re.match(r"Dialogue: 0,([\d:.]+),([\d:.]+),", line)
+    assert m, line
 
-    Пресеты просят 130-160 мс: на 24 fps это 3.1 кадра, то есть переход
-    вырождается в пару ступенек. `MIN_ANIM_FRAMES` в style.ts это ловит, а ASS
-    брал `pop_ms` из пресета как есть.
+    def parse(stamp: str) -> float:
+        h, mm, rest = stamp.split(":")
+        return int(h) * 3600 + int(mm) * 60 + float(rest)
+
+    return round((parse(m.group(2)) - parse(m.group(1))) * 1000)
+
+
+def _pop_end_ms(line: str) -> int | None:
+    """Конец последней фазы «пшика» или None, если анимации в реплике нет."""
+    ends = [int(m.group(2)) for m in re.finditer(r"\\t\((\d+),(\d+),", line)]
+    return max(ends) if ends else None
+
+
+@pytest.mark.parametrize("fps", [24, 30, 60])
+@pytest.mark.parametrize("source", ["synthetic", "baseline"])
+def test_pop_either_lasts_eight_frames_or_is_not_drawn(fps, source):
+    """Пол в восемь кадров — закон обоих рендереров, но мерить его надо по РЕПЛИКЕ.
+
+    Теги `\\t` отсчитываются от начала реплики, а реплика живёт от слова i до
+    слова i+1: анимацию ограничивает сверху речь, а не пресет. Пол, взятый из
+    пресета как есть, этого не знал — на 24 fps он просит 334 мс, и 15 реплик
+    эталонного ролика из 35 короче, то есть «пшик» обрывался на промежуточном
+    `\\fscx` и следующая реплика возвращала кегль скачком.
+
+    Поэтому проверяется поведение, а не число в теге: либо анимации нет вовсе,
+    либо она И длится не меньше восьми кадров, И укладывается в свою реплику.
+    Эталонный EDL здесь обязателен: на синтетике таких коротких реплик нет, и
+    тест зеленел бы при анимации, обрезанной до одного кадра.
     """
-    p = build_plan(edl_with_accent(), "in.mp4", fps=fps, width=1080, height=1920)
-    # Пол меряет ВСЮ анимацию, а не её фазу: у «пшика» их две (\t на подъём и
-    # \t на возврат), и закон про их сумму — то есть про конец последней.
-    totals = [
-        max(int(m.group(2)) for m in re.finditer(r"\\t\((\d+),(\d+),", line))
-        for line in dialogues(p)
-    ]
-    assert totals, "в репликах нет ни одного \\t"
-    assert min(totals) / 1000 * fps >= 8 - 1e-6
+    edl = (
+        edl_with_accent()
+        if source == "synthetic"
+        else EDL(**{k: v for k, v in _baseline().items() if k != "camera"})
+    )
+    p = build_plan(edl, "in.mp4", fps=fps, width=1080, height=1920)
+    lines = dialogues(p)
+    assert lines
+    drawn = 0
+    for line in lines:
+        end = _pop_end_ms(line)
+        if end is None:
+            continue
+        drawn += 1
+        window = _dialogue_ms(line)
+        assert end <= window, f"«пшик» {end} мс длиннее своей реплики {window} мс: {line}"
+        assert end / 1000 * fps >= 8 - 1e-6, f"«пшик» короче восьми кадров: {line}"
+    assert drawn, "ни в одной реплике не осталось анимации"
 
 
 @pytest.mark.parametrize("fps", [24, 30, 60])

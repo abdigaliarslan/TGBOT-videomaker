@@ -19,8 +19,8 @@ from src.core.edl import (
     Word,
 )
 from src.core.geometry import (
+    STOCK_ASPECT,
     Rect,
-    broll_rect,
     caption_text_width,
     line_gap,
     measure_line,
@@ -165,11 +165,11 @@ def test_caption_never_shares_the_frame_with_a_picture(anchor: str):
 def test_an_explicit_centre_block_still_gets_its_room(anchor: str):
     """Гарантия Ф7 держится и на явном `center`, который режиссёр ставит сам.
 
-    Позиции блоков видит только сборка плана, и без них `broll_rect` берёт свою
-    лестницу по умолчанию: у glass в кадре 1080×1920 места на все три полосы нет,
-    и лестница отбрасывает `center` — то есть карточка получала право встать
-    ровно туда, куда режиссёр только что поставил блок. Здесь план обязан
-    передать позиции вниз и получить либо карточку мимо текста, либо полный кадр.
+    Прямоугольники блоков видит только сборка плана, и без них `broll_rect`
+    уступает текст по резерву `caption_zone`, а когда-то и вовсе отбрасывал у
+    glass позицию `center` — то есть карточка получала право встать ровно туда,
+    куда режиссёр только что поставил блок. Здесь план обязан передать измеренные
+    блоки вниз и получить либо карточку мимо текста, либо полный кадр.
     """
     edl = broll_edl(anchor)
     for block in edl.captions:
@@ -183,6 +183,81 @@ def test_an_explicit_centre_block_still_gets_its_room(anchor: str):
         if picture.width >= plan.width:
             continue  # места под карточку не осталось — осознанный полный кадр
         assert not block.rect.overlaps(picture), anchor
+
+
+@pytest.mark.parametrize(
+    "anchor", ["top_left", "top_right", "bottom_left", "bottom_right", "center"]
+)
+@pytest.mark.parametrize("position", ["bottom", "top", "center"])
+def test_a_block_shouting_on_every_line_still_keeps_the_picture_out(anchor: str, position: str):
+    """Ф7 на блоке, который резерв не покрывал: крик в КАЖДОЙ строке.
+
+    Полоса `caption_zone` резервировала «(строк−1)·базовая + самая высокая», то
+    есть блок ровно с одним выделенным словом. Контракт разрешает `shout` в
+    каждой строке, и такой блок у glass 1080×1920 на 63 px выше резерва —
+    картинка вставала внутрь текста, а этот же тест был зелёным только потому,
+    что в фикстуре крика не было.
+    """
+    words = [Word(idx=i, text="невероятно", start=i * 0.5, end=i * 0.5 + 0.4) for i in range(3)]
+    edl = EDL(
+        source_duration=10.0,
+        words=words,
+        cuts=[Cut(src_in=0.0, src_out=3.0, reason="keep")],
+        captions=[
+            CaptionBlock(
+                position=position,
+                words=[CaptionWord(word_idx=i, emphasis=Emphasis.SHOUT) for i in range(3)],
+            )
+        ],
+        broll=[
+            Broll(word_idx=0, duration=2.0, query="q", anim=BrollAnim.POP_IN, anchor=anchor)
+        ],
+        preset="glass",
+    )
+    plan = build_plan(edl, "v.mp4", cfg=cfg())
+    caption = plan.blocks[0].rect
+    picture = plan.broll[0].rect
+    assert isinstance(caption, Rect) and isinstance(picture, Rect)
+    assert len(plan.blocks[0].lines) == 3, "тест про трёхстрочный блок"
+    if picture.width >= plan.width:
+        pytest.skip("места под карточку не осталось — осознанный полный кадр")
+    assert not caption.overlaps(picture), (anchor, position)
+
+
+def test_a_centre_block_does_not_shrink_cards_in_other_windows():
+    """Позиции считаются ПО ОКНУ вставки, а не на весь ролик.
+
+    Один блок с явным `center` добавлял `center` в общий набор позиций всего
+    плана: полоса у glass схлопывалась ниже порога, и полноэкранными становились
+    ВСЕ карточки ролика — включая те, что играют, когда центрального блока на
+    экране нет.
+    """
+    words = [Word(idx=i, text=f"сл{i}", start=i * 1.0, end=i * 1.0 + 0.8) for i in range(4)]
+    edl = EDL(
+        source_duration=10.0,
+        words=words,
+        cuts=[Cut(src_in=0.0, src_out=10.0, reason="keep")],
+        captions=[
+            CaptionBlock(position="center", words=[CaptionWord(word_idx=0)]),
+            CaptionBlock(position="bottom", words=[CaptionWord(word_idx=3)]),
+        ],
+        broll=[
+            Broll(word_idx=0, duration=0.8, query="q", anim=BrollAnim.POP_IN, anchor="top_right"),
+            Broll(word_idx=3, duration=0.8, query="q", anim=BrollAnim.POP_IN, anchor="top_right"),
+        ],
+        preset="glass",
+    )
+    plan = build_plan(edl, "v.mp4", cfg=cfg())
+    late = plan.broll[1].rect
+    assert isinstance(late, Rect)
+    assert late.width < plan.width, "вставка вне окна центрального блока осталась карточкой"
+    for block in plan.blocks:
+        for item in plan.broll:
+            if item.end <= block.start or item.start >= block.end:
+                continue
+            if item.rect is None or block.rect is None or item.rect.width >= plan.width:
+                continue
+            assert not block.rect.overlaps(item.rect)
 
 
 def test_caption_moves_away_from_a_picture_over_its_band():
@@ -300,9 +375,19 @@ def test_block_rect_scales_with_the_frame():
 
 
 def test_broll_carries_the_rect_of_its_anchor():
+    """Якорь виден в плане: карточка прижата к правому краю и остаётся карточкой.
+
+    Сравнивать с `broll_rect` без контекста больше нельзя: сборка плана разводит
+    картинку с ИЗМЕРЕННЫМИ прямоугольниками блоков, а вызов без них уступает
+    всё, что разрешает контракт, и у glass честно вырождается в полный кадр.
+    """
     plan = build_plan(broll_edl("bottom_right"), "v.mp4", cfg=cfg())
-    preset = load_preset("glass")
-    assert plan.broll[0].rect == broll_rect("bottom_right", preset, (plan.width, plan.height))
+    preset = load_preset("glass").scaled(plan.height)
+    rect = plan.broll[0].rect
+    assert rect is not None and rect.width < plan.width
+    margin = plan.width * preset.geometry.broll_margin_ratio
+    assert plan.width - rect.right == pytest.approx(margin)
+    assert rect.width / rect.height == pytest.approx(STOCK_ASPECT)
 
 
 def test_fullscreen_to_inset_rect_is_the_corner_it_ends_in():
@@ -767,12 +852,34 @@ def test_plans_saved_before_the_pixel_wrap_still_load():
 # ------------------------------------------------------------------ сверка с Chromium
 
 
+def _as_word(w: PlanWord) -> dict:
+    """Слово для линейки: текст, кегль и эмодзи вложенным спаном, как в Captions.tsx."""
+    item: dict = {"text": w.text, "size": w.size}
+    if w.emoji:
+        item["emoji"] = w.emoji
+    return item
+
+
+def _looks_like_a_missing_browser(stderr: str) -> bool:
+    """Chromium не скачан — это не расхождение геометрии, а пустая машина."""
+    text = stderr.lower()
+    return any(
+        mark in text
+        for mark in ("openbrowser", "ensurebrowser", "browser executable", "chrome headless shell")
+    )
+
+
 MEASURE = Path(__file__).resolve().parents[1] / "render" / "measure.mjs"
 FONTS = Path(__file__).resolve().parents[1] / "assets" / "fonts"
 
 
 def _measure_in_chromium(request: dict) -> dict:
-    """Запуск линейки `render/measure.mjs`: JSON на stdin → измерения на stdout."""
+    """Запуск линейки `render/measure.mjs`: JSON на stdin → измерения на stdout.
+
+    «Браузера нет» и «кадр разъехался» — разные новости: на чистой машине
+    `openBrowser` падает, потому что Chromium ещё не скачан, и падение теста
+    выглядело бы как поломка кода. Первое — пропуск, второе — провал.
+    """
     import subprocess
 
     out = subprocess.run(
@@ -783,7 +890,10 @@ def _measure_in_chromium(request: dict) -> dict:
         timeout=600,
         cwd=str(MEASURE.parent),
     )
-    assert out.returncode == 0, out.stderr
+    if out.returncode != 0:
+        if _looks_like_a_missing_browser(out.stderr):
+            pytest.skip(f"нет скачанного Chromium: {out.stderr.strip()[-300:]}")
+        pytest.fail(f"measure.mjs упал: {out.stderr.strip()[-2000:]}")
     return json.loads(out.stdout)
 
 
@@ -798,8 +908,10 @@ def test_chromium_draws_the_block_the_plan_promised(name: str):
     только ширина строки, но и коробка блока: ровно на высоте и жила ошибка,
     из-за которой `rect` занижал блок с ужатым словом на 45-164 px.
 
-    Эмодзи в запрос не идут: их рисует системный шрифт, и `measure.mjs` не
-    моделирует вложенный спан.
+    Эмодзи в запросе ЕСТЬ: `measure.mjs` рисует их вложенным спаном ровно так,
+    как это делает Captions.tsx, и без них сверка не покрывала бы ни ширину
+    кластера, ни пробел перед ним. Ширину цветного глифа даёт системный шрифт —
+    та же оговорка, что у `EMOJI_ADVANCE_EM`.
     """
     node = __import__("shutil").which("node")
     if node is None or not (MEASURE.parent / "node_modules").exists():
@@ -824,21 +936,22 @@ def test_chromium_draws_the_block_the_plan_promised(name: str):
     for bi, block in enumerate(all_blocks()):
         words = plan_words(block, preset)
         lines, widths = wrap_block(words, preset, FRAME[0])
-        if any(w.emoji for w in words):
-            continue
         rect = _rect_of_lines("bottom", lines, widths, preset, FRAME)
         for li, (line, width) in enumerate(zip(lines, widths)):
             key = f"b{bi}l{li}"
             expected_lines[key] = width
             request["items"].append(
-                {"id": key, "words": [{"text": w.text, "size": w.size} for w in line]}
+                {"id": key, "words": [_as_word(w) for w in line]}
             )
         expected_boxes[f"b{bi}"] = (rect.width, rect.height)
         panel = preset.panel
         request["boxes"].append({
             "id": f"b{bi}",
-            "lines": [[{"text": w.text, "size": w.size} for w in line] for line in lines],
-            "gap": line_gap(preset),
+            "lines": [[_as_word(w) for w in line] for line in lines],
+            # `gap` НЕ передаётся: страница считает его формулой Captions.tsx
+            # сама. Подставить сюда `line_gap(preset)` значит поставить одно и то
+            # же вычисление по обе стороны сверки — ошибка в нём сократилась бы,
+            # и тест прошёл бы при разъехавшемся кадре.
             "padding_x": panel.padding_x if panel.enabled else 0,
             "padding_y": panel.padding_y if panel.enabled else 0,
             "border_width": panel.border_width if panel.enabled else 0,
