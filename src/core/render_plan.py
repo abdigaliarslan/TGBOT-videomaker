@@ -9,17 +9,35 @@
 геометрия жила константами в TSX, а Python оперировал половинами кадра и не мог
 ни предсказать положение строки, ни развести субтитр с картинкой (AUDIT §8.4).
 Считает их `src/core/geometry.py` в пикселях кадра.
+
+В Ф5 сюда переехала и раскладка строки. Перенос считается в пикселях
+(`wrap_block`), а не в символах, и каждому слову проставляется собственный
+кегль: акцент — это РАЗМЕР, а не `transform: scale`, иначе увеличенное слово
+не участвует в раскладке и накрывает соседа (AUDIT §8.1). Рендерер получает
+готовые строки и готовые кегли и не выводит из выделения ничего.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, Emphasis, Timeline
-from src.core.geometry import Rect, broll_rect, caption_rect, resting_anchor
+from src.core.geometry import (
+    FontMetrics,
+    Rect,
+    blocks_caption,
+    broll_rect,
+    caption_text_width,
+    emphasis_size,
+    line_gap,
+    measure_word,
+    metrics_for,
+    resting_anchor,
+    safe_margin_y,
+)
 from src.core.preset import Preset, load_preset
 from src.core.text import display_text
 
@@ -34,6 +52,12 @@ class PlanWord:
     emphasis: str = "none"
     emoji: str | None = None
     word_idx: int = -1
+    # Кегль слова в пикселях кадра. Акцент — это РАЗМЕР, а не `transform: scale`:
+    # масштаб не участвует в раскладке, поэтому увеличенное слово накрывало
+    # соседа (AUDIT §8.1). Здесь размер считает Python: он же им и мерил строку,
+    # и рендерер обязан поставить ровно его. `None` — метрик шрифта не было,
+    # рендерер берёт кегль из пресета сам, как до Ф5.
+    size: float | None = None
 
 
 @dataclass(slots=True)
@@ -45,6 +69,10 @@ class PlanBlock:
     # Куда блок попадёт в кадре, вместе с панелью. `None` — метрик шрифта нет,
     # рендерер раскладывает по-старому.
     rect: Rect | None = None
+    # Средняя яркость кадра под блоком, 0..1. Меряет препроцесс; рендерер по ней
+    # ведёт прозрачность панели и цвет текста, чтобы контраст взял порог (Ф9).
+    # `None` — никто не мерил, пресет играет как играл.
+    bg_luma: float | None = None
 
     @property
     def words(self) -> list[PlanWord]:
@@ -96,6 +124,7 @@ class RenderPlan:
                     position=b["position"],
                     lines=[[PlanWord(**w) for w in line] for line in b["lines"]],
                     rect=_rect_from(b.get("rect")),
+                    bg_luma=b.get("bg_luma"),
                 )
                 for b in data.get("blocks", [])
             ],
@@ -131,6 +160,7 @@ class RenderPlan:
                     "position": b.position,
                     "lines": [[asdict(w) for w in line] for line in b.lines],
                     "rect": b.rect.to_dict() if b.rect else None,
+                    "bg_luma": b.bg_luma,
                 }
                 for b in self.blocks
             ],
@@ -159,7 +189,13 @@ def _rect_from(data: dict[str, Any] | None) -> Rect | None:
 
 
 def wrap_words(words: list[PlanWord], max_chars: int, max_lines: int = 3) -> list[list[PlanWord]]:
-    """Жадный перенос по символам. Считает Python, чтобы рендерер не думал."""
+    """Жадный перенос по символам — запасной путь, когда мерить нечем.
+
+    Символ не единица ширины: `Ш` шире `і` вдвое, эмодзи не считается вовсе,
+    пробел в бюджете стоит один символ, а рисуется другой ширины (AUDIT §8.1).
+    Поэтому основной путь — `wrap_block` в пикселях, а эта функция остаётся на
+    случай пресета без метрик шрифта, где ширину взять негде.
+    """
     if not words:
         return []
     lines: list[list[PlanWord]] = [[]]
@@ -174,11 +210,227 @@ def wrap_words(words: list[PlanWord], max_chars: int, max_lines: int = 3) -> lis
     return [line for line in lines if line]
 
 
+# Средняя ширина буквы в em на запасном пути — там, где метрик шрифта нет и
+# ширину строки посчитать физически нечем. Числа замерены по текстам настоящего
+# прогона (`samples/plan-baseline.json`, Montserrat ExtraBold): строчная
+# кириллица 0.654 em, прописная 0.761 em. Одной константой на все пресеты
+# обойтись нельзя: bold рисует UPPERCASE кеглем 104, и «15 символов», выведенные
+# под glass, дают у него строку в 1217 px при бюджете 842 (AUDIT §8.1 замерил
+# ровно это: 11.9 символа в строку).
+FALLBACK_CHAR_EM = 0.654
+FALLBACK_CHAR_EM_UPPER = 0.761
+
+# Ширина эмодзи в em. Цветной глиф рисует не наш TTF, а системный Noto Color
+# Emoji, и метрик у него в пресете нет: `geometry.FALLBACK_ADVANCE_EM` берёт для
+# него 1.0 em и занижает строку на 21.8 px при кегле 88 (0.2478 em). Число
+# измерено линейкой `render/measure.mjs` в том же Chromium, которым идёт рендер:
+# девять разных эмодзи, включая составные из двух и трёх кодовых точек (❤️, 1️⃣),
+# дали одну и ту же ширину, а letter-spacing Chromium добавляет к кластеру один
+# раз, а не на каждую кодовую точку, — поэтому эмодзи считается целиком, а не по
+# символам.
+#
+# Число зависит от ХОСТА: цветной шрифт ставит система, а не пресет. Другой
+# эмодзи-шрифт — другая ширина, до 110 px на глиф при кегле 88 (13 % бюджета
+# строки), и никакой метрикой мы это не поймаем. Пока рендер идёт на своей
+# машине, это допущение; при переезде в образ эмодзи-шрифт надо закреплять там
+# же, где и Montserrat.
+EMOJI_ADVANCE_EM = 1.2478
+
+
+def fallback_line_chars(preset: Preset, frame_width: int) -> int:
+    """Сколько символов класть в строку, когда мерить нечем.
+
+    Считается от кегля и регистра ПРЕСЕТА, а не константой: см. `FALLBACK_CHAR_EM`.
+    Спейсинг входит в ширину символа (он отрицательный и заметный: −0.02 em в
+    bold — это 2 px на букву).
+    """
+    em = FALLBACK_CHAR_EM_UPPER if preset.font.uppercase else FALLBACK_CHAR_EM
+    per_char = (em + preset.font.letter_spacing) * float(preset.font.size)
+    if per_char <= 0:
+        return 15
+    return max(4, int(caption_text_width(preset, frame_width) // per_char))
+
+
+@dataclass(frozen=True, slots=True)
+class _Ruler:
+    """Линейка строки: те же числа, которыми Chromium нарисует субтитр.
+
+    Пробел между словами — настоящий пробел кеглем строки, а не flex-`gap`:
+    `gap` не масштабируется вместе с акцентом и врёт тем сильнее, чем крупнее
+    выделенное слово. `render/measure.mjs` меряет ровно эту модель DOM.
+    """
+
+    metrics: FontMetrics
+    letter_spacing: float
+    base_size: float
+    budget: float
+
+    def word(self, word: PlanWord, size: float) -> float:
+        """Ширина слова вместе с эмодзи: он лежит внутри спана слова и его кеглем."""
+
+        def part(text: str) -> float:
+            return measure_word(
+                text,
+                size,
+                metrics=self.metrics,
+                letter_spacing=self.letter_spacing,
+                # Спейсинг объявлен на контейнере строки и наследуется уже в
+                # пикселях: у акцента он тот же, что у соседей.
+                spacing_size=self.base_size,
+            )
+
+        width = part(word.text)
+        if word.emoji:
+            # Пробел перед эмодзи наш и меряется шрифтом, сам глиф — системный.
+            width += part(" ") + EMOJI_ADVANCE_EM * size + self.letter_spacing * self.base_size
+        return width
+
+    @property
+    def space(self) -> float:
+        return measure_word(
+            " ", self.base_size, metrics=self.metrics, letter_spacing=self.letter_spacing
+        )
+
+    def line_width(self, line: Sequence[PlanWord]) -> float:
+        if not line:
+            return 0.0
+        total = sum(self.word(w, w.size or self.base_size) for w in line)
+        return total + self.space * (len(line) - 1)
+
+    def fit_size(self, word: PlanWord, size: float, floor: float) -> float:
+        """Кегль, при котором слово влезает в строку в одиночку.
+
+        Длинное слово раньше просто переполняло контейнер: перенос его не резал
+        никогда. Ширина по кеглю аффинна (`a·s + b`, где `b` — спейсинг, он
+        считается от кегля строки и от кегля слова не зависит), поэтому нужный
+        кегль решается точно, без подбора. `floor` — пол из пресета: ниже него
+        текст перестаёт быть субтитром, и переполнение честнее микроскопии.
+        """
+        wide = self.word(word, size)
+        if wide <= self.budget:
+            return size
+        half = self.word(word, size / 2)
+        a = (wide - half) / (size / 2)
+        if a <= 0:
+            return size
+        b = wide - a * size
+        return max(floor, min(size, (self.budget - b) / a))
+
+
+def _greedy(words: Sequence[PlanWord], ruler: _Ruler) -> list[list[PlanWord]]:
+    """Жадная укладка по уже проставленным кеглям. Порядок слов не меняется."""
+    lines: list[list[PlanWord]] = [[]]
+    width = 0.0
+    for w in words:
+        own = ruler.word(w, w.size or ruler.base_size)
+        if lines[-1] and width + ruler.space + own > ruler.budget:
+            lines.append([])
+            width = 0.0
+        lines[-1].append(w)
+        width += own + (ruler.space if len(lines[-1]) > 1 else 0.0)
+    return [line for line in lines if line]
+
+
+def wrap_block(
+    words: list[PlanWord], preset: Preset, frame_width: int
+) -> tuple[list[list[PlanWord]], list[float]]:
+    """Перенос строк в пикселях. Возвращает строки и их ширины.
+
+    Побочный эффект намеренный: функция проставляет словам `size`. Кегль — это и
+    есть раскладка (акцент крупнее соседей), поэтому мерить одним числом, а
+    рисовать другим нельзя: рендерер получает ровно тот кегль, которым здесь
+    посчитана ширина.
+
+    Два способа не переполнить контейнер, в порядке применения:
+    1. Слово шире всей строки — ужимаем это слово (`fit_size`).
+    2. Блок не уложился в `caption.max_lines` — ужимаем блок целиком и кладём
+       заново. Шаг мелкий, потому что перенос ступенчатый: одно слово,
+       перескочившее на строку выше, убирает целую строку.
+    """
+    if not words:
+        return [], []
+    metrics = metrics_for(preset)
+    ruler = _Ruler(
+        metrics=metrics,
+        letter_spacing=preset.font.letter_spacing,
+        base_size=float(preset.font.size),
+        budget=caption_text_width(preset, frame_width),
+    )
+    floor_ratio = max(0.05, min(1.0, preset.caption.min_word_scale))
+    max_lines = max(1, preset.caption.max_lines)
+
+    scale = 1.0
+    lines: list[list[PlanWord]] = []
+    while True:
+        # Пол общий для всего блока и считается от кегля строки, а не от кегля
+        # самого слова: иначе крику с его 1.42 разрешено остаться в полтора раза
+        # крупнее соседей и не влезть.
+        floor = ruler.base_size * floor_ratio
+        for w in words:
+            own = emphasis_size(w.emphasis, preset) * scale
+            w.size = round(ruler.fit_size(w, own, floor), 2)
+        lines = _greedy(words, ruler)
+        if len(lines) <= max_lines or scale <= floor_ratio:
+            break
+        scale = max(floor_ratio, scale * 0.94)
+    return lines, [ruler.line_width(line) for line in lines]
+
+
+def _rect_of_lines(
+    position: str,
+    lines: list[list[PlanWord]],
+    widths: list[float],
+    preset: Preset,
+    frame: tuple[int, int],
+) -> Rect:
+    """Прямоугольник блока по уже измеренным строкам.
+
+    Отличается от `geometry.caption_rect` одним: ширина берётся из переноса, а
+    не пересчитывается по выделению слов. Пересчёт не знает ни про ужатое
+    длинное слово, ни про эмодзи внутри спана и поэтому даёт другую панель.
+    Коробка, отступы и привязка к краю кадра считаются теми же числами.
+
+    Слово, которое сознательно переполняет бюджет (пол кегля, см. `fit_size`),
+    даёт прямоугольник шире кадра — с отрицательным `x`. Это не ошибка расчёта,
+    а правда о кадре: панель действительно вылезет, и зажимать её здесь нельзя.
+    Прямоугольник обязан НАКРЫВАТЬ текст (по нему меряется яркость фона и
+    разводится картинка); зажатый бюджетом, он бы врал про место текста.
+    """
+    width, height = frame
+    text_w = max(widths, default=0.0)
+    gap = line_gap(preset)
+    text_h = 0.0
+    for i, line in enumerate(lines):
+        # Строчный бокс не бывает ниже СТРУТА. `line-height` задан числом и
+        # наследуется множителем, а кегль контейнера строки — это кегль пресета,
+        # поэтому строка не может стать ниже `font.size * line_height`, как бы
+        # сильно Ф5 ни ужала слова. Без максимума с базой блок, прибитый к низу
+        # кадра, занижал высоту на каждую ужатую строку, и весь промах уходил
+        # вверх: реальный верх плашки был выше `rect` на 45-164 px (проверено
+        # линейкой `render/measure.mjs` в том же Chromium: ужатое слово в bold
+        # даёт 104.0, а не 58.45).
+        biggest = max([float(preset.font.size)] + [w.size for w in line if w.size])
+        text_h += biggest * preset.caption.line_height
+        if i:
+            text_h += gap
+
+    panel = preset.panel
+    chrome_x = 2 * (panel.padding_x + panel.border_width) if panel.enabled else 0.0
+    chrome_y = 2 * (panel.padding_y + panel.border_width) if panel.enabled else 0.0
+    box_w = text_w + chrome_x
+    box_h = text_h + chrome_y
+
+    margin = safe_margin_y(preset, height)
+    if position == "top":
+        y = float(margin)
+    elif position == "center":
+        y = (height - box_h) / 2
+    else:
+        y = height - margin - box_h
+    return Rect((width - box_w) / 2, y, box_w, box_h)
+
+
 # --------------------------------------------------------------------------- сборка
-
-
-BOTTOM_ANCHORS = {"bottom_left", "bottom_right"}
-TOP_ANCHORS = {"top_left", "top_right"}
 
 
 def _resolve_position(
@@ -187,12 +439,19 @@ def _resolve_position(
     *,
     collides_bottom: bool = False,
     collides_top: bool = False,
+    collides_center: bool = False,
 ) -> Literal["top", "center", "bottom"]:
     """Явную позицию уважаем, «auto» решаем сами.
 
     Единственное настоящее решение здесь — разъехаться с b-roll: если картинка
-    висит в той же половине кадра, блок уходит в противоположную. Иначе
-    субтитр и картинка перекроют друг друга (§7 DoD).
+    накрывает полосу субтитра, блок уходит в свободную. Занято везде — уходить
+    некуда, остаёмся на месте: прыгать в такой ситуации значит только менять
+    один перехлёст на другой.
+
+    Центр — такая же полоса, как остальные две, и уклонение ему нужно не меньше:
+    `center` — позиция по умолчанию у пресета bold, то есть у половины
+    поставляемых тем. Из центра уходим вниз (привычное место субтитра), а если
+    занят и низ — наверх.
     """
     if requested in ("top", "center", "bottom"):
         return requested  # type: ignore[return-value]
@@ -201,6 +460,11 @@ def _resolve_position(
         return "top"
     if base == "top" and collides_top and not collides_bottom:
         return "bottom"
+    if base == "center" and collides_center:
+        if not collides_bottom:
+            return "bottom"
+        if not collides_top:
+            return "top"
     return base  # type: ignore[return-value]
 
 
@@ -236,15 +500,22 @@ def build_plan(
     def rect_of_broll(anchor: str, anim: str) -> Rect | None:
         return broll_rect(resting_anchor(anchor, anim), ps, frame)
 
-    def rect_of_block(block: PlanBlock) -> Rect | None:
-        # Метрик шрифта может не быть (свой TTF без выгрузки, пресет без
-        # font.file). Это не повод не отрендерить ролик: рендерер разложит
-        # текст сам, как делал до Ф4, — просто без гарантий по геометрии.
+    def layout(position: str, words: list[PlanWord]) -> tuple[list[list[PlanWord]], Rect | None]:
+        """Перенос строк и прямоугольник блока — одним измерением.
+
+        Метрик шрифта может не быть (свой TTF без выгрузки, пресет без
+        `font.file`). Это не повод не отрендерить ролик: переносим по символам
+        (лимит считается от кегля пресета), кегли не проставляем, а без
+        прямоугольника рендерер и сам переносит строку по правилам CSS — это его
+        последняя защита от строки во весь кадр.
+        """
         try:
-            return caption_rect(block, ps, frame)
+            lines, widths = wrap_block(words, ps, width)
         except (FileNotFoundError, ValueError) as err:
             log.warning("геометрия субтитра не посчитана (%s), рендерер разложит сам", err)
-            return None
+            chars = fallback_line_chars(ps, width)
+            return wrap_words(words, chars, ps.caption.max_lines), None
+        return lines, _rect_of_lines(position, lines, widths, ps, frame)
 
     # B-roll считаем раньше субтитров: блокам нужно знать, какая половина кадра
     # занята картинкой, чтобы уехать в свободную.
@@ -269,17 +540,24 @@ def build_plan(
             )
         )
 
-    def occupied(start: float, end: float) -> tuple[bool, bool]:
-        """Какие половины кадра заняты картинкой в этом промежутке."""
-        bottom = top = False
+    def occupied(start: float, end: float) -> tuple[bool, bool, bool]:
+        """Мешает ли картинка субтитру внизу, вверху и по центру в этом промежутке.
+
+        Настоящее пересечение прямоугольников вместо «той же половины кадра»:
+        половинами `center` и `fullscreen` описывались как «занято всё», из-за
+        чего уклонение выключалось именно там, где было нужнее всего
+        (AUDIT §8.3). Полосу субтитра считает `geometry.caption_zone` по
+        худшему случаю — текста блока в этот момент ещё нет, b-roll считается
+        раньше.
+        """
+        bottom = top = center = False
         for item in broll:
-            if item.end <= start or item.start >= end:
+            if item.end <= start or item.start >= end or item.rect is None:
                 continue
-            if item.anchor in BOTTOM_ANCHORS or item.anchor in ("center", "fullscreen"):
-                bottom = True
-            if item.anchor in TOP_ANCHORS or item.anchor in ("center", "fullscreen"):
-                top = True
-        return bottom, top
+            bottom = bottom or blocks_caption(item.rect, ps, frame, "bottom")
+            top = top or blocks_caption(item.rect, ps, frame, "top")
+            center = center or blocks_caption(item.rect, ps, frame, "center")
+        return bottom, top, center
 
     blocks: list[PlanBlock] = []
     for block in edl.captions:
@@ -297,7 +575,11 @@ def build_plan(
                     text=text,
                     start=round(window[0], 3),
                     end=round(window[1], 3),
-                    emphasis=cw.emphasis.value if isinstance(cw.emphasis, Emphasis) else str(cw.emphasis),
+                    emphasis=(
+                        cw.emphasis.value
+                        if isinstance(cw.emphasis, Emphasis)
+                        else str(cw.emphasis)
+                    ),
                     emoji=cw.emoji,
                     word_idx=cw.word_idx,
                 )
@@ -307,22 +589,27 @@ def build_plan(
 
         start = pwords[0].start
         end = pwords[-1].end + cfg.sub_tail
-        hits_bottom, hits_top = occupied(start, end)
-        plan_block = PlanBlock(
-            start=start,
-            end=end,
-            position=_resolve_position(
-                block.position,
-                ps.caption.position,
-                collides_bottom=hits_bottom,
-                collides_top=hits_top,
-            ),
-            lines=wrap_words(pwords, ps.caption.max_line_chars),
+        hits_bottom, hits_top, hits_center = occupied(start, end)
+        position = _resolve_position(
+            block.position,
+            ps.caption.position,
+            collides_bottom=hits_bottom,
+            collides_top=hits_top,
+            collides_center=hits_center,
         )
-        # Прямоугольник считается последним: он зависит и от переноса строк, и от
-        # того, в какую половину кадра блок уехал от картинки.
-        plan_block.rect = rect_of_block(plan_block)
-        blocks.append(plan_block)
+        # Раскладка считается последней: она зависит и от того, в какую половину
+        # кадра блок уехал от картинки, и от кеглей выделенных слов.
+        lines, rect = layout(position, pwords)
+        blocks.append(
+            PlanBlock(
+                start=start,
+                end=end,
+                position=position,
+                lines=lines,
+                rect=rect,
+                bg_luma=getattr(block, "bg_luma", None),
+            )
+        )
 
     # Блоки не должны накладываться: следующий начинается — предыдущий уходит.
     for a, b in zip(blocks, blocks[1:]):

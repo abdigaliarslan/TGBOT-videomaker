@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PRESETS_DIR = Path(__file__).resolve().parent / "presets"
 
@@ -60,15 +60,40 @@ class Panel(BaseModel):
     border_width: int = 1
 
 
+# Поля субтитра, которых в модели больше нет, но которые лежат в СОХРАНЁННЫХ
+# планах: пресет уезжает в план целиком, а `extra="forbid"` роняет чтение такого
+# плана валидацией (`samples/plan-baseline.json` перестал грузиться собственным
+# загрузчиком). `max_line_chars` удалён в Ф5: перенос считается в пикселях, а не
+# в символах (QUALITY_PLAN). Выкидываем его при чтении молча, а не воскрешаем
+# полем-заглушкой — заглушку пресеты начали бы задавать снова, и она бы врала.
+REMOVED_CAPTION_FIELDS = ("max_line_chars",)
+
+
 class Caption(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_removed_fields(cls, data: object) -> object:
+        if isinstance(data, dict) and any(k in data for k in REMOVED_CAPTION_FIELDS):
+            return {k: v for k, v in data.items() if k not in REMOVED_CAPTION_FIELDS}
+        return data
 
     position: Literal["top", "center", "bottom"] = "bottom"
     # Отступ от края кадра в пикселях при высоте 1920.
     margin: int = 360
-    max_line_chars: int = 15
     line_height: float = 1.06
     align: Literal["center", "left"] = "center"
+    # Сколько строк максимум в блоке. Не влезло — блок ужимается целиком, а не
+    # переполняет контейнер (Ф5).
+    max_lines: int = 3
+    # Пол кегля при ужатии: доля от кегля строки. Ниже него текст перестаёт
+    # быть субтитром, поэтому переполнение честнее, чем микроскопия. 0.4 — не
+    # вкус, а замер: самый широкий глиф кириллицы в Montserrat ExtraBold — «Щ»
+    # (1.135 em; «Ж» 1.109, «Ш» 1.099), и на поле 0.4 в бюджет строки bold
+    # влезает 18 таких подряд, а девятнадцатый вылезает
+    # (см. test_word_wider_than_the_floor_overflows_knowingly).
+    min_word_scale: float = 0.4
 
 
 class Geometry(BaseModel):
@@ -129,6 +154,39 @@ class Audio(BaseModel):
     music: str | None = None  # имя файла в assets/music, None — без подложки
 
 
+class Contrast(BaseModel):
+    """Контраст как ограничение, а не как вкус (Ф9).
+
+    Панель фиксированной прозрачности не справляется над светлым фоном: белый
+    текст на светлой стене читается хуже, чем на тёмной, при одних и тех же
+    числах пресета. Препроцесс кладёт в блок `bg_luma` — среднюю яркость под
+    ним, — а рендерер по этим двум опорным точкам ведёт панель и цвет текста
+    между «над тёмным» и «над светлым».
+
+    Опорные точки — это стиль. Порог `min_ratio` — это закон: если между
+    точками контраст всё равно ниже него, рендерер поднимает прозрачность
+    панели ровно настолько, чтобы порог был взят. `bg_luma = null` (никто не
+    мерил) выключает всё правило целиком, и пресет играет как играл.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # Контраст по WCAG. Для крупного жирного текста порог AA равен 3.0; берём
+    # 4.5 — субтитр читают в движении и часто на телефоне на солнце.
+    min_ratio: float = 4.5
+    # Яркости опорных точек (0..1). Между ними всё интерполируется линейно,
+    # снаружи — зажимается.
+    luma_dark: float = 0.2
+    luma_light: float = 0.8
+    panel_opacity_dark: float = 0.5
+    panel_opacity_light: float = 0.86
+    # Цвет обычного слова (active/past/ghost) в опорных точках. Акцент и крик
+    # сохраняют свой цвет: это опознавательный знак стиля, а не читаемость.
+    text_dark: str = "#FFFFFF"
+    text_light: str = "#FFFFFF"
+
+
 class Animation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -178,6 +236,7 @@ class Preset(BaseModel):
     caption: Caption = Field(default_factory=Caption)
     animation: Animation = Field(default_factory=Animation)
     geometry: Geometry = Field(default_factory=Geometry)
+    contrast: Contrast = Field(default_factory=Contrast)
     grade: Grade = Field(default_factory=Grade)
     crop: Crop = Field(default_factory=Crop)
     audio: Audio = Field(default_factory=Audio)

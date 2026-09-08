@@ -35,9 +35,20 @@
   "caption": {
     "position": "center",
     "margin": 0,
-    "max_line_chars": 12,
     "line_height": 1.0,
-    "align": "center"
+    "align": "center",
+    "max_lines": 3,
+    "min_word_scale": 0.4
+  },
+  "contrast": {
+    "enabled": true,
+    "min_ratio": 4.5,
+    "luma_dark": 0.2,
+    "luma_light": 0.8,
+    "panel_opacity_dark": 0.0,
+    "panel_opacity_light": 0.0,
+    "text_dark": "#FFFFFF",
+    "text_light": "#000000"
   },
   "animation": {
     "pop_scale": 1.06,

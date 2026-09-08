@@ -57,6 +57,10 @@ def measure_loudness(
             "-nostdin",
             "-i",
             str(src),
+            # -vn обязателен: без него ffmpeg по умолчанию тащит в null-выход ещё и
+            # видеопоток, то есть декодирует весь ролик ради замера звука. На
+            # 20-секундном клипе это 1.58 с против 0.94 с, а замеров за джоб два.
+            "-vn",
             "-af",
             f"{loudnorm_base(target_lufs)}:print_format=json",
             "-f",
@@ -116,6 +120,7 @@ def measure_ebur128(src: str | Path) -> dict[str, float] | None:
             "-nostdin",
             "-i",
             str(src),
+            "-vn",  # мерим звук, видео декодировать незачем
             "-af",
             "ebur128=peak=true",
             "-f",
@@ -160,6 +165,7 @@ def detect_silence(
             "-nostdin",
             "-i",
             str(src),
+            "-vn",  # мерим звук, видео декодировать незачем
             "-af",
             f"silencedetect=noise={noise_db}dB:d={min_duration}",
             "-f",

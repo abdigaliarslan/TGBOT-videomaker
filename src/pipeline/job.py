@@ -25,6 +25,7 @@ from src.pipeline.audio_post import build_audio
 from src.pipeline.crop import autocrop
 from src.pipeline.cut import apply_cuts
 from src.pipeline.director import clean_transcript, direct, make_metadata
+from src.pipeline.luma import measure_bg_luma
 from src.pipeline.probe import MediaInfo, is_playable, probe
 from src.pipeline.render import arender_remotion, render_ass
 
@@ -82,6 +83,21 @@ class JobResult:
             "timings": self.timings,
             "llm": self.llm_report,
         }
+
+
+def _measure_luma(
+    edl: EDL, staged: Path, *, preset: Any, cut_pauses: bool, cfg: Settings
+) -> None:
+    """Ф9: положить в EDL яркость фона под каждым субтитром.
+
+    Место жёсткое: после кропа (под субтитром окажется именно этот кадр) и до
+    `build_plan` (план уносит число в рендерер). Замер необязателен — без него
+    панель просто останется той, что в пресете, и ролик всё равно выйдет.
+    """
+    try:
+        measure_bg_luma(edl, staged, preset=preset, apply_cuts=cut_pauses, cfg=cfg)
+    except Exception as e:  # noqa: BLE001 — контраст важен, но ролик важнее
+        log.warning("замер яркости фона пропущен: %s", e)
 
 
 async def _notify(progress: Progress | None, stage: str) -> None:
@@ -234,6 +250,10 @@ async def process_video(
             raise JobError("Кадрирование оборвалось — файл повреждён. Пришлите видео ещё раз.")
         mark("crop", t)
 
+        t = time.perf_counter()
+        _measure_luma(edl, staged, preset=style, cut_pauses=cut_pauses, cfg=cfg)
+        mark("luma", t)
+
         # ---------------------------------------------------------- рендер
         await _notify(progress, "render")
         t = time.perf_counter()
@@ -378,6 +398,10 @@ async def process_from_edl(
     if not is_playable(staged):
         raise JobError("Кадрирование оборвалось — файл повреждён.")
     mark("crop", t)
+
+    t = time.perf_counter()
+    _measure_luma(edl, staged, preset=style, cut_pauses=cut_pauses, cfg=cfg)
+    mark("luma", t)
 
     t = time.perf_counter()
     staged_info = probe(staged)

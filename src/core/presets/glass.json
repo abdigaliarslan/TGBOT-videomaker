@@ -14,7 +14,7 @@
     "past": "#FFFFFF",
     "ghost": "#FFFFFF",
     "past_opacity": 0.7,
-    "ghost_opacity": 0.0,
+    "ghost_opacity": 0.18,
     "accent": "#FFD54A",
     "shout": "#FF6A3D",
     "outline": "#05070A",
@@ -35,9 +35,20 @@
   "caption": {
     "position": "bottom",
     "margin": 380,
-    "max_line_chars": 15,
     "line_height": 1.06,
-    "align": "center"
+    "align": "center",
+    "max_lines": 3,
+    "min_word_scale": 0.4
+  },
+  "contrast": {
+    "enabled": true,
+    "min_ratio": 4.5,
+    "luma_dark": 0.2,
+    "luma_light": 0.8,
+    "panel_opacity_dark": 0.5,
+    "panel_opacity_light": 0.86,
+    "text_dark": "#FFFFFF",
+    "text_light": "#FFFFFF"
   },
   "animation": {
     "pop_scale": 1.05,

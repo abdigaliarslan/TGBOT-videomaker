@@ -1,6 +1,6 @@
 /**
- * Пословные субтитры: три состояния слова, пружина на появление,
- * glass-панель, контейнер растёт под контент сам.
+ * Пословные субтитры: три состояния слова, glass-панель, контейнер растёт под
+ * контент сам.
  *
  * Анимация — код, а не модель (§0.2). Пресет задаёт только числа.
  *
@@ -8,6 +8,21 @@
  * лежат с точностью до миллисекунды и между кадрами не попадают, поэтому по
  * времени первый отрисованный кадр приходился на середину подъёма: слово
  * стартовало с альфы 0.09-0.45, и момент появления гулял от ролика к ролику.
+ *
+ * Раскладка целиком приезжает из Python (Ф5). Три следствия, ради которых это
+ * сделано:
+ *
+ * 1. Акцент — это `fontSize`, а не `transform: scale`. Масштаб не меняет
+ *    layout-ширину, поэтому увеличенное слово просто накрывало соседа и
+ *    оставалось увеличенным до конца блока (AUDIT §8.1). Кегль меряется
+ *    браузером, и наезда нет по построению.
+ * 2. Слова разделяет НАСТОЯЩИЙ пробел кеглем строки, а не flex-`gap`: `gap`
+ *    не растёт вместе с акцентом, и Python не может его предсказать. Тем же
+ *    пробелом меряет строку `src/core/geometry.py` и линейка `measure.mjs`.
+ * 3. Перенос строк уже сделан: строка гарантированно влезает в бюджет, поэтому
+ *    здесь стоит `nowrap` и никто ничего не режет. Ровно до тех пор, пока в
+ *    блоке есть прямоугольник: без него (метрик шрифта не было) Python ширину
+ *    не считал, и переносит браузер.
  */
 
 import React from "react";
@@ -40,11 +55,181 @@ const emphasisScale = (word: PlanWord, preset: Preset): number => {
   return 1;
 };
 
-const emphasisColor = (word: PlanWord, preset: Preset): string => {
-  if (word.emphasis === "accent") return preset.colors.accent;
-  if (word.emphasis === "shout") return preset.colors.shout;
-  return preset.colors.active;
+/**
+ * Кегль слова в пикселях.
+ *
+ * Считает его Python: он же им мерил строку и решал перенос, и длинное слово,
+ * ужатое под ширину строки, известно только ему. План, собранный до Ф5, поля
+ * не несёт — тогда кегль выводится из выделения здесь, но всё равно как
+ * РАЗМЕР, а не как масштаб. Поле объявлено в `types.ts` (чужой файл) ещё не
+ * будет, поэтому читаем через узкий каст.
+ */
+const wordSize = (word: PlanWord, preset: Preset): number => {
+  const own = (word as PlanWord & { size?: number | null }).size;
+  return typeof own === "number" && own > 0 ? own : preset.font.size * emphasisScale(word, preset);
 };
+
+// ------------------------------------------------------------------ контраст (Ф9)
+
+/**
+ * Правило контраста из пресета. Секции ещё нет в `types.ts` (чужой файл), а
+ * пресет уезжает в план целиком — читаем через узкий каст.
+ */
+type ContrastRule = {
+  enabled: boolean;
+  min_ratio: number;
+  luma_dark: number;
+  luma_light: number;
+  panel_opacity_dark: number;
+  panel_opacity_light: number;
+  text_dark: string;
+  text_light: string;
+};
+
+const contrastRule = (preset: Preset): ContrastRule | null => {
+  const rule = (preset as Preset & { contrast?: ContrastRule }).contrast;
+  return rule && rule.enabled ? rule : null;
+};
+
+const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
+
+const channels = (hex: string): [number, number, number] => {
+  let v = hex.replace("#", "");
+  if (v.length === 3) {
+    v = v
+      .split("")
+      .map((c) => c + c)
+      .join("");
+  }
+  return [
+    parseInt(v.slice(0, 2), 16) / 255,
+    parseInt(v.slice(2, 4), 16) / 255,
+    parseInt(v.slice(4, 6), 16) / 255,
+  ];
+};
+
+const toHex = (rgb: [number, number, number]): string =>
+  "#" +
+  rgb
+    .map((c) =>
+      Math.round(clamp01(c) * 255)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("");
+
+/** sRGB → линейный свет и обратно: смешивать и сравнивать яркости можно только там. */
+const toLinear = (c: number): number =>
+  c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+const toSrgb = (l: number): number =>
+  l <= 0.0031308 ? l * 12.92 : 1.055 * Math.pow(l, 1 / 2.4) - 0.055;
+
+/** Относительная яркость по WCAG. `bg_luma` из плана — уже она, мерить нечего. */
+const luminance = (hex: string): number => {
+  const [r, g, b] = channels(hex).map(toLinear);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+
+const contrastRatio = (a: number, b: number): number =>
+  (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+
+const mixHex = (a: string, b: string, t: number): string => {
+  const ca = channels(a);
+  const cb = channels(b);
+  return toHex([0, 1, 2].map((i) => ca[i] + (cb[i] - ca[i]) * t) as [number, number, number]);
+};
+
+/**
+ * Минимальная прозрачность панели, при которой контраст берёт порог.
+ *
+ * Панель кладётся альфой поверх фона, и Chromium смешивает их в sRGB, поэтому
+ * решается уравнение тоже в sRGB: яркость под текстом линейна по альфе именно
+ * там. Светлый текст просит фон темнее порога, тёмный — светлее; знак решает
+ * сравнение с яркостью самой панели.
+ */
+const panelOpacityFor = (
+  bgLuma: number,
+  panelLuma: number,
+  textLuma: number,
+  minRatio: number,
+): number => {
+  const target =
+    textLuma > panelLuma
+      ? (textLuma + 0.05) / minRatio - 0.05
+      : minRatio * (textLuma + 0.05) - 0.05;
+  const from = toSrgb(clamp01(bgLuma));
+  const to = toSrgb(clamp01(panelLuma));
+  if (Math.abs(to - from) < 1e-6) return 0;
+  return clamp01((toSrgb(clamp01(target)) - from) / (to - from));
+};
+
+type Look = { panelOpacity: number; text: string };
+
+/**
+ * Прозрачность панели и цвет обычного слова под конкретным фоном.
+ *
+ * Между опорными точками пресета ведём линейно — это стиль. Дальше считаем
+ * получившийся контраст и, если он ниже порога, включаем закон, и оба рычага
+ * работают в паре:
+ *
+ * 1. Панель поднимается ровно до порога (там, где панель вообще есть).
+ * 2. Цвет текста переключается на ту опорную точку, которая на этом фоне даёт
+ *    БОЛЬШИЙ контраст — ступенькой, а не смесью.
+ *
+ * Второй рычаг обязателен, иначе у пресета без панели правило не просто не
+ * работает, а вредит: линейная смесь #FFFFFF → #0A0D12 проходит через яркость
+ * самого фона, и на bg_luma 0.40 в bold контраст падал до 1.05 — текст сливался
+ * с фоном, тогда как белый без всякого правила давал 2.33. Ниже порога 4.5
+ * сидел весь диапазон 0.20…0.65, то есть обычное дневное видео.
+ *
+ * Гарантия держится на данных пресета: опорные точки обязаны расходиться
+ * настолько, чтобы на любом фоне хоть одна брала порог (для bold это #FFFFFF и
+ * #000000: в худшей точке bg ≈ 0.19 обе дают 4.58). Это проверяет
+ * test_contrast_rule_has_a_lever_on_every_background.
+ *
+ * `bg_luma = null` — никто не мерил, пресет играет как играл.
+ */
+const lookFor = (preset: Preset, bgLuma: number | null | undefined): Look => {
+  const base: Look = { panelOpacity: preset.panel.opacity, text: preset.colors.active };
+  const rule = contrastRule(preset);
+  if (!rule || bgLuma == null || !isFinite(bgLuma)) return base;
+
+  const span = rule.luma_light - rule.luma_dark;
+  const t = span > 1e-6 ? clamp01((bgLuma - rule.luma_dark) / span) : bgLuma > rule.luma_dark ? 1 : 0;
+  const styled = mixHex(rule.text_dark, rule.text_light, t);
+  const styledOpacity =
+    rule.panel_opacity_dark + (rule.panel_opacity_light - rule.panel_opacity_dark) * t;
+
+  const panelLuma = luminance(preset.panel.color);
+  /** Яркость ПОД текстом: фон, прикрытый панелью этой прозрачности. */
+  const under = (opacity: number): number =>
+    preset.panel.enabled
+      ? toLinear(toSrgb(clamp01(bgLuma)) + (toSrgb(panelLuma) - toSrgb(clamp01(bgLuma))) * opacity)
+      : clamp01(bgLuma);
+
+  /** Цвет + минимальная панель, при которой он берёт порог (панели нет — как есть). */
+  const attempt = (text: string): Look & { ratio: number } => {
+    const textLuma = luminance(text);
+    let opacity = styledOpacity;
+    if (preset.panel.enabled && contrastRatio(textLuma, under(opacity)) < rule.min_ratio) {
+      opacity = Math.max(opacity, panelOpacityFor(bgLuma, panelLuma, textLuma, rule.min_ratio));
+    }
+    opacity = clamp01(opacity);
+    return { panelOpacity: opacity, text, ratio: contrastRatio(textLuma, under(opacity)) };
+  };
+
+  const stylish = attempt(styled);
+  if (stylish.ratio >= rule.min_ratio) {
+    return { panelOpacity: stylish.panelOpacity, text: stylish.text };
+  }
+  // Порог не взят ни панелью, ни стилевой смесью — берём лучшую опорную точку.
+  // Хуже обеих опорных точек не отдаём НИКОГДА: это и есть провал середины.
+  return [stylish, attempt(rule.text_dark), attempt(rule.text_light)].reduce((a, b) =>
+    b.ratio > a.ratio ? b : a,
+  );
+};
+
+// ------------------------------------------------------------------ слово
 
 /**
  * Мягкая тень вместо обводки.
@@ -65,64 +250,78 @@ const softShadow = (preset: Preset): string => {
   ].join(", ");
 };
 
-const Word: React.FC<{ word: PlanWord; preset: Preset }> = ({ word, preset }) => {
+const Word: React.FC<{ word: PlanWord; preset: Preset; neutral: string }> = ({
+  word,
+  preset,
+  neutral,
+}) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const state = stateOf(word, frame, fps);
   const a = preset.animation;
 
   // Пружина стартует в кадре, когда слово прозвучало. Ghost-слова уже
-  // нарисованы на своих местах, поэтому контейнер не прыгает при появлении.
+  // нарисованы на своих местах и своим кеглем, поэтому контейнер не прыгает.
   const framesSinceStart = frame - Math.round(word.start * fps);
-  const config = {
-    damping: a.spring_damping,
-    stiffness: a.spring_stiffness,
-    mass: a.spring_mass,
-  };
-  const pop =
-    framesSinceStart >= 0
-      ? spring({
-          frame: framesSinceStart,
-          fps,
-          // Натуральная длительность: сжатая пружина обрывается на максимуме
-          // скорости (было 5 кадров при 17 натуральных для glass).
-          durationInFrames: springFrames(fps, config),
-          config,
-        })
-      : 0;
 
-  const base = emphasisScale(word, preset);
-  // Рост до размера акцента ведёт пружина, а транзиентный «пшик» — время.
-  // На пружине пик приходился на 0.55 её значения, то есть на третий кадр:
-  // масштаб успевал вернуться раньше, чем глаз замечал прибавку.
+  // Транзиентный «пшик» и ничего больше. Раньше сюда домножался accent_scale,
+  // и слово навсегда застывало увеличенным: пик 1.53, постоянный наезд до
+  // 122 px (AUDIT §8.1). Теперь размер — это layout, а масштаб живёт восемь
+  // кадров (`MIN_ANIM_FRAMES` длиннее, чем pop_ms 130-160 в пресетах: на 30 fps
+  // это 267 мс) и на 1.05 физически не может дотянуться до соседа.
   const bump = state === "ghost" ? 0 : popBump(framesSinceStart / animFrames(a.pop_ms, fps));
-  const scale =
-    state === "ghost"
-      ? 1
-      : interpolate(pop, [0, 1], [1, base], { extrapolateRight: "clamp" }) *
-        (1 + (a.pop_scale - 1) * bump);
+  const scale = 1 + (a.pop_scale - 1) * bump;
 
   const rotate =
     word.emphasis === "shout" && state !== "ghost"
-      ? interpolate(pop, [0, 1], [0, a.shout_rotate], { extrapolateRight: "clamp" })
+      ? interpolate(
+          spring({
+            frame: Math.max(0, framesSinceStart),
+            fps,
+            durationInFrames: springFrames(fps, {
+              damping: a.spring_damping,
+              stiffness: a.spring_stiffness,
+              mass: a.spring_mass,
+            }),
+            config: {
+              damping: a.spring_damping,
+              stiffness: a.spring_stiffness,
+              mass: a.spring_mass,
+            },
+          }),
+          [0, 1],
+          [0, a.shout_rotate],
+          { extrapolateRight: "clamp" },
+        )
       : 0;
 
+  // Акцент и крик держат свой цвет при любом фоне: это опознавательный знак
+  // стиля. Контраст правит только обычное слово. Цена решения известна: в
+  // пресете без панели (bold) салатовый #28E07B над светлым фоном (bg_luma
+  // 0.85) даёт контраст 1.34 при пороге 4.5 — выделенное слово там держится
+  // только на тени. Дать ему рычаг можно лишь данными (подложка или своя пара
+  // цветов в contrast); пока этого нет, знание живёт здесь.
   const color =
-    state === "active"
-      ? emphasisColor(word, preset)
-      : state === "past"
-        ? preset.colors.past
-        : preset.colors.ghost;
+    word.emphasis === "accent" && state === "active"
+      ? preset.colors.accent
+      : word.emphasis === "shout" && state === "active"
+        ? preset.colors.shout
+        : neutral;
 
-  // ghost_opacity = 0 (glass) гасит слово, но не убирает его из потока: место
-  // под него зарезервировано, и панель не меняет размер, когда слово зазвучит.
+  // ghost_opacity гасит слово, но не убирает его из потока: место под него
+  // зарезервировано, и панель не меняет размер, когда слово зазвучит.
   const opacity =
-    state === "active" ? 1 : state === "past" ? preset.colors.past_opacity : preset.colors.ghost_opacity;
+    state === "active"
+      ? 1
+      : state === "past"
+        ? preset.colors.past_opacity
+        : preset.colors.ghost_opacity;
 
   return (
     <span
       style={{
         display: "inline-block",
+        fontSize: wordSize(word, preset),
         color,
         opacity,
         transform: `scale(${scale}) rotate(${rotate}deg)`,
@@ -173,6 +372,16 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
 
   const p = preset.panel;
   const shift = motionPx(a, "block_shift_px", Math.round(preset.font.size * 0.28));
+  const look = lookFor(preset, (block as PlanBlock & { bg_luma?: number | null }).bg_luma);
+  // Прямоугольник блока посчитан в Python по этим же метрикам: строка в бюджет
+  // уложена, и ограничивать ширину здесь незачем. План без прямоугольника
+  // (пресет без метрик шрифта) — другое дело: там перенос по символам, ширину
+  // строки никто не мерил, и защита от строки во весь кадр только здесь. Одного
+  // потолка ширины для этого мало: строка стоит `nowrap`, `overflow` не задан,
+  // и текст спокойно вылезает за зажатую панель (замерено: панель 842 px,
+  // строка внутри 1186 px). Поэтому на этом пути переносит браузер — см.
+  // `whiteSpace` ниже.
+  const maxWidth = block.rect ? undefined : "88%";
 
   return (
     <div
@@ -184,7 +393,7 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
         gap: Math.round(preset.font.size * (preset.caption.line_height - 1)),
         padding: p.enabled ? `${p.padding_y}px ${p.padding_x}px` : 0,
         borderRadius: p.enabled ? p.radius : 0,
-        background: p.enabled ? rgba(p.color, p.opacity) : "transparent",
+        background: p.enabled ? rgba(p.color, look.panelOpacity) : "transparent",
         backdropFilter: p.enabled && p.blur > 0 ? `blur(${p.blur}px) saturate(1.4)` : undefined,
         WebkitBackdropFilter:
           p.enabled && p.blur > 0 ? `blur(${p.blur}px) saturate(1.4)` : undefined,
@@ -194,7 +403,7 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
             : undefined,
         opacity: presence,
         transform: `translateY(${(1 - presence) * shift}px) scale(${0.965 + presence * 0.035})`,
-        maxWidth: "88%",
+        maxWidth,
         willChange: "transform, opacity",
       }}
     >
@@ -202,15 +411,19 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
         <div
           key={li}
           style={{
-            display: "flex",
-            flexWrap: "nowrap",
-            gap: Math.round(preset.font.size * 0.24),
-            alignItems: "baseline",
-            justifyContent: preset.caption.align === "left" ? "flex-start" : "center",
+            // Строка — один инлайновый бокс: слова разделяет настоящий пробел
+            // кеглем строки. Перенос уже сделан в Python — но только там, где
+            // есть прямоугольник. Без него ширину не мерил никто, и переносить
+            // обязан браузер, иначе строка запасного пути уезжает за кадр.
+            whiteSpace: block.rect ? "nowrap" : "normal",
+            textAlign: preset.caption.align,
           }}
         >
-          {line.map((word) => (
-            <Word key={word.word_idx} word={word} preset={preset} />
+          {line.map((word, wi) => (
+            <React.Fragment key={word.word_idx}>
+              {wi > 0 ? " " : null}
+              <Word word={word} preset={preset} neutral={look.text} />
+            </React.Fragment>
           ))}
         </div>
       ))}
@@ -218,17 +431,16 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
   );
 };
 
-/**
- * Минимальная безопасная зона у края кадра. Пресет может попросить margin 0, но
- * прижатый к краю текст обрезается плеером и интерфейсом ленты — этого не хочет
- * ни один пресет, поэтому нижняя граница жёсткая.
- */
-const SAFE_AREA_RATIO = 0.07;
-
 export const Captions: React.FC<{ blocks: PlanBlock[]; preset: Preset }> = ({ blocks, preset }) => {
   const frame = useCurrentFrame();
   const { fps, height } = useVideoConfig();
-  const margin = Math.max(preset.caption.margin, Math.round(height * SAFE_AREA_RATIO));
+  // Безопасная зона у края кадра: пресет может попросить margin 0, но прижатый
+  // к краю текст обрезается плеером и интерфейсом ленты. Доля приезжает из
+  // пресета — тем же числом её знает `geometry.safe_margin_y`.
+  const margin = Math.max(
+    preset.caption.margin,
+    Math.round(height * preset.geometry.safe_area_ratio),
+  );
   // Хвост ровно тот же, что у Block: блок живёт на outFrames дольше своего
   // конца и обязан пережить фильтр, иначе нахлёст срежется здесь.
   const tail = blockOutFrames(preset, fps);

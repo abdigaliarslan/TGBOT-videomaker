@@ -32,6 +32,33 @@
 
 Интерфейс детектора абстрактный: добавить mediapipe = добавить класс, не трогая
 остальную логику.
+
+Про растр анализа. Доля лица — свойство пары «кадр + растр, на котором работал
+детектор»: бокс YuNet зависит от пиксельного размера лица, и на одном и том же
+кадре число гуляет вдвое (см. samples/README.md). Значит цель `face_height_ratio`
+и замер `tests/face_share.py` обязаны говорить об одном растре, иначе кроп целится
+не туда, куда меряет DoD. Канон замера — фиксированная ВЫСОТА 1138; здесь она же,
+но с потолком по числу пикселей, потому что детекция линейна по площади и на
+16:9-входе канон стоил бы 280 мс на кадр вместо 80 (замер на этой машине).
+
+С каноном растр совпадает ТОЛЬКО на 9:16 (и на любом входе не шире 640x1138 по
+площади). На всех остальных пропорциях выигрывает потолок площади, и высота
+растра уходит от 1138: 16:9 → 640, 1:1 → 853, 4:5 → 954. Насколько при этом
+расходится само число, зависит от того, насколько крупно снято лицо. Замер по
+samples/phase-0-source.mp4, добитому полями до нужной пропорции (растр crop против
+канона h=1138, тест `test_analyze_raster_divergence_from_canon`):
+
+    доля лица ≈ 0.29 (рабочая точка DoD)   16:9  0.281 / 0.294  (−4 %)
+                                           1:1   0.295 / 0.298  (−1 %)
+    лицо во весь кадр                      16:9  0.627 / 0.472  (+33 %)
+                                           1:1   0.613 / 0.459  (+34 %)
+                                           4:5   0.554 / 0.489  (+13 %)
+
+То есть в коридоре DoD (0.20-0.30) числа сходятся в пределах нескольких
+процентов, а на крупном плане расходятся в разы больше — и там «доля лица» в
+логе уже нельзя сравнивать с выводом tests/face_share.py напрямую. Само по себе
+расхождение безопасно: растр переоценивает долю, а значит кроп берёт окно шире
+заказанного, то есть ошибается в сторону несрезанного лица.
 """
 
 from __future__ import annotations
@@ -58,16 +85,103 @@ YUNET_MODEL = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
 
 TARGET_AR = 9 / 16
 
-# Бокс YuNet тесный: примерно от бровей до подбородка, без лба, волос и ушей.
-# tests/face_share.py оценивает всю голову в 1.4 высоты бокса — те же 0.4 сверху,
-# отложенные от верхней границы. На этой оценке стоит правило «макушка не обрезана».
-HEAD_ABOVE_BOX = 0.4
-# Запасная линия глаз, когда у детектора нет ландмарок (Haar): глаза чуть ниже
-# верха бокса брови-подбородок.
-EYES_BELOW_BOX_TOP = 0.3
-# Потолок числа кусков разной крупности. Больше — это уже не монтаж, а мельтешение;
-# такой EDL сводим к одному окну на весь ролик.
-MAX_FRAMING_SEGMENTS = 12
+# Растр анализа: нормировка по высоте, как в tests/face_share.py, но не дороже
+# вертикального канона 640x1138 по площади. На 9:16-входе оба правила совпадают до
+# пикселя; на остальных пропорциях побеждает потолок площади, и высота уходит ниже
+# 1138 (16:9 → 640, 1:1 → 853). Что это стоит по числу — в докстринге модуля:
+# в коридоре DoD расхождение с каноном единицы процентов, на крупном плане — до
+# 34 %. Прежняя нормировка по ширине 640 давала на 16:9 растр 640x360, то есть
+# высоту лица вдвое меньше канона.
+ANALYZE_HEIGHT = 1138
+ANALYZE_PIXELS = 640 * ANALYZE_HEIGHT
+# Пол по высоте растра: на сверхшироком входе (21:9 и шире) потолок площади увёл бы
+# анализ на 554 px, то есть лицо пришло бы к детектору вдвое мельче канона и бокс
+# уехал бы вместе с ним. Такие пропорции редки, поэтому здесь площадь уступает —
+# перерасход по цене доходит до полутора раз, но число остаётся сравнимым.
+ANALYZE_MIN_HEIGHT = ANALYZE_HEIGHT // 2
+
+# Где макушка относительно того, что видит детектор. Правило существует ровно
+# затем, чтобы не срезать лоб, поэтому обязано ошибаться в сторону запаса.
+#
+# Замер по samples/phase-0-source.mp4 на растре 640x1138, макушка снята по
+# пиксельной линейке на пяти кадрах (1, 5, 10, 15, 19 с). Требуемый множитель:
+#
+#   (верх бокса − макушка) / высота бокса   0.478 0.199 0.403 0.566 0.157  → 3.6×
+#   (глаза − макушка) / (рот − глаза)       1.190 1.016 1.063 1.569 1.118  → 1.5×
+#
+# Отсюда правило по ландмаркам, а не по боксу. Бокс YuNet на одном и том же лице
+# гуляет по высоте на ±15 % от кадра к кадру, и его верх ходит от линии бровей до
+# середины лба; пара «глаза-рот» — плоскостной размер лица, он стабильнее вдвое.
+# Прежняя константа HEAD_ABOVE_BOX = 0.4 ссылалась на множитель 1.4 из
+# tests/face_share.py, который там сам помечен как некалиброванный: на этих кадрах
+# она то завышает запас на 12 % высоты кадра, то срезает макушку.
+# Граница по выборке, а не калибровка правила: пять кадров ОДНОГО лица с одной
+# причёской, макушка снята рукой с округлением до 5 px на растре высотой 1138.
+# 1.6 — это «максимум по выборке (1.569) плюс чуть-чуть»: на худшем кадре (t=15)
+# запас оценки над снятой макушкой 6.7 px, то есть в пределах точности самого
+# замера. На длинных волосах, шапке или высокой причёске правило поедет, и это
+# видно будет только глазами. Расширять — вторым и третьим человеком в HEAD_SAMPLES,
+# а не подкруткой константы.
+HEAD_ABOVE_EYES = 1.6
+# Запасные оценки для детектора без ландмарок (Haar). Проверить их на том же
+# клипе нечем: Haar нашёл лицо на 1 кадре из 5, — поэтому они калиброваны по
+# геометрии YuNet и взяты по верхней границе разброса, то есть заведомо свободнее.
+HEAD_ABOVE_BOX = 0.6
+EYES_BELOW_BOX_TOP = 0.2  # медиана замеренного (глаза − верх бокса)/h = 0.178
+
+# Насколько крупнее должно быть чужое лицо, чтобы отобрать окно у того, за которым
+# трек уже идёт. Без гистерезиса на кадре с двумя людьми окно скачет между ними,
+# потому что «самое крупное» меняется от пробы к пробе.
+FACE_SWITCH_RATIO = 1.5
+
+# Потолок частоты смен крупности: чаще одной на столько секунд — это уже не
+# монтаж, а мельтешение, и такой EDL сводится к одному окну на весь ролик.
+#
+# Раньше здесь стоял АБСОЛЮТНЫЙ потолок в 12 кусков, и он тихо выключал всю Ф6 на
+# длинных роликах: при выдержке режиссёра 2.2 с смоделированная нарезка даёт 14
+# кусков на минуте и 42 на трёх, то есть любой ролик длиннее полуминуты терял
+# крупность целиком — и без единой строчки в логе на уровне WARNING.
+#
+# Пересчёт кусков в секунды. n кусков занимают не n интервалов, а n−1: между
+# первой и последней сменой их ровно n−1. `director.FRAMING_MIN_HOLD` = 4.5 с
+# гарантирует именно ИНТЕРВАЛ, поэтому честный потолок — `covered / 4.0 + 1`.
+# Без «+1» согласование было мнимым: на 10-20-секундных роликах (то есть на
+# основном формате) собственный план режиссёра пробивал потолок и Ф6 схлопывалась
+# в одно окно. Свип 20 000 случайных нарезок с длинами от cut_min_segment: 20
+# нарушений старой формулой (все на 10-20 с), 0 — новой. Пример: куски
+# [4.8, 4.77, 2.11] дают три крупности на 11.68 с, где старый потолок разрешал две.
+MIN_SECONDS_PER_FRAMING = 4.0
+# Меньше двух кусков смысла не имеет: это и есть «одно окно».
+MIN_FRAMING_SEGMENTS = 2
+
+# Насколько окна соседних кусков должны различаться, чтобы держать ради этого
+# отдельную ветку графа. На 4K-входе кламп `max_scale` сводит wide и tight почти
+# в одно окно (замер: 1214x2158 против 1204x2140 — 0.8 % по масштабу и 0.002 по
+# доле лица), и ради невидимой разницы граф уходил в split/trim/concat — лишний
+# стык и лишний риск. Порог 4 % — примерно там, где смена крупности вообще
+# начинает читаться на глаз.
+FRAMING_MERGE_TOLERANCE = 0.04
+
+# Порог насыщенности, выше которого кожа уходит в красноту (QUALITY_PLAN, Ф3).
+SATURATION_RED_SKIN = 1.2
+
+# Порог виньетки, выше которого рамка перестаёт быть «лёгким цветокором».
+# Замер по плоской серой карте 1080x1920 (ffmpeg -f lavfi color=gray, тот же
+# фильтр, что собирает grade_filter), яркость относительно центра:
+#
+#   angle   верх-центр   угол
+#   0.15       0.96      0.95
+#   0.20       0.92      0.91
+#   0.25       0.89      0.86
+#   0.40       0.74      0.66
+#   0.63       0.45      0.33   ← дефолт ffmpeg PI/5 и значение пресета glass
+#
+# 0.63 гасит углы до трети центра, а верх и низ 9:16-кадра — до 45 %, то есть
+# затемняет и макушку, и полосу субтитров. Это уже не «настолько, чтобы не было
+# видно», а художественное решение, и принимать его должен владелец пресета, а не
+# код. Порог 0.25 — верх диапазона, на котором падение к краю ещё в пределах
+# ~10 % и на глаз не читается.
+VIGNETTE_VISIBLE = 0.25
 
 
 @dataclass(slots=True)
@@ -82,17 +196,25 @@ class Detection:
     # «лиц не найдено» в замере доли лица.
     w: float
     h: float
-    # Линия глаз из ландмарок детектора. None — считаем оценкой по боксу.
+    # Ландмарки детектора: линия глаз и линия рта. None — считаем оценкой по боксу.
     eye_y: float | None = None
+    mouth_y: float | None = None
 
     @property
     def top(self) -> float:
-        """Верхняя граница бокса детектора (примерно брови)."""
+        """Верхняя граница бокса детектора (от бровей до середины лба, см. замер)."""
         return self.y - self.h / 2
 
     @property
     def head_top(self) -> float:
-        """Оценка макушки: волосы и лоб выше тесного бокса."""
+        """Оценка макушки — волосы и лоб выше бокса.
+
+        По ландмаркам, когда они есть: «глаза-рот» устойчив к дрожи бокса, а на
+        нём и стоит правило «макушка не обрезана». По высоте бокса — только для
+        детектора без ландмарок.
+        """
+        if self.eye_y is not None and self.mouth_y is not None and self.mouth_y > self.eye_y:
+            return self.eye_y - HEAD_ABOVE_EYES * (self.mouth_y - self.eye_y)
         return self.top - HEAD_ABOVE_BOX * self.h
 
     @property
@@ -112,6 +234,7 @@ class Detection:
             w=self.w * k,
             h=self.h * k,
             eye_y=None if self.eye_y is None else self.eye_y * k,
+            mouth_y=None if self.mouth_y is None else self.mouth_y * k,
         )
 
 
@@ -143,9 +266,12 @@ class YuNetDetector:
         out: list[Detection] = []
         for f in faces:
             fx, fy, fw, fh, *_rest = f
-            # f[4:6] и f[6:8] — правый и левый глаз. Линия глаз из ландмарок честнее
-            # любой доли от высоты бокса: на наклоне головы бокс едет, глаза нет.
-            eye_y = (float(f[5]) + float(f[7])) / 2 if len(f) >= 15 else None
+            # f[4:6] и f[6:8] — правый и левый глаз, f[10:12] и f[12:14] — углы рта.
+            # Линии глаз и рта из ландмарок честнее любой доли от высоты бокса: на
+            # наклоне головы бокс едет, ландмарки нет.
+            has_marks = len(f) >= 15
+            eye_y = (float(f[5]) + float(f[7])) / 2 if has_marks else None
+            mouth_y = (float(f[11]) + float(f[13])) / 2 if has_marks else None
             out.append(
                 Detection(
                     x=float(fx) + float(fw) / 2,
@@ -155,6 +281,7 @@ class YuNetDetector:
                     w=float(fw),
                     h=float(fh),
                     eye_y=eye_y,
+                    mouth_y=mouth_y,
                 )
             )
         return out
@@ -173,7 +300,9 @@ class HaarDetector:
 
     def detect(self, frame: np.ndarray) -> list[Detection]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self._cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(48, 48))
+        faces = self._cascade.detectMultiScale(
+            gray, scaleFactor=1.15, minNeighbors=5, minSize=(48, 48)
+        )
         return [
             Detection(
                 x=float(x) + w / 2,
@@ -208,6 +337,9 @@ class Track:
     # вертикали центра масс нет никакого смысла.
     motion_x: list[float | None] = field(default_factory=list)
     detector: str = "—"
+    # Растр, на котором работал детектор. Не деталь реализации, а часть числа:
+    # доля лица без него несравнима между прогонами (samples/README.md).
+    analyzed: tuple[int, int] = (0, 0)
 
     def __len__(self) -> int:
         return len(self.times)
@@ -240,20 +372,79 @@ def _motion_center(prev: np.ndarray, cur: np.ndarray) -> float | None:
     return float((column * xs).sum() / total)
 
 
+def analyze_scale(width: int, height: int) -> float:
+    """Во сколько раз ужать (или растянуть) кадр перед детекцией.
+
+    Правило: нормировка по ВЫСОТЕ до `ANALYZE_HEIGHT`, пока хватает бюджета
+    площади; не хватило — растр фиксированной площади с той же пропорцией кадра;
+    и пол по высоте на сверхшироком входе.
+
+    Нормировка по высоте нужна затем, что доля лица меряется по высоте: при
+    фиксированной высоте растра лицо одной и той же доли всегда приходит к
+    детектору одного пиксельного размера. Нормировка по ширине (как было) этого не
+    даёт вовсе: 16:9-вход уезжал на 640x360.
+
+    Но бюджет площади выигрывает у высоты на ВСЁМ, кроме 9:16 (16:9 → 1138x640,
+    1:1 → 853x853, 4:5 → 763x954), поэтому «растр совпадает с tests/face_share.py»
+    верно только для вертикального входа. Насколько расходится само число — в
+    докстринге модуля: в коридоре DoD единицы процентов, на крупном плане до 34 %.
+    Цена канона — 281 мс на пробу против 80 мс на 16:9 (замер YuNet на этой
+    машине), поэтому потолок оставлен, а расхождение задокументировано и
+    закреплено тестом, а не выдано за отсутствующее.
+    """
+    if width <= 0 or height <= 0:
+        return 1.0
+    scale = ANALYZE_HEIGHT / height
+    if scale * scale * width * height > ANALYZE_PIXELS:
+        scale = (ANALYZE_PIXELS / (width * height)) ** 0.5
+    return max(scale, ANALYZE_MIN_HEIGHT / height)
+
+
+def _resize(frame: np.ndarray, scale: float) -> np.ndarray:
+    """Кадр в растр анализа. Интерполяция та же, что в tests/face_share.py."""
+    if abs(scale - 1.0) < 1e-9:
+        return frame
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+    return cv2.resize(frame, None, fx=scale, fy=scale, interpolation=interp)
+
+
+def pick_face(dets: Sequence[Detection], prev: Detection | None) -> Detection | None:
+    """Из всех лиц кадра — то, за которым идёт трек.
+
+    Без памяти о предыдущей пробе выбор «самое крупное» на кадре с двумя людьми
+    переключается туда-сюда от пробы к пробе, и окно кропа скачет между лицами
+    (сглаживание такой скачок не лечит: он больше мёртвой зоны). Поэтому лицо,
+    перекрывающееся с прошлым, уступает соседу только когда тот крупнее в
+    FACE_SWITCH_RATIO раз — то есть когда в кадр реально вошёл другой человек.
+    """
+    if not dets:
+        return None
+    best = max(dets, key=lambda d: d.area * (0.5 + d.score))
+    if prev is None or prev.w <= 0 or prev.h <= 0:
+        return best
+    near = [
+        d
+        for d in dets
+        if abs(d.x - prev.x) < 0.6 * prev.w and abs(d.y - prev.y) < 0.6 * prev.h
+    ]
+    if not near:
+        return best
+    keep = max(near, key=lambda d: d.area * (0.5 + d.score))
+    return keep if keep.area * FACE_SWITCH_RATIO >= best.area else best
+
+
 def track_attention(
     path: str | Path,
     *,
     info: MediaInfo | None = None,
     sample_fps: float = 6.0,
     detector: Detector | None = None,
-    analyze_width: int = 640,
 ) -> Track:
     """Кадры → трек лица в пикселях ИСХОДНИКА.
 
-    Детекция идёт на кадре, ужатом до `analyze_width`: у YuNet ограниченный
-    диапазон размеров лиц, и на крупном селфи в нативном разрешении он цепляется
-    за часть лица вместо целого. tests/face_share.py меряет тем же способом и с
-    той же шириной — иначе доли лица для файлов разного разрешения несравнимы.
+    Детекция идёт на кадре, приведённом к растру анализа (`analyze_scale`): у
+    YuNet ограниченный диапазон размеров лиц, и на крупном селфи в нативном
+    разрешении он цепляется за часть лица вместо целого.
     """
     path = Path(path)
     info = info or probe(path)
@@ -265,10 +456,11 @@ def track_attention(
 
     src_fps = cap.get(cv2.CAP_PROP_FPS) or info.fps or 30.0
     step = max(1, int(round(src_fps / max(0.5, sample_fps))))
-    scale = min(1.0, analyze_width / max(1, info.width))
+    scale = analyze_scale(info.width, info.height)
 
     track = Track(detector=detector.name)
     prev_gray: np.ndarray | None = None
+    prev_face: Detection | None = None
     idx = 0
     faces_found = 0
 
@@ -284,14 +476,15 @@ def track_attention(
         if not ok or frame is None:
             continue
 
-        small = cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1.0 else frame
+        small = _resize(frame, scale)
+        track.analyzed = (small.shape[1], small.shape[0])
         t = (idx - 1) / src_fps
-        dets = detector.detect(small)
-        if dets:
-            best = max(dets, key=lambda d: d.area * (0.5 + d.score))
+        best = pick_face(detector.detect(small), prev_face)
+        if best is not None:
             track.faces.append(best.rescaled(1.0 / scale))
             track.motion_x.append(None)
             faces_found += 1
+            prev_face = best
             prev_gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
         else:
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
@@ -303,33 +496,48 @@ def track_attention(
 
     cap.release()
     log.info(
-        "трекинг: %d проб, лицо найдено в %d (%.0f%%), детектор=%s",
+        "трекинг: %d проб, лицо найдено в %d (%.0f%%), детектор=%s на %dx%d",
         len(track), faces_found, 100 * faces_found / max(1, len(track)), detector.name,
+        track.analyzed[0], track.analyzed[1],
     )
     return track
 
 
 def fill_gaps(values: Sequence[float | None], default: float) -> list[float]:
     """Пропуски — линейной интерполяцией между известными, края — удержанием."""
-    out: list[float] = [default] * len(values)
-    known = [i for i, v in enumerate(values) if v is not None]
-    if not known:
+    n = len(values)
+    out: list[float] = [default] * n
+    if not any(v is not None for v in values):
         return out
-    for i in range(len(values)):
+
+    # Два линейных прохода вместо поиска соседей на каждом шаге: трёхминутный
+    # ролик даёт больше тысячи проб, а рядов три — квадрат тут не нужен.
+    prev_known: list[int | None] = [None] * n
+    next_known: list[int | None] = [None] * n
+    last: int | None = None
+    for i in range(n):
+        if values[i] is not None:
+            last = i
+        prev_known[i] = last
+    nxt: int | None = None
+    for i in range(n - 1, -1, -1):
+        if values[i] is not None:
+            nxt = i
+        next_known[i] = nxt
+
+    for i in range(n):
         v = values[i]
         if v is not None:
             out[i] = float(v)
             continue
-        before = [k for k in known if k < i]
-        after = [k for k in known if k > i]
-        if before and after:
-            a, b = before[-1], after[0]
+        a, b = prev_known[i], next_known[i]
+        if a is not None and b is not None:
             va, vb = float(values[a]), float(values[b])  # type: ignore[arg-type]
             out[i] = va + (vb - va) * (i - a) / (b - a)
-        elif before:
-            out[i] = float(values[before[-1]])  # type: ignore[arg-type]
+        elif a is not None:
+            out[i] = float(values[a])  # type: ignore[arg-type]
         else:
-            out[i] = float(values[after[0]])  # type: ignore[arg-type]
+            out[i] = float(values[b])  # type: ignore[arg-type]
     return out
 
 
@@ -347,15 +555,31 @@ def moving_average(values: Sequence[float], window: int) -> list[float]:
 
 
 def apply_deadzone(values: Sequence[float], threshold: float) -> list[float]:
-    """Камера стоит, пока объект не ушёл дальше порога.
+    """Камера стоит, пока объект не ушёл дальше порога, дальше идёт за ним с лагом.
 
-    Без этого центр дрожит на пиксель-другой каждый кадр, и картинка «плывёт».
+    Без мёртвой зоны центр дрожит на пиксель-другой каждый кадр и картинка
+    «плывёт». Но гасить дрожь скачком нельзя: прежняя версия при срабатывании
+    переставляла окно сразу на полную новую позицию, то есть ровно на порог
+    (1.2 % ширины окна — 14 px на окне 1214), и `sendcmd` делал это мгновенно,
+    без интерполяции. Получался тот же артефакт, что «ступенька масштаба» из
+    AUDIT §8.2, только по горизонтали: из реального прогона
+    `1.500-1.667 crop@c0 x 1307` после `x 1321` — 14 px за один кадр.
+
+    Поэтому здесь люфт, а не защёлка: выход отстаёт от цели ровно на порог и
+    дальше движется с её собственным шагом. Дрожь внутри порога по-прежнему не
+    проходит, а начавшееся движение не даёт скачка больше шага самой цели.
     """
     if not values:
         return []
     out = [values[0]]
     for v in values[1:]:
-        out.append(v if abs(v - out[-1]) > threshold else out[-1])
+        last = out[-1]
+        if v - last > threshold:
+            out.append(v - threshold)
+        elif last - v > threshold:
+            out.append(v + threshold)
+        else:
+            out.append(last)
     return out
 
 
@@ -473,6 +697,10 @@ class Segment:
     times: list[float] = field(default_factory=list)
     xs: list[int] = field(default_factory=list)
     ys: list[int] = field(default_factory=list)
+    # Медианная высота лица НА ЭТОМ куске, пиксели исходника. Ради неё и выбран
+    # размер окна, поэтому доля лица в логе обязана считаться от неё, а не от
+    # медианы по всему ролику: куски и различаются тем, как далеко сидит человек.
+    face_h: float = 0.0
 
     @property
     def static_x(self) -> bool:
@@ -526,10 +754,44 @@ def framing_spans(edl: EDL, *, applied_cuts: bool = True) -> list[Span]:
     return _merge_spans(spans)
 
 
+# Насколько покрытие может разойтись с фактической длительностью, чтобы разницу
+# можно было считать накопленным округлением кадров, а не другим таймлайном.
+SPAN_DRIFT_TOLERANCE = 0.05
+
+
+def _fit_spans(spans: Sequence[Span], duration: float) -> list[Span]:
+    """Границы крупности — на кадровую сетку файла, который увидит кроп.
+
+    `framing_spans` складывает ТОЧНЫЕ длительности EDL, а `cut.py` режет каждый
+    кусок фильтром `fps=` и склеивает, то есть каждый кусок округляется до целого
+    числа кадров. Ошибка копится по числу резов: на эталонном EDL три kept-куска
+    (4.565 + 6.225 + 7.68 = 18.47 с) дают в cut.mp4 445 кадров при 24 fps, то есть
+    18.54 с — плюс 1.7 кадра. Раньше эту разницу целиком съедал последний span, а
+    все внутренние границы оставались ранними, и смена крупности приходилась не на
+    рез, а на несколько кадров ВНУТРЬ предыдущего плана — то есть выглядела
+    самопроизвольным зумом, ради запрета которого вся схема и построена.
+
+    Растягиваем покрытие пропорционально: округление набегает примерно поровну на
+    кусок, поэтому пропорция раскладывает его обратно почти без остатка. Правка
+    применяется только когда расхождение похоже на округление кадров
+    (SPAN_DRIFT_TOLERANCE); всё, что больше, — это другой таймлайн, и его честнее
+    оставить клипу.
+    """
+    covered = spans[-1][1] - spans[0][0]
+    if covered <= 0 or spans[0][0] > 1e-6:
+        return list(spans)
+    k = duration / covered
+    if abs(k - 1.0) > SPAN_DRIFT_TOLERANCE:
+        return list(spans)
+    return [(s * k, e * k, f) for s, e, f in spans]
+
+
 def normalize_spans(spans: Sequence[Span] | None, duration: float) -> list[Span]:
     """Интервалы крупности → непрерывное покрытие [0, duration] без дырок."""
     if duration <= 0:
         return [(0.0, 0.0, "wide")]
+    if spans:
+        spans = _fit_spans(sorted(spans, key=lambda sp: sp[0]), duration)
     clipped = [
         (max(0.0, s), min(duration, e), f if f in ("wide", "tight") else "wide")
         for s, e, f in sorted(spans or [], key=lambda sp: sp[0])
@@ -552,12 +814,33 @@ def normalize_spans(spans: Sequence[Span] | None, duration: float) -> list[Span]
     return _merge_spans(out)
 
 
-def _merge_segments(segments: Sequence[Segment]) -> list[Segment]:
-    """Соседние куски с одинаковым окном — один кусок: резать граф незачем."""
+def _close_windows(a: Segment, b: Segment, tolerance: float) -> bool:
+    """Различима ли смена окна на глаз. Сравнение относительное, а не побитовое."""
+    dh = abs(a.win_h - b.win_h) / max(1, a.win_h, b.win_h)
+    dw = abs(a.win_w - b.win_w) / max(1, a.win_w, b.win_w)
+    return max(dh, dw) <= tolerance
+
+
+def _merge_segments(
+    segments: Sequence[Segment], tolerance: float = FRAMING_MERGE_TOLERANCE
+) -> list[Segment]:
+    """Соседние куски с практически одинаковым окном — один кусок.
+
+    Побитового равенства мало: на 4K-входе кламп `max_scale` сводит wide и tight
+    почти в одно окно (1214x2158 против 1204x2140), и граф ради 0.8 % разницы
+    уходил в split/trim/concat — тот самый путь, который до правки падал на SAR.
+    Из двух окон оставляем БОЛЬШЕЕ: ошибиться в сторону более широкого кадра
+    безопаснее, срезанное лицо не лечится ничем.
+    """
     out: list[Segment] = []
     for seg in segments:
-        if out and (out[-1].win_w, out[-1].win_h) == (seg.win_w, seg.win_h):
+        if out and _close_windows(out[-1], seg, tolerance):
             out[-1].end = seg.end
+            if seg.win_h > out[-1].win_h:
+                out[-1].win_w, out[-1].win_h = seg.win_w, seg.win_h
+            # Из двух лиц берём крупное: доля лица в логе должна показывать худший
+            # случай на куске, а не тот, что оказался первым.
+            out[-1].face_h = max(out[-1].face_h, seg.face_h)
         else:
             out.append(seg)
     return out
@@ -585,24 +868,42 @@ def plan_segments(
     lo, hi = window_bounds(info.width, info.height, out_w, out_h, crop.max_scale)
     ratios = {"wide": crop.face_height_ratio, "tight": crop.tight_face_height_ratio}
 
-    # Ряды без пропусков. Дефолты — на случай, когда лиц не было вовсе: тогда окно
-    # встаёт примерно по центру кадра, как и до Ф6.
+    # По горизонтали запасной ряд осмысленный — центр масс движения, а при полной
+    # статике центр кадра. По вертикали запасного ряда нет: у движения нет линии
+    # глаз, поэтому при полном отсутствии лиц окно центрируется явно (`place_at`),
+    # а дефолты `eyes`/`heads` в геометрии не участвуют вовсе.
+    no_faces = not any(f is not None for f in track.faces)
     cx = fill_gaps(
         [f.x if f is not None else m for f, m in zip(track.faces, track.motion_x)],
         info.width / 2,
     )
-    eyes = fill_gaps(
-        [f.eyes if f is not None else None for f in track.faces],
-        info.height * crop.eye_line_ratio,
-    )
-    heads = fill_gaps(
-        [f.head_top if f is not None else None for f in track.faces],
-        info.height * crop.headroom_ratio,
-    )
+    eyes = fill_gaps([f.eyes if f is not None else None for f in track.faces], 0.0)
+    heads = fill_gaps([f.head_top if f is not None else None for f in track.faces], 0.0)
 
     all_face_h = track.face_height()
     all_eye_to_head = track.eye_to_head()
     window = max(3, int(round(smooth_seconds * sample_fps)) | 1)
+
+    def place_at(i: int, seg: Segment) -> tuple[float, float]:
+        """Окно для одной пробы: по лицу, а когда лиц нет — по центру кадра.
+
+        Раньше «нет лиц» выражалось запасными рядами eyes=0.36·H и head_top=0.05·H,
+        то есть лицом во весь кадр. Правило макушки в `place_window` на таком ряде
+        выигрывало и тащило окно ВВЕРХ: на 1080x2340 оно вставало на y=21 при
+        центре 210, и низ кадра просто терялся — при том, что и комментарий, и
+        строка лога обещали центр.
+        """
+        if no_faces:
+            x = cx[i] - seg.win_w / 2
+            return (
+                _clamp(x, 0, info.width - seg.win_w),
+                max(0.0, (info.height - seg.win_h) / 2),
+            )
+        return place_window(
+            cx[i], eyes[i], heads[i],
+            win_w=seg.win_w, win_h=seg.win_h,
+            frame_w=info.width, frame_h=info.height, crop=crop,
+        )
 
     def samples_in(start: float, end: float) -> list[int]:
         idx = [i for i, t in enumerate(track.times) if start - 1e-6 <= t < end - 1e-6]
@@ -630,38 +931,44 @@ def plan_segments(
         # масштабируется в 9:16, и растянутое лицо заметнее срезанного низа.
         win_h_px = min(win_h_px, _even(win_w_px * out_h / out_w))
         segments.append(
-            Segment(start=start, end=end, framing=framing, win_w=win_w_px, win_h=win_h_px)
+            Segment(
+                start=start, end=end, framing=framing,
+                win_w=win_w_px, win_h=win_h_px, face_h=face_h or all_face_h,
+            )
         )
 
     segments = _merge_segments(segments)
-    if len(segments) > MAX_FRAMING_SEGMENTS:
-        log.info("крупность меняется %d раз — свожу к одному окну", len(segments))
+    covered = segments[-1].end - segments[0].start if segments else 0.0
+    # n кусков занимают n−1 интервалов между сменами — отсюда «+1», см. комментарий
+    # к MIN_SECONDS_PER_FRAMING. Без него потолок бил по плану самого режиссёра на
+    # роликах 10-20 с.
+    allowed = max(MIN_FRAMING_SEGMENTS, int(covered / MIN_SECONDS_PER_FRAMING) + 1)
+    if len(segments) > allowed:
+        log.warning(
+            "крупность меняется %d раз на %.0f с (потолок %d) — свожу к одному окну",
+            len(segments), covered, allowed,
+        )
         widest = max(segments, key=lambda s: s.win_h)
         segments = [
-            Segment(0.0, segments[-1].end, widest.framing, widest.win_w, widest.win_h)
+            Segment(
+                0.0, segments[-1].end, widest.framing, widest.win_w, widest.win_h,
+                face_h=all_face_h,
+            )
         ]
 
     for seg in segments:
         idx = samples_in(seg.start, seg.end)
         if not idx:
-            x, y = place_window(
-                info.width / 2, info.height * 0.4, info.height * 0.15,
-                win_w=seg.win_w, win_h=seg.win_h,
-                frame_w=info.width, frame_h=info.height, crop=crop,
-            )
+            # Проб нет вообще (пустой трек): ни лица, ни движения. Ставим окно по
+            # центру кадра. Прежде здесь стояли числа 0.4 и 0.15 вместо геометрии
+            # пресета — но брать её тут не из чего, лица нет.
+            x, y = (info.width - seg.win_w) / 2, (info.height - seg.win_h) / 2
             seg.times = [seg.start]
             seg.xs = clamp_window([x], seg.win_w, info.width)
             seg.ys = clamp_window([y], seg.win_h, info.height)
             continue
 
-        raw = [
-            place_window(
-                cx[i], eyes[i], heads[i],
-                win_w=seg.win_w, win_h=seg.win_h,
-                frame_w=info.width, frame_h=info.height, crop=crop,
-            )
-            for i in idx
-        ]
+        raw = [place_at(i, seg) for i in idx]
         xs = apply_deadzone(
             moving_average([p[0] for p in raw], window), seg.win_w * deadzone_ratio
         )
@@ -715,10 +1022,29 @@ def grade_filter(grade: Grade) -> str:
 
     Телефонное видео приходит тёмным и плоским; `eq` вытягивает его ровно
     настолько, чтобы этого не было видно. Насыщенность выше 1.2 на лицах уходит в
-    красноту — потолок держит пресет, а не код, поэтому здесь только формат.
+    красноту — потолок держит пресет, а не код, но молчать про его нарушение
+    нельзя: краснота на коже с одного кадра не читается, а на ролике целиком уже
+    поздно.
+
+    Виньетка — тот же случай, и она НЕ входит в «этого не видно»: замеренный по
+    серой карте профиль (см. VIGNETTE_VISIBLE) показывает, что на значении из
+    пресета glass верх и низ 9:16-кадра гаснут до 45 % от центра. Решение
+    художественное, поэтому код его не меняет, но и молчать про него не должен.
     """
     if not grade.enabled:
         return ""
+    if grade.saturation > SATURATION_RED_SKIN:
+        log.warning(
+            "цветокор: saturation=%.2f выше %.2f — на лицах это уходит в красноту",
+            grade.saturation, SATURATION_RED_SKIN,
+        )
+    if grade.vignette > VIGNETTE_VISIBLE:
+        log.warning(
+            "цветокор: vignette=%.2f выше %.2f — это уже видимая рамка, а не «лёгкий "
+            "цветокор»: на 9:16 верх и низ кадра гаснут примерно до половины яркости "
+            "центра, вместе с макушкой и полосой субтитров",
+            grade.vignette, VIGNETTE_VISIBLE,
+        )
     parts: list[str] = []
     if (grade.contrast, grade.saturation, grade.gamma) != (1.0, 1.0, 1.0):
         parts.append(
@@ -757,6 +1083,13 @@ def build_crop_filter(
 
     Цветокор — один раз после склейки, а не в каждой ветке: он одинаковый для
     всего ролика, а `eq` на каждом кадре стоит денег.
+
+    `setsar=1` стоит В КАЖДОЙ ветке, а не только в хвосте. Окна разной крупности
+    округляются до чётных пикселей и потому не идеально 9:16; `scale` доводит
+    пропорцию не размером, а SAR, и ветки приходят в `concat` с разным SAR
+    (1:1 против 4384:4383). `concat` такое не склеивает, а падает: «Input link
+    parameters do not match» — то есть ровно смена крупности, ради которой ветки
+    и заведены, роняла весь этап.
     """
     parts: list[str] = []
     head = "[0:v]"
@@ -768,7 +1101,7 @@ def build_crop_filter(
             return ""  # окно во весь кадр — резать нечего
         return f"crop@c{i}=w={seg.win_w}:h={seg.win_h}:x={seg.xs[0]}:y={seg.ys[0]},"
 
-    scale = f"scale={out_w}:{out_h}:flags=lanczos"
+    scale = f"scale={out_w}:{out_h}:flags=lanczos,setsar=1"
     if len(segments) == 1:
         parts.append(f"{head}{crop_of(0, segments[0])}{scale}[vcat]")
     else:
@@ -787,6 +1120,30 @@ def build_crop_filter(
 
 
 # --------------------------------------------------------------------------- вход
+
+
+def warn_missing_inputs(
+    preset: Preset | str | None, framing: Sequence[Span] | None, cfg: Settings
+) -> None:
+    """Молчаливая деградация Ф3 и Ф6 — в лог, а не в тишину.
+
+    Оба входа необязательные, и обе подстановки по умолчанию тихо отменяют целую
+    фазу: без `preset` цветокор берётся из `cfg.default_preset`, а не из пресета
+    задачи (а пресеты различаются именно цветокором — glass даёт виньетку, bold
+    нет), без `framing` весь ролик снимается одной крупностью. Сегодня вызовы в
+    `pipeline/job.py` и `worker/tasks.py` не передают ни того, ни другого.
+    """
+    if preset is None:
+        log.warning(
+            "автокроп: пресет не передан — беру %s из конфига. Цветокор задачи (Ф3) "
+            "при этом теряется: пресеты различаются именно им",
+            cfg.default_preset,
+        )
+    if framing is None:
+        log.warning(
+            "автокроп: крупность не передана — весь ролик снимается одной, Ф6 "
+            "выключена. Ожидается framing=framing_spans(edl, applied_cuts=...)"
+        )
 
 
 def autocrop(
@@ -809,6 +1166,13 @@ def autocrop(
 
     `framing` — интервалы крупности в выходном времени, см. `framing_spans`.
     Не передали — весь ролик снимается одной крупностью `wide`.
+
+    Оба необязательных входа — `preset` и `framing` — умеют деградировать молча, и
+    это уже стоило продукту всей Ф6: вызовы в `pipeline/job.py` и `worker/tasks.py`
+    не передают ни того, ни другого, поэтому крупность до кадра не доезжает, а
+    цветокор берётся из `cfg.default_preset`, а не из пресета задачи (ломая §0.4
+    «сохранённый EDL + другой пресет = новое видео»). Правка вызовов — за
+    владельцем job.py/tasks.py, но деградация обязана быть видимой отсюда.
     """
     cfg = cfg or default_settings
     src, dst = Path(src), Path(dst)
@@ -816,6 +1180,7 @@ def autocrop(
     info = info or probe(src)
     out_w = out_width or cfg.render_width
     out_h = out_height or cfg.render_height
+    warn_missing_inputs(preset, framing, cfg)
     if preset is None or isinstance(preset, str):
         preset = load_preset(preset or cfg.default_preset)
     grade = grade_filter(preset.grade)
@@ -882,26 +1247,44 @@ def _log_framing(
     Отдельно про «не сделали хуже»: если исходник снят крупнее цели, доля лица
     останется выше коридора, и это не дефект кадрирования, а его физический
     предел. Такое обязано быть видно в логе, иначе разбор упрётся в «почему 47 %».
+
+    Число печатается вместе с растром анализа: доля лица — свойство пары «кадр +
+    растр», и без него её не с чем сравнивать (samples/README.md).
     """
-    face_h = track.face_height()
-    if face_h <= 0:
-        log.info("кадрирование: лиц не найдено, окно стоит по центру кадра")
+    overall = track.face_height()
+    if overall <= 0:
+        # Две разные ветки, и раньше обе описывались одной строкой про центр кадра.
+        # По горизонтали окно ведёт центр масс движения и запросто проходит сотню
+        # пикселей мимо центра (замер: 507 → 655 при центре 656), по вертикали —
+        # действительно центр кадра. Врать про это нельзя: разбор «почему кадр
+        # уехал» начинается ровно с этой строки.
+        xs = [x for seg in segments for x in seg.xs]
+        spread = (max(xs) - min(xs)) if xs else 0
+        if any(m is not None for m in track.motion_x):
+            log.info(
+                "кадрирование: лиц не найдено, по горизонтали окно ведёт центр масс "
+                "движения (ход %d px), по вертикали — центр кадра", spread,
+            )
+        else:
+            log.info("кадрирование: лиц и движения не найдено, окно по центру кадра")
         return
     for seg in segments:
         target = crop.tight_face_height_ratio if seg.framing == "tight" else crop.face_height_ratio
+        face_h = seg.face_h or overall
         log.info(
-            "кадрирование %.1f-%.1f с (%s): доля лица %.2f при цели %.2f, окно %dx%d",
+            "кадрирование %.1f-%.1f с (%s): доля лица %.2f при цели %.2f, окно %dx%d "
+            "(детектор %s на %dx%d)",
             seg.start, seg.end, seg.framing, seg.face_share(face_h), target,
-            seg.win_w, seg.win_h,
+            seg.win_w, seg.win_h, track.detector, track.analyzed[0], track.analyzed[1],
         )
-    widest = max(segments, key=lambda s: s.win_h)
-    if widest.face_share(face_h) > crop.face_height_ratio * 1.15:
+    widest = max(segments, key=lambda s: s.face_share(s.face_h or overall))
+    share = widest.face_share(widest.face_h or overall)
+    if share > crop.face_height_ratio * 1.15:
         log.warning(
             "исходник %dx%d снят крупнее цели: доля лица %.2f вместо %.2f. Кроп умеет "
             "только сужать кадр, а кламп max_scale=%.2f запрещает добирать разницу "
             "апскейлом — крупность оставлена как снято",
-            info.width, info.height, widest.face_share(face_h),
-            crop.face_height_ratio, crop.max_scale,
+            info.width, info.height, share, crop.face_height_ratio, crop.max_scale,
         )
 
 

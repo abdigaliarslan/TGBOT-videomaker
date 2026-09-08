@@ -16,11 +16,18 @@ from pathlib import Path
 import pytest
 
 from src.core.geometry import (
+    CAPTION_POSITIONS,
     FALLBACK_ADVANCE_EM,
+    MIN_BAND_RATIO,
+    STOCK_ASPECT,
     Rect,
     SizedWord,
+    blocks_caption,
+    broll_free_band,
     broll_rect,
+    caption_positions,
     caption_rect,
+    caption_zone,
     caption_text_width,
     emphasis_size,
     line_gap,
@@ -45,26 +52,42 @@ def metrics():
     return load_metrics(FONT)
 
 
-def block(*lines: list[str], position: str = "bottom", accent: str = "") -> PlanBlock:
-    """Блок плана из готовых строк. `accent` — слово, которое крупнее остальных."""
+def block(
+    *lines: list[str], position: str = "bottom", accent: str = "", shout: str = ""
+) -> PlanBlock:
+    """Блок плана из готовых строк. `accent`/`shout` — слова крупнее остальных."""
+
+    def emphasis(w: str) -> str:
+        if w and w == shout:
+            return "shout"
+        return "accent" if w and w == accent else "none"
+
     return PlanBlock(
         start=0.0,
         end=1.0,
         position=position,  # type: ignore[arg-type]
         lines=[
             [
-                PlanWord(
-                    text=w,
-                    start=0.0,
-                    end=1.0,
-                    emphasis="accent" if w == accent else "none",
-                    word_idx=i,
-                )
+                PlanWord(text=w, start=0.0, end=1.0, emphasis=emphasis(w), word_idx=i)
                 for i, w in enumerate(line)
             ]
             for line in lines
         ],
     )
+
+
+def roomy_preset():
+    """Пресет, в кадре которого карточке ЕСТЬ где встать при любой позиции блока.
+
+    Поставляемые пресеты такого места не дают: три трёхстрочные полосы субтитра
+    занимают больше кадра, чем в нём есть (см. `broll_free_band`). Чтобы проверять
+    саму гарантию, а не её вырождение, нужен пресет пореже.
+    """
+    preset = load_preset("glass").model_copy(deep=True)
+    preset.font.size = 44
+    preset.caption.max_lines = 1
+    preset.caption.margin = 100
+    return preset
 
 
 # ------------------------------------------------------------------ прямоугольник
@@ -251,18 +274,14 @@ def test_missing_font_file_is_an_explicit_error():
 # ------------------------------------------------------------------ картинки
 
 
-def test_broll_rect_anchors_go_to_their_corners():
+def test_broll_rect_anchors_go_to_their_sides():
     preset = load_preset("glass")
-    g = preset.geometry
-    margin = FRAME[0] * g.broll_margin_ratio
+    margin = FRAME[0] * preset.geometry.broll_margin_ratio
     left = broll_rect("top_left", preset, FRAME)
     right = broll_rect("top_right", preset, FRAME)
     assert left.x == pytest.approx(margin)
     assert FRAME[0] - right.right == pytest.approx(margin)
-    assert left.y == right.y == pytest.approx(FRAME[1] * g.broll_top_ratio)
-    assert broll_rect("bottom_left", preset, FRAME).y == pytest.approx(
-        FRAME[1] * g.broll_bottom_ratio
-    )
+    assert left.y == right.y
 
 
 def test_broll_fullscreen_is_the_whole_frame():
@@ -270,18 +289,132 @@ def test_broll_fullscreen_is_the_whole_frame():
     assert (rect.x, rect.y, rect.width, rect.height) == (0.0, 0.0, 1080.0, 1920.0)
 
 
-def test_broll_center_is_centered():
-    rect = broll_rect("center", load_preset("glass"), FRAME)
-    assert rect.center_x == pytest.approx(FRAME[0] / 2)
-    assert rect.center_y == pytest.approx(FRAME[1] / 2)
-
-
-def test_broll_aspect_changes_height_not_width():
+def test_broll_center_is_centered_horizontally():
+    """По вертикали центр кадра занят субтитром, картинка живёт в свободной полосе."""
     preset = load_preset("glass")
-    square = broll_rect("top_right", preset, FRAME)
-    portrait = broll_rect("top_right", preset, FRAME, aspect=2 / 3)
-    assert portrait.width == square.width
-    assert portrait.height == pytest.approx(square.width * 3 / 2)
+    rect = broll_rect("center", preset, FRAME)
+    band = broll_free_band(preset, FRAME)
+    assert rect.center_x == pytest.approx(FRAME[0] / 2)
+    assert rect.center_y == pytest.approx((band[0] + band[1]) / 2)
+
+
+def test_broll_inherits_source_aspect_by_default():
+    """Квадратная карточка резала стоковые 2:3 на треть — теперь пропорция наследуется."""
+    preset = load_preset("glass")
+    rect = broll_rect("top_right", preset, FRAME)
+    assert rect.width / rect.height == pytest.approx(STOCK_ASPECT)
+
+
+def test_broll_aspect_changes_shape_not_area_rule():
+    preset = load_preset("glass")
+    wide = broll_rect("top_right", preset, FRAME, aspect=3 / 2)
+    tall = broll_rect("top_right", preset, FRAME, aspect=2 / 3)
+    assert wide.width / wide.height == pytest.approx(3 / 2)
+    assert tall.width / tall.height == pytest.approx(2 / 3)
+    # Ширину задаёт пресет, пока картинка влезает в свободную полосу по высоте.
+    assert wide.width == pytest.approx(FRAME[0] * preset.geometry.broll_inset_ratio)
+
+
+ANCHORS = ("top_left", "top_right", "bottom_left", "bottom_right", "center")
+
+
+def test_broll_never_crosses_the_caption_band():
+    """DoD Ф7: картинка ни разу не пересекает субтитр — при любом якоре и позиции.
+
+    Позиции берутся все три, включая `center`: он разрешён контрактом
+    (`CaptionBlock.position`) и в `bold` стоит позицией пресета по умолчанию.
+    Перебирать только `top`/`bottom` значит обходить ровно тот случай, где
+    гарантия ломалась.
+    """
+    preset = roomy_preset()
+    for anchor in ANCHORS:
+        rect = broll_rect(anchor, preset, FRAME)
+        assert rect.width < FRAME[0], anchor  # место есть, карточка настоящая
+        for position in CAPTION_POSITIONS:
+            assert not blocks_caption(rect, preset, FRAME, position), (anchor, position)
+
+
+def test_bundled_presets_never_put_a_card_over_their_own_captions():
+    """Гарантия на поставляемых пресетах: либо карточка мимо субтитра, либо полный кадр."""
+    for name in ("glass", "bold"):
+        preset = load_preset(name)
+        for anchor in ANCHORS:
+            rect = broll_rect(anchor, preset, FRAME)
+            if rect.width >= FRAME[0]:
+                continue  # места под карточку нет — осознанный полный кадр
+            for position in caption_positions(preset):
+                assert not blocks_caption(rect, preset, FRAME, position), (name, anchor, position)
+
+
+def test_a_centered_caption_leaves_no_room_for_a_card():
+    """`bold` держит субтитр по центру: карточка накрывала бы КАЖДЫЙ блок.
+
+    Полный кадр честнее: он хотя бы не ставит картинку поверх текста.
+    """
+    bold = load_preset("bold")
+    assert bold.caption.position == "center"
+    rect = broll_rect("top_right", bold, FRAME)
+    assert (rect.x, rect.y, rect.width, rect.height) == (0.0, 0.0, 1080.0, 1920.0)
+
+
+def test_a_dense_preset_falls_back_instead_of_landing_on_the_text():
+    """Вырожденная полоса не даёт карточку полного размера прямо в полосу субтитра."""
+    preset = load_preset("glass").model_copy(deep=True)
+    preset.font.size = 210
+    preset.caption.line_height = 1.2
+    preset.caption.margin = 120
+    band = broll_free_band(preset, FRAME)
+    assert band[1] - band[0] < FRAME[1] * MIN_BAND_RATIO
+    rect = broll_rect("top_right", preset, FRAME)
+    assert (rect.x, rect.y, rect.width, rect.height) == (0.0, 0.0, 1080.0, 1920.0)
+
+
+def test_broll_rect_stays_inside_the_safe_area():
+    preset = load_preset("glass")
+    safe = FRAME[1] * preset.geometry.safe_area_ratio
+    for anchor in ("top_left", "bottom_right", "center"):
+        rect = broll_rect(anchor, preset, FRAME)
+        assert rect.y >= safe - 1e-6
+        assert rect.bottom <= FRAME[1] - safe + 1e-6
+
+
+def test_broll_shrinks_when_the_free_band_is_short():
+    """Не влезло по высоте — уменьшается целиком: растянуть значит снова резать."""
+    preset = load_preset("glass")
+    band_h = broll_free_band(preset, FRAME)[1] - broll_free_band(preset, FRAME)[0]
+    rect = broll_rect("top_right", preset, FRAME)
+    assert rect.height == pytest.approx(band_h)
+    assert rect.width == pytest.approx(band_h * STOCK_ASPECT)
+
+
+def test_caption_zone_reserves_the_worst_case_block():
+    """Полоса резерва обязана вмещать самый высокий блок, какой разрешает контракт.
+
+    Самый высокий — это `shout` (1.34), а не `accent` (1.18): подставить сюда
+    акцент значит написать тест под реализацию, а блок с криком выше резерва.
+    """
+    preset = load_preset("glass")
+    zone = caption_zone(preset, FRAME, "bottom")
+    for emphasis in ("accent", "shout"):
+        worst = caption_rect(
+            block(["раз", "два"], ["три", "четыре"], ["пять"], **{emphasis: "пять"}),
+            preset,
+            FRAME,
+        )
+        assert zone.height >= worst.height - 1e-6, emphasis
+        assert zone.y <= worst.y + 1e-6, emphasis
+
+
+def test_caption_zone_counts_lines_from_the_preset():
+    """Число строк — поле пресета, а не константа рядом: иначе резерв врёт."""
+    preset = load_preset("glass").model_copy(deep=True)
+    preset.caption.max_lines = 4
+    zone = caption_zone(preset, FRAME, "bottom")
+    worst = caption_rect(
+        block(["раз", "два"], ["три"], ["четыре"], ["пять"], shout="пять"), preset, FRAME
+    )
+    assert zone.height >= worst.height - 1e-6
+    assert zone.y <= worst.y + 1e-6
 
 
 def test_fullscreen_to_inset_rests_in_a_corner():

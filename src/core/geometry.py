@@ -22,10 +22,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Protocol, Sequence
+
+log = logging.getLogger(__name__)
 
 METRICS_DIR = Path(__file__).resolve().parent / "presets" / "metrics"
 
@@ -438,6 +441,159 @@ def caption_rect(block: _HasLines, preset: Any, frame_size: tuple[int, int]) -> 
 
 # --------------------------------------------------------------------------- картинки
 
+# Пропорция (ширина/высота) стоковой картинки. Pexels отдаёт нарезку `portrait`
+# 800×1200, то есть 2:3 (AUDIT §8.3). Квадратная карточка при таком источнике
+# срезала `object-fit: cover`-ом треть высоты — по 200 px исходника сверху и
+# снизу, а сток кладёт объект как раз в верхнюю треть. Карточка, наследующая
+# пропорцию источника, не режет ничего.
+STOCK_ASPECT = 2 / 3
+
+# Позиции, которые контракт разрешает блоку субтитра (`CaptionBlock.position`
+# минус `auto`, который разрешается в одну из них). Резерв обязан считаться по
+# худшему случаю: занизить его — значит поставить картинку туда, куда потом
+# придёт текст.
+CAPTION_POSITIONS = ("top", "center", "bottom")
+
+# Ниже этой доли высоты кадра карточка перестаёт быть иллюстрацией: при 2:3 это
+# 154×230 px в кадре 1080×1920 — марка, которую не рассмотреть. Если свободной
+# полосы осталось меньше, вставка отдаётся полным кадром: осознанный полный кадр
+# честнее карточки, поставленной поверх субтитра.
+MIN_BAND_RATIO = 0.12
+
+
+def caption_positions(preset: Any) -> tuple[str, ...]:
+    """Позиции, которые блок может получить в этом пресете БЕЗ явного указания.
+
+    `auto` разрешается в `preset.caption.position` (`bold` — это `center`), явные
+    `top` и `bottom` режиссёр ставит в каждом втором ролике. Явный `center`
+    контракт тоже разрешает, но предсказать его отсюда нечем: b-roll считается
+    раньше субтитров, и блоков в этот момент ещё нет — поэтому он попадает в
+    строгий набор `CAPTION_POSITIONS`, а не сюда (см. `broll_free_band`).
+    """
+    base = getattr(preset.caption, "position", "bottom")
+    if base not in CAPTION_POSITIONS:
+        base = "bottom"
+    return tuple(dict.fromkeys(("top", "bottom", base)))
+
+
+def caption_zone(preset: Any, frame_size: tuple[int, int], position: str | None = None) -> Rect:
+    """Полоса кадра, зарезервированная под субтитр, ещё до того, как известен текст.
+
+    `caption_rect` меряет конкретный блок, а картинку надо разводить с блоком,
+    которого в этот момент ещё нет: b-roll считается раньше субтитров (блокам
+    нужно знать, какая часть кадра занята). Поэтому здесь худший случай, и он
+    считается по данным пресета, а не по числам в коде: строк —
+    `caption.max_lines` (иначе пресет с четырьмя строками молча вылезет из
+    резерва), а самая высокая строка — по `shout`, а не по `accent`. Крик крупнее
+    акцента (1.34 против 1.18 в glass), контракт разрешает его в любом блоке, и
+    трёхстрочный блок с криком выше «худшего случая» по акценту на 15 px.
+
+    Полоса во всю ширину кадра намеренно. Панель центрирована и в кадре 1080
+    доходит до x 119…961, а угловая карточка занимает 54…529 — по горизонтали
+    они пересекаются при любом якоре, разводить их можно только по вертикали.
+    """
+    width, height = frame_size
+    lines = max(1, int(getattr(preset.caption, "max_lines", 3) or 3))
+    base = float(preset.font.size) * preset.caption.line_height
+    biggest = (
+        max(emphasis_size("accent", preset), emphasis_size("shout", preset))
+        * preset.caption.line_height
+    )
+    panel = preset.panel
+    chrome_y = 2 * (panel.padding_y + panel.border_width) if panel.enabled else 0.0
+    h = (lines - 1) * base + biggest + (lines - 1) * line_gap(preset) + chrome_y
+
+    pos = position or preset.caption.position
+    margin = safe_margin_y(preset, height)
+    if pos == "top":
+        y = float(margin)
+    elif pos == "center":
+        y = (height - h) / 2
+    else:
+        y = height - margin - h
+    return Rect(0.0, y, float(width), h)
+
+
+def blocks_caption(
+    rect: Rect, preset: Any, frame_size: tuple[int, int], position: str | None = None
+) -> bool:
+    """Мешает ли картинка субтитру в этой позиции.
+
+    Настоящее пересечение прямоугольников вместо «той же половины кадра»:
+    половинами `center` и `fullscreen` описывались как «занято всё», из-за чего
+    уклонение субтитра выключалось именно там, где было нужнее всего
+    (AUDIT §8.3, логическая инверсия в `occupied()`).
+    """
+    return rect.overlaps(caption_zone(preset, frame_size, position))
+
+
+def _band_without(
+    preset: Any, frame_size: tuple[int, int], positions: Iterable[str]
+) -> tuple[float, float]:
+    """Кадр минус безопасная зона минус перечисленные полосы субтитра минус зазор.
+
+    Из оставшихся кусков берётся самый высокий. Безопасная зона считается от
+    `geometry.safe_area_ratio`, а не от `safe_margin_y`: в последнем сидит
+    `caption.margin` (380 px — высота интерфейса ленты под субтитром), к картинке
+    он отношения не имеет.
+    """
+    width, height = frame_size
+    safe = height * preset.geometry.safe_area_ratio
+    gap = width * preset.geometry.broll_margin_ratio
+    pieces: list[tuple[float, float]] = [(safe, height - safe)]
+    for position in positions:
+        zone = caption_zone(preset, frame_size, position)
+        lo, hi = zone.y - gap, zone.bottom + gap
+        rest: list[tuple[float, float]] = []
+        for a, b in pieces:
+            if hi <= a or lo >= b:
+                rest.append((a, b))
+                continue
+            if lo > a:
+                rest.append((a, lo))
+            if hi < b:
+                rest.append((hi, b))
+        pieces = rest
+    if not pieces:
+        return (safe, safe)
+    return max(pieces, key=lambda p: p[1] - p[0])
+
+
+def broll_free_band(
+    preset: Any, frame_size: tuple[int, int], positions: Iterable[str] | None = None
+) -> tuple[float, float]:
+    """Полоса по вертикали (y_top, y_bottom), где картинке можно стоять.
+
+    Резервируется НЕ ТА полоса, которую займёт субтитр, а все, которые он может
+    занять: позицию блока выбирает не картинка. Картинка считается раньше
+    субтитров и поэтому уступает первой.
+
+    `positions` — набор позиций, которые блок реально может получить. Знает его
+    только сборка плана (явные позиции блоков видны в EDL); отсюда он не виден,
+    поэтому по умолчанию берётся лестница из двух ступеней:
+
+    1. Все три позиции контракта (`CAPTION_POSITIONS`). Тогда гарантия
+       безусловная: карточка не пересечёт субтитр даже при явном `center`.
+    2. Если после этого не осталось полосы разумной высоты (`MIN_BAND_RATIO`) —
+       только те позиции, которые пресет даёт сам (`caption_positions`). Три
+       трёхстрочные полосы, две безопасные зоны и шесть зазоров занимают в кадре
+       1080×1920 больше, чем в нём есть: у glass остаётся 192 px, у bold — 184.
+
+    Пустая полоса (a, a) означает «места нет»; `broll_rect` отдаёт в этом случае
+    полный кадр, а не ставит карточку поверх текста.
+    """
+    if positions is not None:
+        return _band_without(preset, frame_size, tuple(positions))
+
+    floor = frame_size[1] * MIN_BAND_RATIO
+    strict = _band_without(preset, frame_size, CAPTION_POSITIONS)
+    if strict[1] - strict[0] >= floor:
+        return strict
+    relaxed = _band_without(preset, frame_size, caption_positions(preset))
+    if relaxed[1] - relaxed[0] >= floor:
+        return relaxed
+    return (strict[0], strict[0])
+
 
 def resting_anchor(anchor: str, anim: str) -> str:
     """Где картинка окажется в покое.
@@ -453,28 +609,66 @@ def resting_anchor(anchor: str, anim: str) -> str:
 
 
 def broll_rect(
-    anchor: str, preset: Any, frame_size: tuple[int, int], *, aspect: float = 1.0
+    anchor: str,
+    preset: Any,
+    frame_size: tuple[int, int],
+    *,
+    aspect: float | None = None,
+    positions: Iterable[str] | None = None,
 ) -> Rect:
     """Прямоугольник вставной картинки.
 
-    `aspect` — отношение ширины к высоте карточки. Единица (квадрат) осталась от
-    старого TSX; Ф7 передаст сюда пропорцию источника, чтобы `cover` не срезал
-    половину картинки. Ширина карточки от пропорции не зависит.
+    `aspect` — отношение ширины к высоте ИСТОЧНИКА. Карточка наследует его, а не
+    остаётся квадратной: при квадрате `object-fit: cover` срезал у стоковой
+    картинки 33 % высоты (AUDIT §8.3). Ширина карточки от пропорции не зависит,
+    меняется высота. `None` — источник ещё не измерен, берём стоковые 2:3.
+
+    Якорь задаёт положение, но не имеет права поставить карточку туда, где будет
+    текст: по вертикали прямоугольник зажимается в свободную полосу
+    (`broll_free_band`). Это и есть DoD Ф7 «картинка ни разу не пересекает
+    caption_rect» — гарантия, а не удачно подобранные доли в пресете. Гарантия
+    покрывает те позиции субтитра, которые вернул `broll_free_band` (см. его
+    лестницу): все три, когда в кадре есть место, и позиции пресета, когда нет.
+
+    `positions` — позиции, которые блоки реально получат. Их видит только сборка
+    плана (явные позиции лежат в EDL); передать их сюда значит сделать гарантию
+    безусловной и там, где режиссёр поставил блоку явный `center`.
+
+    Свободной полосы может не остаться совсем (плотный пресет; субтитр по центру,
+    как в `bold`). Тогда карточки не будет: возвращается полный кадр. Молча
+    выдать карточку полного размера прямо в полосу субтитра — худшее из
+    возможных: гарантия отключалась бы ровно там, где она нужна.
     """
     width, height = frame_size
     geometry = preset.geometry
     if anchor == "fullscreen":
         return Rect(0.0, 0.0, float(width), float(height))
 
+    aspect = aspect if aspect and aspect > 0 else STOCK_ASPECT
+    band_top, band_bottom = broll_free_band(preset, frame_size, positions)
+    band_h = max(0.0, band_bottom - band_top)
+    if band_h < height * MIN_BAND_RATIO:
+        log.info(
+            "пресет %r: свободной полосы под карточку нет (%.0f px) — вставка полноэкранная",
+            getattr(preset, "name", "?"), band_h,
+        )
+        return Rect(0.0, 0.0, float(width), float(height))
+
     w = width * geometry.broll_inset_ratio
-    h = w / aspect if aspect > 0 else w
+    h = w / aspect
+    if h > band_h:
+        # Не влезает в свободную полосу — уменьшаем карточку целиком, пропорция
+        # важнее заданной пресетом ширины: растянуть её значит снова резать.
+        h = band_h
+        w = h * aspect
     margin = width * geometry.broll_margin_ratio
 
     if anchor == "center":
-        return Rect((width - w) / 2, (height - h) / 2, w, h)
+        return Rect((width - w) / 2, band_top + (band_h - h) / 2, w, h)
 
     top = anchor.startswith("top")
     left = anchor.endswith("left")
     y = height * (geometry.broll_top_ratio if top else geometry.broll_bottom_ratio)
+    y = min(max(y, band_top), max(band_top, band_bottom - h))
     x = margin if left else width - w - margin
     return Rect(x, y, w, h)

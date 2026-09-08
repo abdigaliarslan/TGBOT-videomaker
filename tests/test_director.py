@@ -13,6 +13,7 @@ from src.core.config import Settings
 from src.core.edl import Cut, Word, validate_edl
 from src.pipeline.director import (
     FRAMING_MIN_HOLD,
+    FRAMING_MIN_SEGMENT,
     assign_framing,
     build_cuts,
     deterministic_edl,
@@ -232,8 +233,19 @@ def test_hook_is_shot_tight():
     assert cuts[1].framing == "tight"
 
 
+def chain(durations: list[float], first: str = "hook") -> list[Cut]:
+    """Череда встык идущих kept-кусков заданной длительности."""
+    out, t = [], 0.0
+    for i, d in enumerate(durations):
+        out.append(Cut(src_in=t, src_out=t + d, reason=first if i == 0 else "keep"))
+        t += d
+    return out
+
+
 def test_framing_alternates_on_long_cuts():
-    cuts = cuts_of([(0.0, 5.0, "hook"), (5.0, 11.0, "keep"), (11.0, 18.0, "keep")])
+    """Куски длиннее выдержки чередуют крупность — иначе движения в ролике нет."""
+    long = FRAMING_MIN_HOLD + 1.0
+    cuts = chain([long, long, long])
     assign_framing(cuts)
     assert [c.framing for c in cuts] == ["tight", "wide", "tight"]
 
@@ -246,8 +258,13 @@ def test_framing_holds_through_short_cuts():
 
 
 def test_framing_waits_for_min_hold():
-    """Смена не раньше FRAMING_MIN_HOLD секунд после предыдущей."""
-    cuts = cuts_of([(0.0, 1.2, "keep"), (1.2, 2.4, "keep"), (2.4, 9.0, "keep")])
+    """Смена не раньше FRAMING_MIN_HOLD секунд после предыдущей.
+
+    Длительности выводятся из самой константы, а не вписаны числами: тест обязан
+    проверять правило, а не то значение, с которым его когда-то написали.
+    """
+    half = FRAMING_MIN_HOLD * 0.6  # два таких куска перекрывают выдержку, один — нет
+    cuts = chain([half, half, FRAMING_MIN_HOLD + 2.0], first="keep")
     assign_framing(cuts)
     changes = [i for i in range(1, len(cuts)) if cuts[i].framing != cuts[i - 1].framing]
     assert changes == [2]
@@ -256,10 +273,87 @@ def test_framing_waits_for_min_hold():
 
 def test_framing_ignores_dropped_cuts():
     """Вырезанный кусок не участвует ни в выдержке, ни в чередовании."""
-    cuts = cuts_of([(0.0, 3.0, "keep"), (3.0, 9.0, "drop_silence"), (9.0, 12.0, "keep")])
+    hold = FRAMING_MIN_HOLD + 1.0
+    cuts = [
+        Cut(src_in=0.0, src_out=hold, reason="keep"),
+        # Длинная дырка: если бы выдержка считалась по исходному времени, её
+        # хватило бы на смену крупности сама по себе.
+        Cut(src_in=hold, src_out=hold + 20.0, reason="drop_silence"),
+        Cut(src_in=hold + 20.0, src_out=hold + 20.0 + hold, reason="keep"),
+    ]
     assign_framing(cuts)
     assert cuts[1].framing == "wide"  # значение по умолчанию, его никто не увидит
     assert cuts[0].framing != cuts[2].framing
+
+
+def test_short_hook_is_not_shot_tight():
+    """Хук короче порога — это вспышка, а не крупный план: крупность не трогаем."""
+    cuts = chain([FRAMING_MIN_SEGMENT / 2, FRAMING_MIN_HOLD + 2.0])
+    assign_framing(cuts)
+    assert cuts[0].framing == "wide"
+
+
+def test_framing_density_fits_the_crop_ceiling():
+    """План режиссёра обязан влезать в потолок мельтешения, который держит кроп.
+
+    Тест-предшественник проходил из-за выбора фикстуры: длины кусков брались из
+    `uniform(1.5, 6.0)` при ОДНОМ зерне и только на 20/60/180 секундах, тогда как
+    `cut_min_segment` в конфиге равен 0.3, а основной формат — ролик на 10-20
+    секунд. Именно там инвариант и ломался: нарезка [4.8, 4.77, 2.11] даёт три
+    крупности на 11.68 с, где старый потолок разрешал две, и Ф6 схлопывалась в одно
+    окно. Поэтому здесь свип: сотни нарезок с длинами от `cut_min_segment` и
+    длительности от 8 секунд, а хук стоит не только первым куском.
+    """
+    import random
+
+    from src.pipeline.crop import MIN_FRAMING_SEGMENTS, MIN_SECONDS_PER_FRAMING
+
+    settings = cfg()
+    for seed in range(300):
+        random.seed(seed)
+        total = random.uniform(8.0, 120.0)
+        durations, t = [], 0.0
+        while t < total:
+            d = random.uniform(settings.cut_min_segment, 6.0)
+            durations.append(d)
+            t += d
+        cuts = chain(durations)
+        hook_at = seed % 4  # хук не обязан быть первым куском: его задаёт LLM
+        for i, cut in enumerate(cuts):
+            cut.reason = "hook" if i == min(hook_at, len(cuts) - 1) else "keep"
+        assign_framing(cuts)
+        segments = 1 + sum(1 for a, b in zip(cuts, cuts[1:]) if a.framing != b.framing)
+        # n крупностей занимают n−1 интервал — потолок кропа считает так же.
+        allowed = max(MIN_FRAMING_SEGMENTS, int(t / MIN_SECONDS_PER_FRAMING) + 1)
+        assert segments <= allowed, (seed, round(t, 2), segments, allowed, durations)
+
+
+def test_framing_density_holds_on_the_known_counterexample():
+    """Точный контрпример к прежнему согласованию — три крупности на 11.68 с."""
+    from src.pipeline.crop import MIN_FRAMING_SEGMENTS, MIN_SECONDS_PER_FRAMING
+
+    cuts = chain([4.8, 4.77, 2.11])
+    assign_framing(cuts)
+    segments = 1 + sum(1 for a, b in zip(cuts, cuts[1:]) if a.framing != b.framing)
+    covered = sum(c.duration for c in cuts)
+    assert segments == 3
+    assert segments <= max(MIN_FRAMING_SEGMENTS, int(covered / MIN_SECONDS_PER_FRAMING) + 1)
+
+
+def test_first_framing_holds_as_long_as_any_other():
+    """Ролик не открывается вспышкой: короткий разгон перед хуком отдан хуку.
+
+    Хук выбирает LLM (`hook_end_word`), и он не обязан попасть в первый kept-кусок.
+    Тогда всё, что было до него, оставалось с крупностью по умолчанию: ролик
+    открывался планом на 0.4 секунды и тут же менял крупность. Это и вспышка, и
+    единственный случай, когда план режиссёра нарушал арифметику потолка кропа.
+    """
+    cuts = chain([0.43, 2.2, 2.31, 0.52, 0.5, 1.92], first="keep")
+    cuts[1].reason = "hook"
+    assign_framing(cuts)
+    assert cuts[0].framing == cuts[1].framing == "tight"
+    segments = 1 + sum(1 for a, b in zip(cuts, cuts[1:]) if a.framing != b.framing)
+    assert segments == 2
 
 
 def test_build_cuts_fills_framing():

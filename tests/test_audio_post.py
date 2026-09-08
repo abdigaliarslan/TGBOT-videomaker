@@ -7,12 +7,13 @@
 
 from __future__ import annotations
 
+import math
 import re
 
 import pytest
 
 from src.core.config import settings as default_settings
-from src.core.edl import EDL, Broll, BrollAnim, CaptionBlock, CaptionWord, Cut, Word
+from src.core.edl import EDL, Broll, BrollAnim, CaptionBlock, CaptionWord, Cut, Music, Sfx, Word
 from src.core.preset import load_preset
 from src.core.proc import capture, ffmpeg
 from src.pipeline.audio import measure_ebur128
@@ -205,6 +206,11 @@ def test_plan_sfx_keeps_events_apart():
     assert [s.name for s in got] == [SFX_WHOOSH], "картинка важнее реза"
 
 
+def test_plan_sfx_survives_a_reel_without_cuts():
+    """Ролик без единого реза — штатный случай (`cut_pauses=False`), не ошибка."""
+    assert plan_sfx(simple_edl(), preset=load_preset("glass")) == []
+
+
 def test_plan_sfx_ignores_cut_out_events():
     edl = simple_edl(
         cuts=[Cut(src_in=0.0, src_out=2.0, reason="hook"),
@@ -224,14 +230,16 @@ def test_swish_quieter_than_whoosh():
     assert swish.gain_db < load_preset("glass").audio.sfx_gain_db
 
 
-@pytest.mark.parametrize("duck_db,expected", [(-6.0, 1.33), (-12.0, 2.0), (-18.0, 4.0)])
-def test_duck_ratio_follows_requested_depth(duck_db, expected):
-    assert duck_ratio(duck_db) == pytest.approx(expected, rel=0.02)
-
-
 def test_duck_ratio_is_clamped():
+    """Только границы: саму глубину меряем на собранной дорожке, а не формулой.
+
+    Проверять `duck_ratio` пересказом её же формулы бессмысленно — такой тест
+    пройдёт и на сломанном расчёте. Настоящая проверка ниже, на реальном миксе:
+    `test_music_ducks_exactly_as_deep_as_the_preset_asks`.
+    """
     assert duck_ratio(0.0) == 1.0  # 1:1 — компрессор, который ничего не делает
     assert duck_ratio(-100.0) <= 20.0  # ffmpeg дальше 20 не умеет
+    assert duck_ratio(-12.0, target_lufs=-70.0) >= 1.0  # цель ниже порога — не делим на ноль
 
 
 # ------------------------------------------------------------------ сведение
@@ -278,6 +286,134 @@ def test_track_length_matches_video(tmp_path, voice_video):
     assert float(out.strip()) == pytest.approx(6.0, abs=0.1)
 
 
+def test_track_covers_video_when_audio_stream_is_short(tmp_path):
+    """Дорожка не имеет права кончиться раньше картинки.
+
+    После `concat` звуковой поток регулярно на кадр-другой короче видео, а
+    бывает и на секунды (телефон дописал видео после остановки записи). Раньше
+    длину задавал только `-t`, который умеет резать и не умеет добавлять, и
+    ролик получал тишину в хвосте — без единой ошибки в логе.
+    """
+    path = tmp_path / "short.mp4"
+    ffmpeg(
+        ["-f", "lavfi", "-i", "color=c=black:s=64x64:r=25:d=6",
+         "-f", "lavfi", "-i", f"sine=frequency={VOICE_HZ}:duration=4",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "96k", str(path)],
+        timeout=120,
+    )
+    track = build_audio(simple_edl(), path, tmp_path / "a.wav", cfg=cfg_with(tmp_path))
+    assert track is not None
+    code, out, _ = capture(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                            "-of", "csv=p=0", str(track.path)])
+    got = float(out.strip())
+    assert got >= 6.0 - 0.05, f"дорожка {got:.2f} с при видео 6.00 с"
+    # AudioTrack.duration обязан быть замером, а не пересказом просьбы
+    assert track.duration == pytest.approx(got, abs=0.05)
+
+
+def test_broken_music_file_costs_only_the_music(tmp_path, voice_video):
+    """Битый файл в assets/music не имеет права уносить с собой весь этап.
+
+    Раньше он валил filter_complex, исключение ловил job.py, и ролик уезжал в
+    рендер вообще без звукового поста: без нормализации и без эффектов.
+    """
+    cfg = cfg_with(tmp_path)
+    cfg.music_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.music_dir / "broken.mp3").write_bytes(b"\x00not an mp3\xff" * 200)
+    preset = load_preset("glass").model_copy(deep=True)
+    preset.audio.music = "broken.mp3"
+    track = build_audio(simple_edl(), voice_video, tmp_path / "a.wav", preset=preset, cfg=cfg)
+    assert track is not None and track.music is None
+    got = measure_ebur128(track.path)
+    assert got is not None and got["i"] == pytest.approx(preset.audio.target_lufs, abs=1.5)
+
+
+def test_silent_input_does_not_report_infinite_loudness(tmp_path, silent_video):
+    """`lufs_in` уезжает в отчёт джоба, а `-Infinity` — это не JSON."""
+    import json
+
+    track = build_audio(simple_edl(), silent_video, tmp_path / "a.wav", cfg=cfg_with(tmp_path))
+    assert track is not None
+    assert track.lufs_in is None or math.isfinite(track.lufs_in)
+    json.loads(json.dumps({"lufs_in": track.lufs_in}))  # без allow_nan «-inf» бы упал
+
+
+def test_sfx_land_on_the_output_timeline_not_the_source(tmp_path, silent_video):
+    """Эффект ставится по времени РЕЗУЛЬТАТА, а не исходника.
+
+    Отличить одно от другого можно только на монтаже с вырезанным куском:
+    без резов оба времени совпадают, и ошибка не видна.
+    """
+    ws = [Word(idx=i, text=f"w{i}", start=i * 0.5, end=i * 0.5 + 0.4) for i in range(12)]
+    kept = [0, 1, 2, 3, 8, 9, 10, 11]
+    edl = EDL(
+        source_duration=6.2,
+        words=ws,
+        cuts=[Cut(src_in=0.0, src_out=2.0, reason="hook", framing="wide"),
+              Cut(src_in=2.0, src_out=4.0, reason="drop_silence"),
+              Cut(src_in=4.0, src_out=6.2, reason="keep", framing="tight")],
+        captions=[CaptionBlock(words=[CaptionWord(word_idx=i) for i in kept[j:j + 4]])
+                  for j in (0, 4)],
+        broll=[Broll(word_idx=10, duration=1.5, query="cat",
+                     anim=BrollAnim.POP_IN, anchor="center")],
+    )
+    src_time = ws[10].start  # 5.0 c в исходнике
+    out_time = edl.timeline().word_window(ws[10])[0]  # 3.0 c в результате
+    assert abs(src_time - out_time) > 1.0, "тест бессмыслен, если времена совпали"
+
+    track = build_audio(edl, silent_video, tmp_path / "a.wav", cfg=cfg_with(tmp_path))
+    assert track is not None and track.sfx == 2  # whoosh на картинке + swish на укрупнении
+    hit = loudest_moment(track.path)
+    assert hit == pytest.approx(out_time, abs=0.12), (
+        f"эффект ударил на {hit:.2f} c; выходное время {out_time:.2f}, исходное {src_time:.2f}"
+    )
+
+
+def test_broken_sfx_file_costs_only_the_effect(tmp_path, silent_video):
+    """Битый файл в assets/sfx не имеет права уносить с собой весь этап.
+
+    Зеркало `test_broken_music_file_costs_only_the_music`. Сценарий не
+    выдуманный: `assets/sfx/README.md` предлагает класть файлы туда руками, а
+    `synth_sfx` пишет туда же — убитый на середине воркер оставлял в общей папке
+    обрезанный `whoosh.flac`, и КАЖДЫЙ следующий ролик терял loudnorm, музыку и
+    эффекты разом (job.py глотал исключение как «звуковой пост пропущен»).
+    """
+    cfg = cfg_with(tmp_path)
+    cfg.sfx_dir.mkdir(parents=True, exist_ok=True)
+    broken = cfg.sfx_dir / f"{SFX_WHOOSH}.flac"
+    broken.write_bytes(b"not a flac at all")
+    edl = simple_edl(broll=[Broll(word_idx=6, duration=1.5, query="cat",
+                                  anim=BrollAnim.POP_IN, anchor="center")])
+    track = build_audio(edl, silent_video, tmp_path / "a.wav", cfg=cfg)
+    assert track is not None, "битый эффект унёс весь звуковой пост"
+    # штатный эффект пересобирается поверх мусора, а не пропадает вместе с этапом
+    assert track.sfx == 1
+    hit = loudest_moment(track.path)
+    assert hit == pytest.approx(edl.words[6].start, abs=0.12)
+
+
+def test_unreadable_custom_sfx_costs_only_its_own_mark(tmp_path, silent_video):
+    """Чужой эффект пересобрать нечем — значит пропускаем метку, а не этап."""
+    cfg = cfg_with(tmp_path)
+    cfg.sfx_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.sfx_dir / "custom.wav").write_bytes(b"not a wav at all")
+    edl = simple_edl()
+    edl.sfx = [Sfx(at_word_idx=6, name="custom", gain_db=-6.0)]
+    track = build_audio(edl, silent_video, tmp_path / "a.wav", cfg=cfg)
+    assert track is not None and track.sfx == 0
+
+
+def test_synth_sfx_leaves_no_half_written_asset(tmp_path):
+    """В общую папку эффект попадает целиком или никак: временный файл + rename."""
+    from src.pipeline.audio_post import synth_sfx as synth
+
+    dst = tmp_path / "sfx" / f"{SFX_WHOOSH}.flac"
+    synth(dst, kind=SFX_WHOOSH)
+    leftovers = [p.name for p in dst.parent.iterdir() if p.name != dst.name]
+    assert leftovers == [], f"в папке эффектов остался мусор: {leftovers}"
+
+
 def test_video_without_audio_is_skipped(tmp_path):
     path = tmp_path / "mute.mp4"
     ffmpeg(["-f", "lavfi", "-i", "color=c=black:s=64x64:r=10:d=2",
@@ -286,23 +422,47 @@ def test_video_without_audio_is_skipped(tmp_path):
     assert build_audio(simple_edl(), path, tmp_path / "a.wav", cfg=cfg_with(tmp_path)) is None
 
 
-def test_music_ducks_under_voice(tmp_path, voice_video, music_file):
-    """DoD: музыка не забивает голос. Меряем её же уровень в паузе и под речью."""
+def ducking_depth(tmp_path, voice_video, music_file, *, duck_db, target_lufs=-16.0):
+    """Собрать дорожку и померить, НА СКОЛЬКО музыка присела под голосом."""
     preset = load_preset("glass").model_copy(deep=True)
     preset.audio.music = str(music_file)
     preset.audio.music_gain_db = -10.0  # громче обычного: иначе меряем шум кодека
-    preset.audio.duck_db = -12.0
+    preset.audio.duck_db = duck_db
+    preset.audio.target_lufs = target_lufs
     track = build_audio(simple_edl(), voice_video, tmp_path / "a.wav",
                         preset=preset, cfg=cfg_with(tmp_path))
-    assert track is not None and track.music == str(music_file)
-
+    assert track is not None and track.music == music_file.name
     under_voice = band_rms(track.path, MUSIC_HZ, 1.0, 1.5)
     in_pause = band_rms(track.path, MUSIC_HZ, 3.8, 1.5)
-    drop = in_pause - under_voice
-    assert 4.0 <= drop <= 25.0, (
-        f"дакинг вне разумного: под голосом {under_voice:.1f} dB, "
-        f"в паузе {in_pause:.1f} dB, разница {drop:.1f} dB"
+    return in_pause - under_voice
+
+
+@pytest.mark.parametrize("duck_db", [-6.0, -12.0, -18.0])
+def test_music_ducks_exactly_as_deep_as_the_preset_asks(
+    tmp_path, voice_video, music_file, duck_db
+):
+    """DoD: музыка приседает под голос ровно на `preset.audio.duck_db`.
+
+    Допуск здесь узкий не из вредности: на синтетике тракт попадает в
+    запрошенное с точностью до полудецибела. Прежние «4..25 дБ» приняли бы и
+    вдвое слабее, и вдвое сильнее нужного — то есть сломанный расчёт ratio.
+    """
+    drop = ducking_depth(tmp_path, voice_video, music_file, duck_db=duck_db)
+    assert abs(drop - abs(duck_db)) < 1.5, (
+        f"запрошено {abs(duck_db):.0f} дБ, получено {drop:.1f} дБ"
     )
+
+
+def test_ducking_depth_survives_a_change_of_target_loudness(
+    tmp_path, voice_video, music_file
+):
+    """`duck_db` и `target_lufs` — из одного пресета, и не спорят друг с другом.
+
+    Раньше запас над порогом сайдчейна был зашит числом (24 дБ = −16 минус −40),
+    и на пресете с целью −20 LUFS запрошенные −12 дБ давали фактические −10.
+    """
+    drop = ducking_depth(tmp_path, voice_video, music_file, duck_db=-12.0, target_lufs=-20.0)
+    assert abs(drop - 12.0) < 1.5, f"при цели −20 LUFS дакинг вышел {drop:.1f} дБ вместо 12"
 
 
 def test_music_loops_to_cover_the_whole_reel(tmp_path, silent_video, music_file):
@@ -359,6 +519,126 @@ def test_whoosh_lands_on_the_picture(tmp_path, silent_video):
     assert hit == pytest.approx(expected, abs=0.12), (
         f"whoosh ударил на {hit:.2f} c вместо {expected:.2f} c"
     )
+
+
+def edl_with_a_pause_after_the_punch_in() -> EDL:
+    """Монтаж, где рез и первое слово после него разнесены на полсекунды.
+
+    Ровно этим он и отличается от `simple_edl`: там слова стоят через 0.5 с и рез
+    всегда совпадает со стартом слова, поэтому разница между «якорь на резе» и
+    «якорь на слове» тождественно равна нулю и ошибку не видно.
+    """
+    starts = [0.0, 0.5, 1.0, 1.5, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
+    ws = [Word(idx=i, text=f"w{i}", start=s, end=s + 0.4) for i, s in enumerate(starts)]
+    return EDL(
+        source_duration=6.0,
+        words=ws,
+        cuts=[Cut(src_in=0.0, src_out=2.0, reason="hook", framing="wide"),
+              Cut(src_in=2.0, src_out=6.0, reason="keep", framing="tight")],  # ← punch-in
+        captions=[CaptionBlock(words=[CaptionWord(word_idx=i) for i in g])
+                  for g in ([0, 1, 2, 3, 4], [5, 6, 7, 8, 9])],
+    )
+
+
+def test_swish_lands_on_the_cut_not_on_the_first_word(tmp_path, silent_video):
+    """Укрупнение слышно ровно там, где оно видно.
+
+    Крупность рисует `crop.framing_spans` по накопленным длительностям кусков,
+    то есть меняется на ГРАНИЦЕ РЕЗА. Эффект, привязанный к первому слову внутри
+    куска, стабильно опаздывал на всю паузу между резом и речью.
+    """
+    edl = edl_with_a_pause_after_the_punch_in()
+    tl = edl.timeline()
+    cut_at = tl.map(2.0)  # ← сюда же смотрит framing_spans
+    word_at = tl.word_window(edl.words[4])[0]
+    assert word_at - cut_at > 0.4, "тест бессмыслен, если рез и слово совпали"
+
+    track = build_audio(edl, silent_video, tmp_path / "a.wav", cfg=cfg_with(tmp_path))
+    assert track is not None and track.sfx == 1
+    hit = loudest_moment(track.path)
+    assert hit == pytest.approx(cut_at, abs=0.05), (
+        f"swish ударил на {hit:.2f} c; рез на {cut_at:.2f}, первое слово на {word_at:.2f}"
+    )
+
+
+def test_sfx_stay_on_the_source_timeline_when_cuts_are_not_applied(tmp_path, silent_video):
+    """`cut_pauses=False`: видео скопировано, а не нарезано — звук живёт в исходном.
+
+    В этом режиме джоб отдаёт рендеру `apply_cuts=False`, картинка и субтитры
+    остаются на исходном таймлайне, и звук обязан остаться там же. Считать
+    эффекты по нарезанному таймлайну значило бы сдвинуть их все на суммарную
+    длину вырезанного.
+    """
+    ws = [Word(idx=i, text=f"w{i}", start=i * 0.5, end=i * 0.5 + 0.4) for i in range(12)]
+    kept = [0, 1, 2, 3, 8, 9, 10, 11]
+    edl = EDL(
+        source_duration=6.2,
+        words=ws,
+        cuts=[Cut(src_in=0.0, src_out=2.0, reason="hook", framing="wide"),
+              Cut(src_in=2.0, src_out=4.0, reason="drop_silence"),
+              Cut(src_in=4.0, src_out=6.2, reason="keep", framing="tight")],
+        captions=[CaptionBlock(words=[CaptionWord(word_idx=i) for i in kept[j:j + 4]])
+                  for j in (0, 4)],
+        broll=[Broll(word_idx=10, duration=1.5, query="cat",
+                     anim=BrollAnim.POP_IN, anchor="center")],
+    )
+    track = build_audio(edl, silent_video, tmp_path / "a.wav",
+                        apply_cuts=False, cfg=cfg_with(tmp_path))
+    assert track is not None
+    # резов в картинке нет — подчёркивать нечего, остаётся одна картинка
+    assert track.sfx == 1 and [s.name for s in edl.sfx] == [SFX_WHOOSH]
+    hit = loudest_moment(track.path)
+    assert hit == pytest.approx(ws[10].start, abs=0.12), (
+        f"эффект ударил на {hit:.2f} c вместо исходных {ws[10].start:.2f}"
+    )
+
+
+def test_whoosh_on_the_very_first_word_still_lands_on_the_picture(tmp_path, silent_video):
+    """Картинка на первом слове — штатный хук, а не редкость.
+
+    Эффект стартует раньше события на свой пик; у нулевого события старт
+    упирается в ноль, и без подрезки головы удар уезжал ВПЕРЁД на весь `peak_at`
+    — то есть звучал уже после картинки.
+    """
+    edl = simple_edl(broll=[Broll(word_idx=0, duration=1.5, query="cat",
+                                  anim=BrollAnim.POP_IN, anchor="center")])
+    track = build_audio(edl, silent_video, tmp_path / "a.wav", cfg=cfg_with(tmp_path))
+    assert track is not None and track.sfx == 1
+    hit = loudest_moment(track.path)
+    assert hit == pytest.approx(0.0, abs=0.12), (
+        f"whoosh ударил на {hit:.2f} c, а картинка входит на 0.00 "
+        f"(пик профиля {SFX_PROFILES[SFX_WHOOSH].peak_at:.2f} с)"
+    )
+
+
+def test_unresolved_music_leaves_no_trace_in_the_edl(tmp_path, voice_video):
+    """Два артефакта одного джоба не имеют права противоречить друг другу.
+
+    Отчёт джоба пишет `music=None`, а `edl.json` утверждал, что ролик сведён с
+    подложкой, — потому что незарезолвленный трек оставался в EDL.
+    """
+    cfg = cfg_with(tmp_path)
+    cfg.music_dir.mkdir(parents=True, exist_ok=True)
+    edl = simple_edl()
+    edl.music = Music(track="ghost.mp3")
+    track = build_audio(edl, voice_video, tmp_path / "a.wav", cfg=cfg)
+    assert track is not None and track.music is None
+    assert edl.music is None
+
+
+def test_music_reaches_the_edl_as_an_asset_name(tmp_path, voice_video, music_file):
+    """`EDL.music.track` — имя файла в assets/music, а не путь этой машины.
+
+    Абсолютный путь в `edl.json` — машинно-локальный артефакт: тот же EDL на
+    другой машине молча остался бы без музыки, а путь ещё и утекал в отчёт.
+    """
+    preset = load_preset("glass").model_copy(deep=True)
+    preset.audio.music = str(music_file)  # абсолютный путь в пресете — так можно
+    edl = simple_edl()
+    track = build_audio(edl, voice_video, tmp_path / "a.wav",
+                        preset=preset, cfg=cfg_with(tmp_path))
+    assert track is not None and track.music == music_file.name
+    assert edl.music is not None and edl.music.track == music_file.name
 
 
 def test_sfx_land_in_the_edl(tmp_path, voice_video):
