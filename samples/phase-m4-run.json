@@ -1,0 +1,32 @@
+{
+ "output": "/home/arslan/tgbot-video/samples/phase-m4.mp4",
+ "source_duration": 20.067,
+ "out_duration": 18.47,
+ "words": 37,
+ "blocks": 12,
+ "cuts_dropped": 4,
+ "broll": 0,
+ "edl_from_llm": false,
+ "transcript_fixes": 0,
+ "audio": {
+  "music": null,
+  "sfx": 1,
+  "lufs_in": -14.11,
+  "target_lufs": -16.0
+ },
+ "metadata": null,
+ "timings": {
+  "probe": 0.08,
+  "cut": 7.01,
+  "audio": 1.03,
+  "crop": 16.34,
+  "luma": 1.74,
+  "render": 118.37
+ },
+ "llm": {},
+ "wall_seconds": 144.57,
+ "source": {
+  "path": "/home/arslan/tgbot-video/samples/phase-0-source.mp4",
+  "sha256": "aa2198eda9e428e0366bf8e0b73863fcd8b55b13c58c2bae22bf0dc4afbe159c"
+ }
+}

@@ -228,6 +228,7 @@ def test_smoothing_is_a_pure_function_of_the_input():
 
 
 def test_track_lookup_is_by_frame_number():
-    t = FaceTrack(fps=30, points=[TrackPoint(f=i, cx=0.5, cy=0.5, h=0.2, conf=1.0) for i in range(5)])
+    points = [TrackPoint(f=i, cx=0.5, cy=0.5, h=0.2, conf=1.0) for i in range(5)]
+    t = FaceTrack(fps=30, points=points)
     assert t.at(3) is not None and t.at(3).f == 3
     assert t.at(99) is None

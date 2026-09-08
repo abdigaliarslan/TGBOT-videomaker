@@ -22,8 +22,7 @@ from src.pipeline.broll import (
     REST_SECONDS,
     TRAVEL_MS,
     VIDEO_MARGIN_S,
-    VIDEO_MAX_HEIGHT,
-    VIDEO_MIN_HEIGHT,
+    VIDEO_MAX_OVERSIZE,
     asset_aspect,
     cache_key,
     fetch_asset,
@@ -45,20 +44,25 @@ def photo(**srcs) -> dict:
     return {"photos": [{"src": srcs}]}
 
 
-def video(duration: float = 10.0, heights: tuple[int, ...] = (1080,)) -> dict:
-    """Ответ Pexels на /videos/search с одним клипом и заданными нарезками."""
+def video(duration: float = 10.0, widths: tuple[int, ...] = (1080,)) -> dict:
+    """Ответ Pexels на /videos/search с одним клипом и заданными нарезками.
+
+    Нарезка описывается ШИРИНОЙ: отбор идёт по ней, и подставлять сюда высоту
+    значило бы проверять не то, что решает код (см.
+    `test_video_rendition_is_the_smallest_that_covers_the_frame`).
+    """
     return {
         "videos": [
             {
                 "duration": duration,
                 "video_files": [
                     {
-                        "link": f"https://vid/{h}.mp4",
+                        "link": f"https://vid/{w}.mp4",
                         "file_type": "video/mp4",
-                        "width": int(h * 9 / 16),
-                        "height": h,
+                        "width": w,
+                        "height": int(w * 16 / 9),
                     }
-                    for h in heights
+                    for w in widths
                 ],
             }
         ]
@@ -326,22 +330,38 @@ def broll_item(duration: float = 1.5) -> Broll:
     )
 
 
-def test_video_rendition_is_the_smallest_that_is_not_mush():
+# Нарезки, которые Pexels реально отдаёт на вертикальный клип (снято с живого ключа).
+PEXELS_LADDER = [
+    {"link": f"u{w}", "file_type": "video/mp4", "width": w, "height": h}
+    for w, h in ((360, 640), (540, 960), (720, 1280), (1080, 1920), (1440, 2560), (2160, 3840))
+]
+
+
+def test_video_rendition_is_the_smallest_that_covers_the_frame():
+    """Отбор по ШИРИНЕ, а не по высоте — иначе в кадр едет двукратный апскейл.
+
+    Первая версия фильтровала «высота не ниже 720», и на ЖИВОМ стоке выбрала
+    540x960: высота в коридор попала, а ширина 540 в кадре 1080 — мыло. По
+    высоте вертикальные нарезки не различить без пропорции, поэтому здесь
+    настоящая лестница Pexels, а не выдуманные числа.
+    """
+    picked = pick_video_file(PEXELS_LADDER, frame_width=1080)
+    assert picked is not None and picked["width"] == 1080
+
+
+def test_oversized_rendition_is_not_taken():
     """4K поверх основного видео декодируется на каждом кадре, а видно то же самое."""
-    files = [
-        {"link": "a", "file_type": "video/mp4", "height": 360},
-        {"link": "b", "file_type": "video/mp4", "height": 720},
-        {"link": "c", "file_type": "video/mp4", "height": 1080},
-        {"link": "d", "file_type": "video/mp4", "height": 2160},
-    ]
-    picked = pick_video_file(files)
-    assert picked is not None and picked["height"] == VIDEO_MIN_HEIGHT
-    assert VIDEO_MIN_HEIGHT <= picked["height"] <= VIDEO_MAX_HEIGHT
+    huge = [f for f in PEXELS_LADDER if f["width"] > 1080 * VIDEO_MAX_OVERSIZE]
+    assert huge, "лестница должна содержать нарезку крупнее потолка"
+    assert pick_video_file(huge, frame_width=1080) is None
 
 
-def test_video_without_a_usable_rendition_is_skipped():
-    assert pick_video_file([{"link": "a", "file_type": "video/mp4", "height": 360}]) is None
-    assert pick_video_file([{"link": "a", "file_type": "image/gif", "height": 1080}]) is None
+def test_video_that_cannot_cover_the_frame_is_skipped():
+    """Растянутый вдвое клип хуже резкой фотографии, даже если он «монтажнее»."""
+    small = [f for f in PEXELS_LADDER if f["width"] < 1080]
+    assert pick_video_file(small, frame_width=1080) is None
+    gif = [{"link": "a", "file_type": "image/gif", "width": 1080}]
+    assert pick_video_file(gif, frame_width=1080) is None
 
 
 def test_clip_is_entered_from_the_middle():

@@ -377,11 +377,12 @@ async def fetch_pexels(client: httpx.AsyncClient, query: str, api_key: str) -> b
 # НЕ делается и почему, написано у `fetch_pexels_video`.
 PEXELS_VIDEO_URL = "https://api.pexels.com/videos/search"
 
-# Нижняя граница высоты нарезки. Кадр рендерится в 1080x1920, и клип ниже 720
-# после вписывания в него — мыло; выше 1080 брать незачем, декодировать дороже,
-# а видно то же самое.
-VIDEO_MIN_HEIGHT = 720
-VIDEO_MAX_HEIGHT = 1080
+# Во сколько раз нарезка может быть шире кадра. 1.5, а не 2.0, и это ровно та
+# граница, что отсекает 4K: лестница Pexels идёт 1080 / 1440 / 2160, и при
+# потолке 2.0 нарезка 2160 в кадр 1080 проходила (2160 <= 2160). Она
+# декодируется поверх основного видео на каждом кадре рендера, а видно от неё
+# ровно то же, что от 1440.
+VIDEO_MAX_OVERSIZE = 1.5
 # Клип обязан быть ДЛИННЕЕ вставки с запасом: ролик, обрезанный ровно в свой
 # конец, на последнем кадре показывает чёрное — файл кончился раньше, чем
 # композиция. Полсекунды хватает и на округление кадров, и на неточность
@@ -392,22 +393,32 @@ VIDEO_MARGIN_S = 0.5
 VIDEO_MAX_BYTES = 32 * 1024 * 1024
 
 
-def pick_video_file(files: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Из нарезок Pexels — самая маленькая, которая ещё не мыло.
+def pick_video_file(files: list[dict[str, Any]], *, frame_width: int) -> dict[str, Any] | None:
+    """Из нарезок Pexels — самая маленькая, которая ещё покрывает кадр по ШИРИНЕ.
 
-    Не самая большая: 4K-исходник декодируется поверх основного видео на каждом
-    кадре рендера, а в кадре 1080 шириной от него не остаётся ничего.
+    Именно по ширине, и это не придирка. Первая версия фильтровала по высоте
+    («не ниже 720»), и на живом стоке она выбрала 540x960: высота 960 в коридор
+    попадала, а ширина 540 — это двукратный апскейл в кадр 1080, то есть мыло.
+    Вертикальные нарезки Pexels идут 360x640 / 540x960 / 720x1280 / 1080x1920 /
+    1440x2560 / 2160x3840, и по высоте эти пары не различить без пропорции.
+
+    Не самая большая: 4K декодируется поверх основного видео на каждом кадре
+    рендера, а в кадре 1080 шириной от него не остаётся ничего.
+
+    Ничего не покрывает кадр — возвращаем None и уходим на фото. Растянутый
+    вдвое клип хуже резкой фотографии, даже если он и «монтажнее».
     """
+    ceiling = frame_width * VIDEO_MAX_OVERSIZE
     ok = [
         f
         for f in files
         if f.get("link")
         and str(f.get("file_type") or "").endswith("mp4")
-        and VIDEO_MIN_HEIGHT <= int(f.get("height") or 0) <= VIDEO_MAX_HEIGHT
+        and frame_width <= int(f.get("width") or 0) <= ceiling
     ]
     if not ok:
         return None
-    return min(ok, key=lambda f: int(f["height"]))
+    return min(ok, key=lambda f: int(f["width"]))
 
 
 def video_start(duration: float, need: float) -> float:
@@ -421,7 +432,12 @@ def video_start(duration: float, need: float) -> float:
 
 
 async def fetch_pexels_video(
-    client: httpx.AsyncClient, query: str, api_key: str, need: float
+    client: httpx.AsyncClient,
+    query: str,
+    api_key: str,
+    need: float,
+    *,
+    frame_width: int,
 ) -> tuple[bytes, dict[str, Any]] | None:
     """Сток, видео. `need` — сколько секунд вставка реально займёт в ролике.
 
@@ -450,11 +466,16 @@ async def fetch_pexels_video(
         log.warning("Pexels не отдал видео по %r: %s", query, e)
         return None
 
-    for v in videos:
+    # Из подходящих берём САМЫЙ КОРОТКИЙ. Сток отдаёт файл целиком, обрезать его
+    # по дороге нечем, а из клипа берётся две секунды: тринадцатисекундный 1080p
+    # это 23.7 МБ на живом ключе против плановых «3-8». Порядок выдачи Pexels при
+    # равной длительности сохраняется — сортировка устойчивая, релевантность не
+    # ломается.
+    for v in sorted(videos, key=lambda v: float(v.get("duration") or 0)):
         duration = float(v.get("duration") or 0)
         if duration < need + VIDEO_MARGIN_S:
             continue
-        picked = pick_video_file(v.get("video_files") or [])
+        picked = pick_video_file(v.get("video_files") or [], frame_width=frame_width)
         if picked is None:
             continue
         try:
@@ -581,7 +602,10 @@ async def fetch_asset(
         if hit is not None:
             log.debug("b-roll видео из кеша: %s", item.query)
             return hit
-        got = await fetch_pexels_video(client, item.query, cfg.pexels_api_key, item.duration)
+        got = await fetch_pexels_video(
+            client, item.query, cfg.pexels_api_key, item.duration,
+            frame_width=cfg.render_width,
+        )
         if got is not None:
             data, meta = got
             start = round(float(meta["start"]), 2)
@@ -689,9 +713,23 @@ if __name__ == "__main__":  # проверка добычи одной карт�
 
     async def _main() -> None:
         query = sys.argv[1] if len(sys.argv) > 1 else "vintage film camera on a desk"
-        item = Broll(word_idx=0, duration=1.5, query=query, anim=BrollAnim.POP_IN, anchor="top_right")
+        item = Broll(
+            word_idx=0, duration=1.5, query=query, anim=BrollAnim.POP_IN, anchor="top_right"
+        )
+        cache = Path(default_settings.work_dir) / "broll-cache"
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            path = await fetch_asset(client, item, Path(default_settings.work_dir) / "broll-cache", default_settings)
-        print(json.dumps({"query": query, "asset": str(path) if path else None}, ensure_ascii=False))
+            got = await fetch_asset(client, item, cache, default_settings)
+        print(
+            json.dumps(
+                {
+                    "query": query,
+                    "kind": got.kind if got else None,
+                    "asset": str(got.path) if got else None,
+                    "start": got.start if got else None,
+                    "aspect": asset_aspect(got.path) if got else None,
+                },
+                ensure_ascii=False,
+            )
+        )
 
     asyncio.run(_main())
