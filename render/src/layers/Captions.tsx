@@ -28,7 +28,16 @@
 import React from "react";
 import { interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
 import type { PlanBlock, PlanWord, Preset } from "../types";
-import { animFrames, easeOut, motionPx, popBump, rgba, springFrames } from "../style";
+import {
+  MIN_ANIM_FRAMES,
+  animFrames,
+  animNum,
+  easeOut,
+  motionPx,
+  popBump,
+  rgba,
+  springFrames,
+} from "../style";
 
 type WordState = "ghost" | "active" | "past";
 
@@ -39,15 +48,27 @@ const stateOf = (word: PlanWord, frame: number, fps: number): WordState => {
 };
 
 /**
- * Нижняя граница нахлёста блоков: уходящий блок обязан быть ещё виден, когда
- * пришёл новый, иначе между репликами моргает пустой кадр. Пресеты просят
- * 100-140 мс — этого мало на любом fps, поэтому берём максимум с 220 мс.
+ * Хвост блока в кадрах: столько он живёт после своего конца. Считается в одном
+ * месте — им живут и Block, и фильтр видимости.
+ *
+ * Нижняя граница нахлёста приезжает из пресета (`block_overlap_min_ms`): блок
+ * обязан быть ещё виден, когда пришёл новый, иначе между репликами моргает
+ * пустой кадр, а 100-140 мс пресетов на это не хватает ни на одном fps.
+ *
+ * Известная цена: `animFrames` держит пол в восемь кадров, и на 24 fps хвост
+ * выходит 333 мс вместо заказанных планом 200-250 мс (на 30 fps — 267 мс, на
+ * 60 — 217 мс). Два закона здесь спорят, и спор решается в пользу восьми
+ * кадров: полоса в миллисекундах — это про то, что уходящий блок ещё виден, а
+ * восемь кадров — про то, что его уход вообще читается как движение, а не как
+ * мигание. Сама альфа при этом падает быстрее окна: к середине хвоста она уже
+ * 0.06, так что ЧИТАЕМЫЙ нахлёст держится в полосе, а за неё выходит только
+ * формальное окно.
  */
-const MIN_OVERLAP_MS = 220;
-
-/** Хвост блока в кадрах. Считается в одном месте: им живут и Block, и фильтр. */
 const blockOutFrames = (preset: Preset, fps: number): number =>
-  animFrames(Math.max(preset.animation.block_out_ms, MIN_OVERLAP_MS), fps);
+  animFrames(
+    Math.max(preset.animation.block_out_ms, animNum(preset.animation, "block_overlap_min_ms", 220)),
+    fps,
+  );
 
 const emphasisScale = (word: PlanWord, preset: Preset): number => {
   if (word.emphasis === "accent") return preset.animation.accent_scale;
@@ -272,27 +293,32 @@ const Word: React.FC<{ word: PlanWord; preset: Preset; neutral: string }> = ({
   const bump = state === "ghost" ? 0 : popBump(framesSinceStart / animFrames(a.pop_ms, fps));
   const scale = 1 + (a.pop_scale - 1) * bump;
 
+  // Угол умножается на пружину НАПРЯМУЮ, без `interpolate`. Раньше её значение
+  // проходило через `interpolate(..., { extrapolateRight: "clamp" })`, и весь
+  // перелёт выбрасывался: пружина выходит на 1.0 к четвёртому кадру и дальше
+  // 5-19 кадров стоит полкой на своём максимуме (замер: glass 24 fps — пик
+  // 1.143, пять кадров зажаты; bold 60 fps — пик 1.224, двадцать два кадра).
+  // То есть длительность привели к натуральной, а упругость, ради которой это
+  // делали, срезали клампом — и видимого движения оставалось 3-4 кадра при
+  // законе в восемь (AUDIT §8.3). Теперь угол проскакивает цель на 14-22 % и
+  // возвращается, как соседний Broll.tsx, который клампа на выходе не ставит.
   const rotate =
     word.emphasis === "shout" && state !== "ghost"
-      ? interpolate(
-          spring({
-            frame: Math.max(0, framesSinceStart),
-            fps,
-            durationInFrames: springFrames(fps, {
-              damping: a.spring_damping,
-              stiffness: a.spring_stiffness,
-              mass: a.spring_mass,
-            }),
-            config: {
-              damping: a.spring_damping,
-              stiffness: a.spring_stiffness,
-              mass: a.spring_mass,
-            },
+      ? a.shout_rotate *
+        spring({
+          frame: Math.max(0, framesSinceStart),
+          fps,
+          durationInFrames: springFrames(fps, {
+            damping: a.spring_damping,
+            stiffness: a.spring_stiffness,
+            mass: a.spring_mass,
           }),
-          [0, 1],
-          [0, a.shout_rotate],
-          { extrapolateRight: "clamp" },
-        )
+          config: {
+            damping: a.spring_damping,
+            stiffness: a.spring_stiffness,
+            mass: a.spring_mass,
+          },
+        })
       : 0;
 
   // Акцент и крик держат свой цвет при любом фоне: это опознавательный знак
@@ -339,13 +365,24 @@ const Word: React.FC<{ word: PlanWord; preset: Preset; neutral: string }> = ({
 
 const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, width, durationInFrames } = useVideoConfig();
   const a = preset.animation;
 
   const startFrame = Math.round(block.start * fps);
   const endFrame = Math.round(block.end * fps);
   const inFrames = animFrames(a.block_in_ms, fps);
-  const outFrames = blockOutFrames(preset, fps);
+  // Хвост обязан уложиться В КОМПОЗИЦИЮ. Её длину задаёт `plan.duration`, и она
+  // ничего не знает про хвост: длины хвоста нет ни в EDL, ни в плане, её решает
+  // рендерер. У последнего блока эталонного ролика end приходится на кадр 441
+  // при 443 кадрах композиции — из восьми кадров ухода рисуется ОДИН, и ролик
+  // обрывается на альфе 0.58 жёстким срезом. Поэтому: места хватает — уходим
+  // как обычно; места меньше восьми кадров — не уходим ВОВСЕ и честно стоим до
+  // конца композиции. Огрызок анимации хуже её отсутствия — так же решает
+  // Broll.tsx при `travel < MIN_ANIM_FRAMES`, и так же велит DoD Ф8: ни одна
+  // анимация не короче восьми кадров. Настоящее лекарство — продлить
+  // композицию на хвост последнего блока, но это `render_plan.py`.
+  const room = durationInFrames - 1 - endFrame;
+  const outFrames = room >= MIN_ANIM_FRAMES ? Math.min(blockOutFrames(preset, fps), room) : 0;
 
   // Блок появляется от своего начала и уходит ПОСЛЕ своего конца. Раньше он
   // гас за block_out_ms до конца, то есть таял прямо на последнем слове, а
@@ -353,25 +390,69 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
   // дыра. Теперь уходящий блок ещё виден, когда приходит новый: нахлёст равен
   // outFrames. Обе кривые одной природы — тормозят к своему конечному
   // состоянию, поэтому выход не линейный и не щёлкает.
+  //
+  // Цена нахлёста: блоки идут ВСТЫК и стоят в одном месте кадра, поэтому всё
+  // время нахлёста два текста лежат друг на друге. Чистая перекрёстная
+  // прозрачность это не лечит: сумма альф обязана держаться около единицы
+  // (иначе кадр моргает), значит в точке пересечения обе кривые не ниже 0.4 —
+  // и оба текста читаются. Замерено глазом на кадре 228 эталонного прогона:
+  // «когда есть / несколько» поверх «других целей», две плашки разной ширины с
+  // двойным краем. Поэтому уходящий блок не просто гаснет, а УХОДИТ: смещается
+  // от места приходящего и уменьшается, а его альфа падает быстрее.
+  //
+  // Показатель падения берётся ОТ ОТНОШЕНИЯ хвоста ко входу, а не как есть.
+  // Голое число подобрано под частный случай inFrames == outFrames (24 и
+  // 30 fps): точка пересечения кривых опускается с 0.500 до 0.448. Но хвост и
+  // вход округляются до кадров по-разному, и на 60 fps выходит 11 против 13 —
+  // уходящий блок держится дольше приходящего, пересечение уползает обратно к
+  // 0.480, а у пресета без нижней границы входа (bold: 8 против 13) — к 0.541,
+  // то есть правило почти перестаёт работать ровно там, где кадров больше
+  // всего. Домножение на outFrames/inFrames делает точку пересечения
+  // инвариантной к fps и к пресету: 0.448 / 0.451 / 0.455 на тех же трёх парах.
   const appear = easeOut(
     interpolate(frame, [startFrame, startFrame + inFrames], [0, 1], {
       extrapolateLeft: "clamp",
       extrapolateRight: "clamp",
     }),
   );
+  const falloff = animNum(a, "block_leave_falloff", 1.35) * (outFrames / inFrames);
   const disappear =
-    1 -
-    easeOut(
-      interpolate(frame, [endFrame, endFrame + outFrames], [0, 1], {
-        extrapolateLeft: "clamp",
-        extrapolateRight: "clamp",
-      }),
-    );
+    outFrames === 0
+      ? 1
+      : Math.pow(
+          1 -
+            easeOut(
+              interpolate(frame, [endFrame, endFrame + outFrames], [0, 1], {
+                extrapolateLeft: "clamp",
+                extrapolateRight: "clamp",
+              }),
+            ),
+          falloff,
+        );
   const presence = Math.min(appear, disappear);
   if (presence <= 0) return null;
 
   const p = preset.panel;
   const shift = motionPx(a, "block_shift_px", Math.round(preset.font.size * 0.28));
+  // Уходим ОТ приходящего блока: он встаёт на то же место, поэтому вниз для
+  // нижних и центральных, вверх для верхних — то есть к своему краю кадра.
+  //
+  // Ход — не меньше СОБСТВЕННОЙ высоты блока. Числом из пресета эту задачу не
+  // решить: 64 px при межстрочном шаге 127 px и высоте двухстрочного блока
+  // 254 px уводят уходящий текст на пол-строки, и его глифы всё равно ложатся
+  // на приходящую строку (кадр 228 эталонного прогона: «целей» перечёркнуто
+  // буквами «несколько»). Высота приезжает в плане прямоугольником, считана по
+  // тем же метрикам шрифта и не зависит ни от кегля, ни от числа строк —
+  // поэтому она и есть гарантия, что блоки разошлись. Пресетное число остаётся
+  // нижней границей: оно работает там, где прямоугольника нет.
+  const leave = Math.max(
+    motionPx(a, "block_leave_px", Math.round(preset.font.size * 0.73)),
+    block.rect ? block.rect.height : 0,
+  );
+  const leaveDir = block.position === "top" ? -1 : 1;
+  const offsetY = (1 - appear) * shift + (1 - disappear) * leave * leaveDir;
+  const leaveScale = animNum(a, "block_leave_scale", 0.9);
+  const zoom = (0.965 + appear * 0.035) * (leaveScale + (1 - leaveScale) * disappear);
   const look = lookFor(preset, (block as PlanBlock & { bg_luma?: number | null }).bg_luma);
   // Прямоугольник блока посчитан в Python по этим же метрикам: строка в бюджет
   // уложена, и ограничивать ширину здесь незачем. План без прямоугольника
@@ -381,7 +462,16 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
   // и текст спокойно вылезает за зажатую панель (замерено: панель 842 px,
   // строка внутри 1186 px). Поэтому на этом пути переносит браузер — см.
   // `whiteSpace` ниже.
-  const maxWidth = block.rect ? undefined : "88%";
+  //
+  // Бюджет тот же, которым меряет основной путь: `geometry.max_line_width_ratio`
+  // от ширины кадра плюс хром панели (`geometry.caption_text_width` вычитает его
+  // из бюджета ТЕКСТА, а здесь ограничивается контейнер вместе с паддингами).
+  // Раньше здесь стояли 88 % — константа раскладки мимо пресета, из-за которой
+  // запасной путь переносил строку по одному бюджету, а Python по другому.
+  const chrome = p.enabled ? 2 * (p.padding_x + p.border_width) : 0;
+  const maxWidth = block.rect
+    ? undefined
+    : Math.round(width * preset.geometry.max_line_width_ratio) + chrome;
 
   return (
     <div
@@ -402,7 +492,7 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
             ? `${p.border_width}px solid ${rgba(p.border_color, p.border_opacity)}`
             : undefined,
         opacity: presence,
-        transform: `translateY(${(1 - presence) * shift}px) scale(${0.965 + presence * 0.035})`,
+        transform: `translateY(${offsetY}px) scale(${zoom})`,
         maxWidth,
         willChange: "transform, opacity",
       }}
@@ -456,9 +546,12 @@ export const Captions: React.FC<{ blocks: PlanBlock[]; preset: Preset }> = ({ bl
   return (
     <>
       {/* Порядок сохраняем: во время нахлёста уходящий блок лежит под приходящим. */}
-      {visible.map((block, i) => (
+      {visible.map((block) => (
         <div
-          key={`${block.start}-${i}`}
+          // Ключ — начало блока, а не его номер в ОТФИЛЬТРОВАННОМ списке: номер
+          // сдвигается, как только уходящий блок выпадает из фильтра, и React
+          // пересоздаёт узел приходящего прямо посреди его появления.
+          key={block.start}
           style={{
             position: "absolute",
             inset: 0,

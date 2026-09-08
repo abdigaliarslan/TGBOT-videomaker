@@ -7,7 +7,7 @@ import re
 import pytest
 
 from src.core.edl import EDL, CaptionBlock, CaptionWord, Cut, Emphasis, Word
-from src.core.preset import load_preset, to_ass_alpha, to_ass_colour
+from src.core.preset import Preset, load_preset, to_ass_alpha, to_ass_colour
 from src.core.render_plan import build_plan, wrap_words, PlanWord
 from src.pipeline.subs_ass import ass_time, build_ass, escape
 
@@ -125,6 +125,118 @@ def test_shout_word_gets_rotation_and_shout_colour():
 def test_pop_animation_present_on_active_word():
     ass = build_ass(plan())
     assert "\\t(0," in ass
+
+
+# ------------------------------------------------------------------ тайминг (Ф8)
+
+
+def dialogues(p) -> list[str]:
+    return [line for line in build_ass(p).splitlines() if line.startswith("Dialogue:")]
+
+
+@pytest.mark.parametrize("fps", [24, 30, 60])
+def test_pop_lasts_at_least_eight_frames(fps):
+    """Пол в восемь кадров — закон обоих рендереров, а не только Remotion.
+
+    Пресеты просят 130-160 мс: на 24 fps это 3.1 кадра, то есть переход
+    вырождается в пару ступенек. `MIN_ANIM_FRAMES` в style.ts это ловит, а ASS
+    брал `pop_ms` из пресета как есть.
+    """
+    p = build_plan(edl_with_accent(), "in.mp4", fps=fps, width=1080, height=1920)
+    # Пол меряет ВСЮ анимацию, а не её фазу: у «пшика» их две (\t на подъём и
+    # \t на возврат), и закон про их сумму — то есть про конец последней.
+    totals = [
+        max(int(m.group(2)) for m in re.finditer(r"\\t\((\d+),(\d+),", line))
+        for line in dialogues(p)
+    ]
+    assert totals, "в репликах нет ни одного \\t"
+    assert min(totals) / 1000 * fps >= 8 - 1e-6
+
+
+@pytest.mark.parametrize("fps", [24, 30, 60])
+def test_pop_starts_at_the_word_size_and_returns_to_it(fps):
+    """«Пшик» транзиентный: свой кегль → пик → свой кегль.
+
+    Раньше слово ПОЯВЛЯЛОСЬ уже увеличенным и только съезжало вниз — то есть
+    скачок на первом же кадре, ровно то, что Ф8 убирала в TSX.
+    """
+    p = build_plan(edl_with_accent(), "in.mp4", fps=fps, width=1080, height=1920)
+    line = dialogues(p)[0]
+    m = re.search(
+        r"\\fscx(\d+)\\fscy\1\\t\(0,\d+,\\fscx(\d+)\\fscy\2\)\\t\(\d+,\d+,\\fscx(\d+)", line
+    )
+    assert m, line
+    base, peak, back = (int(m.group(i)) for i in (1, 2, 3))
+    assert peak > base
+    assert back == base
+
+
+def test_accent_word_keeps_one_size_in_every_state():
+    """libass меряет `\\fscx` при раскладке: разный кегль по состояниям двигает строку.
+
+    Выделение жило только в `active`, а в `past` и `ghost` слово возвращалось к
+    100 %, поэтому вся строка меняла ширину и прыгала по горизонтали каждый раз,
+    когда акцентное слово меняло состояние. Инвариант «контейнер не прыгает»
+    (Ф1) обязан держаться в обоих рендерерах.
+    """
+    lines = dialogues(plan())
+    # «важно» — акцент в первом блоке: ghost в первой реплике, active в третьей.
+    sizes = set()
+    for line in lines[:3]:
+        chunk = line.split("важно")[0].split("{")[-1]
+        m = re.search(r"\\fscx(\d+)", chunk)
+        assert m, chunk
+        sizes.add(int(m.group(1)))
+    assert len(sizes) == 1, f"акцентное слово меняет кегль по состояниям: {sizes}"
+    assert sizes.pop() == round(load_preset("glass").animation.accent_scale * 100)
+
+
+def test_ass_uses_the_size_python_measured_not_the_emphasis():
+    """Ужатое длинное слово известно только Python — ASS обязан взять его кегль.
+
+    Кегль это и есть раскладка: `wrap_block` мерил строку именно им. Вывести его
+    из выделения нельзя — про ужатие выделение ничего не знает.
+    """
+    p = plan()
+    word = p.blocks[0].lines[0][0]
+    word.size = 40.0
+    expected = round(word.size / Preset(**p.preset).font.size * 100)
+    line = dialogues(p)[0]
+    chunk = line.split(word.text)[0].split("{")[-1]
+    assert f"\\fscx{expected}" in chunk, chunk
+    assert expected < 100
+
+
+# ------------------------------------------------------------------ пресет под кадр
+
+
+@pytest.mark.parametrize("height", [1280, 960, 3840])
+def test_smaller_frame_wraps_the_same_lines(height):
+    """Превью другого размера обязано показывать ТУ ЖЕ композицию, что финал.
+
+    Кегль — целое число, а бюджет строки считается от ширины кадра в float,
+    поэтому округление кегля к ближайшему делало текст относительно бюджета
+    крупнее (88 → 59 при k = 0.667 — это +0.57 %), и строка, влезавшая на 1080p
+    с запасом в доли процента, на превью 720p переносилась. Проверяется на
+    реальном ролике, а не на синтетике: запас в доли процента бывает только у
+    настоящих строк.
+    """
+    edl = EDL(**{k: v for k, v in _baseline().items() if k != "camera"})
+    ref = build_plan(edl, "in.mp4", fps=24, width=1080, height=1920)
+    small = build_plan(edl, "in.mp4", fps=24, width=round(height * 1080 / 1920), height=height)
+    for a, b in zip(ref.blocks, small.blocks):
+        assert [[w.text for w in line] for line in a.lines] == [
+            [w.text for w in line] for line in b.lines
+        ]
+
+
+def _baseline() -> dict:
+    """Эталонный EDL из репозитория. Путь от файла теста, а не от рабочей папки."""
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "samples" / "edl-baseline.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 # ------------------------------------------------------------------ мягкая тень

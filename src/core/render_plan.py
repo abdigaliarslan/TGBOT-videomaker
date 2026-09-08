@@ -28,15 +28,18 @@ from src.core.edl import EDL, Emphasis, Timeline
 from src.core.geometry import (
     FontMetrics,
     Rect,
+    block_rect,
     blocks_caption,
     broll_rect,
+    caption_positions,
     caption_text_width,
     emphasis_size,
+    line_box_height,
     line_gap,
     measure_word,
     metrics_for,
     resting_anchor,
-    safe_margin_y,
+    space_width,
 )
 from src.core.preset import Preset, load_preset
 from src.core.text import display_text
@@ -220,23 +223,6 @@ def wrap_words(words: list[PlanWord], max_chars: int, max_lines: int = 3) -> lis
 FALLBACK_CHAR_EM = 0.654
 FALLBACK_CHAR_EM_UPPER = 0.761
 
-# Ширина эмодзи в em. Цветной глиф рисует не наш TTF, а системный Noto Color
-# Emoji, и метрик у него в пресете нет: `geometry.FALLBACK_ADVANCE_EM` берёт для
-# него 1.0 em и занижает строку на 21.8 px при кегле 88 (0.2478 em). Число
-# измерено линейкой `render/measure.mjs` в том же Chromium, которым идёт рендер:
-# девять разных эмодзи, включая составные из двух и трёх кодовых точек (❤️, 1️⃣),
-# дали одну и ту же ширину, а letter-spacing Chromium добавляет к кластеру один
-# раз, а не на каждую кодовую точку, — поэтому эмодзи считается целиком, а не по
-# символам.
-#
-# Число зависит от ХОСТА: цветной шрифт ставит система, а не пресет. Другой
-# эмодзи-шрифт — другая ширина, до 110 px на глиф при кегле 88 (13 % бюджета
-# строки), и никакой метрикой мы это не поймаем. Пока рендер идёт на своей
-# машине, это допущение; при переезде в образ эмодзи-шрифт надо закреплять там
-# же, где и Montserrat.
-EMOJI_ADVANCE_EM = 1.2478
-
-
 def fallback_line_chars(preset: Preset, frame_width: int) -> int:
     """Сколько символов класть в строку, когда мерить нечем.
 
@@ -266,29 +252,28 @@ class _Ruler:
     budget: float
 
     def word(self, word: PlanWord, size: float) -> float:
-        """Ширина слова вместе с эмодзи: он лежит внутри спана слова и его кеглем."""
+        """Ширина слова вместе с эмодзи.
 
-        def part(text: str) -> float:
-            return measure_word(
-                text,
-                size,
-                metrics=self.metrics,
-                letter_spacing=self.letter_spacing,
-                # Спейсинг объявлен на контейнере строки и наследуется уже в
-                # пикселях: у акцента он тот же, что у соседей.
-                spacing_size=self.base_size,
-            )
-
-        width = part(word.text)
-        if word.emoji:
-            # Пробел перед эмодзи наш и меряется шрифтом, сам глиф — системный.
-            width += part(" ") + EMOJI_ADVANCE_EM * size + self.letter_spacing * self.base_size
-        return width
+        Эмодзи лежит ВНУТРИ спана слова, за настоящим пробелом и кеглем слова
+        (Captions.tsx), поэтому меряется тем же вызовом, что и текст: пробел
+        считает наш шрифт, кластер эмодзи — `geometry.EMOJI_ADVANCE_EM`, и
+        letter-spacing достаётся кластеру ровно один раз.
+        """
+        text = f"{word.text} {word.emoji}" if word.emoji else word.text
+        return measure_word(
+            text,
+            size,
+            metrics=self.metrics,
+            letter_spacing=self.letter_spacing,
+            # Спейсинг объявлен на контейнере строки и наследуется уже в
+            # пикселях: у акцента он тот же, что у соседей.
+            spacing_size=self.base_size,
+        )
 
     @property
     def space(self) -> float:
-        return measure_word(
-            " ", self.base_size, metrics=self.metrics, letter_spacing=self.letter_spacing
+        return space_width(
+            self.base_size, metrics=self.metrics, letter_spacing=self.letter_spacing
         )
 
     def line_width(self, line: Sequence[PlanWord]) -> float:
@@ -386,9 +371,10 @@ def _rect_of_lines(
     """Прямоугольник блока по уже измеренным строкам.
 
     Отличается от `geometry.caption_rect` одним: ширина берётся из переноса, а
-    не пересчитывается по выделению слов. Пересчёт не знает ни про ужатое
-    длинное слово, ни про эмодзи внутри спана и поэтому даёт другую панель.
-    Коробка, отступы и привязка к краю кадра считаются теми же числами.
+    не пересчитывается по выделению слов. Пересчёт не знает про длинное слово,
+    ужатое `fit_size`, и поэтому даёт другую панель. Коробка, привязка к краю
+    кадра и высота строки считаются общим кодом (`block_rect`,
+    `line_box_height`), чтобы две реализации не разъехались молча.
 
     Слово, которое сознательно переполняет бюджет (пол кегля, см. `fit_size`),
     даёт прямоугольник шире кадра — с отрицательным `x`. Это не ошибка расчёта,
@@ -396,38 +382,16 @@ def _rect_of_lines(
     Прямоугольник обязан НАКРЫВАТЬ текст (по нему меряется яркость фона и
     разводится картинка); зажатый бюджетом, он бы врал про место текста.
     """
-    width, height = frame
     text_w = max(widths, default=0.0)
     gap = line_gap(preset)
-    text_h = 0.0
-    for i, line in enumerate(lines):
-        # Строчный бокс не бывает ниже СТРУТА. `line-height` задан числом и
-        # наследуется множителем, а кегль контейнера строки — это кегль пресета,
-        # поэтому строка не может стать ниже `font.size * line_height`, как бы
-        # сильно Ф5 ни ужала слова. Без максимума с базой блок, прибитый к низу
-        # кадра, занижал высоту на каждую ужатую строку, и весь промах уходил
-        # вверх: реальный верх плашки был выше `rect` на 45-164 px (проверено
-        # линейкой `render/measure.mjs` в том же Chromium: ужатое слово в bold
-        # даёт 104.0, а не 58.45).
-        biggest = max([float(preset.font.size)] + [w.size for w in line if w.size])
-        text_h += biggest * preset.caption.line_height
-        if i:
-            text_h += gap
-
-    panel = preset.panel
-    chrome_x = 2 * (panel.padding_x + panel.border_width) if panel.enabled else 0.0
-    chrome_y = 2 * (panel.padding_y + panel.border_width) if panel.enabled else 0.0
-    box_w = text_w + chrome_x
-    box_h = text_h + chrome_y
-
-    margin = safe_margin_y(preset, height)
-    if position == "top":
-        y = float(margin)
-    elif position == "center":
-        y = (height - box_h) / 2
-    else:
-        y = height - margin - box_h
-    return Rect((width - box_w) / 2, y, box_w, box_h)
+    # Строчный бокс не бывает ниже СТРУТА — это знает `geometry.line_box_height`.
+    # Пока высота считалась только по самому крупному слову, ужатая строка
+    # занижала блок на 45-164 px, и весь промах уходил вверх: блок прибит к низу
+    # кадра.
+    text_h = sum(
+        line_box_height((w.size for w in line if w.size), preset) for line in lines
+    ) + gap * max(0, len(lines) - 1)
+    return block_rect(position, text_w, text_h, preset, frame)
 
 
 # --------------------------------------------------------------------------- сборка
@@ -497,8 +461,19 @@ def build_plan(
     by_idx = {w.idx: w for w in edl.words}
     frame = (width, height)
 
+    # Позиции, которые субтитр РЕАЛЬНО может занять в этом ролике. Знает их
+    # только сборка плана: явные позиции лежат в EDL, а «auto» разрешается в одну
+    # из тех, что даёт пресет (см. `_resolve_position`). Без них `broll_rect`
+    # берёт свою лестницу по умолчанию, и у glass она отбрасывает `center` —
+    # то есть ровно там, где режиссёр поставил блоку явный центр, гарантия Ф7
+    # «картинка не пересекает субтитр» отключалась.
+    wanted = {b.position for b in edl.captions if b.position in ("top", "center", "bottom")}
+    if any(b.position not in ("top", "center", "bottom") for b in edl.captions):
+        wanted.update(caption_positions(ps))
+    caption_places: tuple[str, ...] | None = tuple(sorted(wanted)) or None
+
     def rect_of_broll(anchor: str, anim: str) -> Rect | None:
-        return broll_rect(resting_anchor(anchor, anim), ps, frame)
+        return broll_rect(resting_anchor(anchor, anim), ps, frame, positions=caption_places)
 
     def layout(position: str, words: list[PlanWord]) -> tuple[list[list[PlanWord]], Rect | None]:
         """Перенос строк и прямоугольник блока — одним измерением.

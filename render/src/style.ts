@@ -50,32 +50,62 @@ export const springFrames = (fps: number, config: SpringConfig): number =>
   Math.max(MIN_ANIM_FRAMES, measureSpring({ fps, config }));
 
 /**
- * Транзиентный «пшик»: 0 → 1 → 0 по нормированному времени.
+ * Плавная ступенька 0 → 1 с нулевой производной на ОБОИХ концах.
  *
- * Считается по времени, а не по значению пружины: на пружине пик приходился
- * на третий кадр, то есть на два кадра всей заметной фазы. Быстрый старт и
- * мягкая посадка в обеих половинах — производная в вершине и в конце нулевая,
- * поэтому масштаб не щёлкает.
+ * `easeOut` тормозит только к концу, а стартует с максимальной скоростью
+ * (производная 3), поэтому склеивать из него горку нельзя: подъём щёлкает в
+ * начале, а на вершине два куска сходятся углом.
  */
-export const popBump = (q: number, rise = 0.35): number => {
-  if (q <= 0 || q >= 1) return 0;
-  return q < rise ? easeOut(q / rise) : 1 - easeOut((q - rise) / (1 - rise));
+const smoothStep = (t: number): number => {
+  const x = Math.max(0, Math.min(1, t));
+  return x * x * (3 - 2 * x);
 };
 
 /**
- * Пиксельные величины движения приезжают из пресета: `Preset.scaled(height)`
- * пересчитывает их под высоту кадра, а раньше они были константами в TSX.
+ * Транзиентный «пшик»: 0 → 1 → 0 по нормированному времени.
+ *
+ * Считается по времени, а не по значению пружины: на пружине пик приходился
+ * на третий кадр, то есть на два кадра всей заметной фазы.
+ *
+ * Обе половины — `smoothStep`, и `rise` близок к половине окна. Это не вкус, а
+ * следствие `MIN_ANIM_FRAMES`: закон меряет ВСЮ анимацию, а глаз — её самую
+ * быструю фазу. На `easeOut` с `rise = 0.35` подъём занимал 2.8 кадра из
+ * восьми, и первый же кадр съедал 73 % амплитуды (замер: 0 → 0.734 → 0.977) —
+ * то есть пол в восемь кадров формально соблюдался, а щелчок оставался на
+ * месте. Теперь ни один кадр не берёт больше 40 % (0.189 / 0.394 / 0.343 / …),
+ * и подъём длится 3.6 кадра из восьми: атака ещё читается как рывок, но уже не
+ * как ступенька.
+ */
+export const popBump = (q: number, rise = 0.45): number => {
+  if (q <= 0 || q >= 1) return 0;
+  return q < rise ? smoothStep(q / rise) : 1 - smoothStep((q - rise) / (1 - rise));
+};
+
+/**
+ * Числа анимации приезжают из пресета, а не из констант в TSX (§0.3).
+ * Пиксельные из них пересчитывает под высоту кадра `Preset.scaled(height)`;
+ * миллисекунды и множители от высоты не зависят.
  *
  * В `types.ts` (чужой файл) поля ещё не объявлены, поэтому читаем через узкий
  * каст и запасное значение — старый план без этих полей рендерится по-старому.
  */
-type MotionPx = { block_shift_px?: number; broll_slide_px?: number };
+type AnimNumbers = {
+  block_shift_px?: number;
+  block_leave_px?: number;
+  broll_slide_px?: number;
+  block_overlap_min_ms?: number;
+  block_leave_falloff?: number;
+  block_leave_scale?: number;
+};
 
-export const motionPx = (
+export const animNum = (
   animation: Preset["animation"],
-  key: keyof MotionPx,
+  key: keyof AnimNumbers,
   fallback: number,
 ): number => {
-  const value = (animation as MotionPx)[key];
+  const value = (animation as AnimNumbers)[key];
   return typeof value === "number" ? value : fallback;
 };
+
+/** То же самое для пиксельных полей: имя оставлено ради читаемости на месте. */
+export const motionPx = animNum;

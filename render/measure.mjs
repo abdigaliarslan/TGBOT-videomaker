@@ -20,7 +20,8 @@
  *   "letter_spacing": -0.015,          // em, как в пресете
  *   "items": [                          // строки
  *     { "id": "b0l0", "words": [{ "text": "Я", "size": 88 }, ...] },
- *     { "id": "word", "text": "думаю", "size": 104 }
+ *     { "id": "word", "text": "думаю", "size": 104 },
+ *     { "id": "emo",  "words": [{ "text": "огонь", "size": 88, "emoji": "🔥" }] }
  *   ],
  *   "boxes": [                          // блоки целиком, вместе с панелью
  *     { "id": "b0", "lines": [[{ "text": "Я", "size": 88 }]],
@@ -30,8 +31,12 @@
  * }
  *
  * Формат stdout:
- * { "widths": { "<id>": 512.34 }, "parts": { "<id>": [..] },
+ * { "widths": { "<id>": 512.34 }, "heights": { "<id>": 93.28 },
+ *   "parts": { "<id>": [..] },
  *   "boxes": { "<id>": { "width": 912.4, "height": 254.35 } } }
+ *
+ * `heights` — высота строчного бокса строки. Ширины мало: по высоте строки
+ * складывается высота панели, а её предсказывает та же геометрия.
  *
  * Запуск: node render/measure.mjs < request.json
  */
@@ -87,7 +92,11 @@ const buildPage = (req) => {
      панели прибавляются к нему, а не съедают его. */
   .line, .panel { box-sizing: content-box; }
   .line { white-space: nowrap; }
-  .line span { display: inline-block; }
+  /* Только спан СЛОВА, не всё подряд внутри строки: у эмодзи внутри слова свой
+     вложенный спан, и он в Captions.tsx инлайновый. Сделать его inline-block —
+     значит схлопнуть пробел перед эмодзи по краю бокса и намерить на 24 px
+     меньше, чем будет в кадре. */
+  .line > span { display: inline-block; }
   .panel { display: inline-flex; flex-direction: column; align-items: center; }
 </style>
 <div id="stage"></div>
@@ -98,7 +107,7 @@ const buildPage = (req) => {
  * Всё измерение целиком уезжает в страницу одной функцией: `evaluate`
  * сериализует её текстом, и ничего из области видимости Node внутри не будет.
  */
-const measureInPage = (items, boxes, weight) => {
+const measureInPage = (items, boxes, weight, baseSize, lineHeight) => {
   /** Строка: спаны слов и настоящие пробелы между ними, без переносов. */
   const buildLine = (words, inline) => {
     const line = document.createElement("div");
@@ -111,6 +120,14 @@ const measureInPage = (items, boxes, weight) => {
       span.textContent = word.text;
       if (word.size) span.style.fontSize = `${word.size}px`;
       span.style.fontWeight = String(weight);
+      // Эмодзи лежит ВНУТРИ спана слова, отдельным вложенным спаном и с
+      // пробелом перед ним — ровно так его рисует Captions.tsx. Снаружи мерить
+      // нельзя: у вложенного спана свой шейпинг, а кегль он наследует от слова.
+      if (word.emoji) {
+        const emoji = document.createElement("span");
+        emoji.textContent = ` ${word.emoji}`;
+        span.appendChild(emoji);
+      }
       line.appendChild(span);
       spans.push(span);
     });
@@ -119,12 +136,15 @@ const measureInPage = (items, boxes, weight) => {
 
   const stage = document.getElementById("stage");
   const widths = {};
+  const heights = {};
   const parts = {};
   for (const item of items) {
-    const words = item.words ?? [{ text: item.text, size: item.size }];
+    const words = item.words ?? [{ text: item.text, size: item.size, emoji: item.emoji }];
     const { line, spans } = buildLine(words, true);
     stage.appendChild(line);
-    widths[item.id] = line.getBoundingClientRect().width;
+    const box = line.getBoundingClientRect();
+    widths[item.id] = box.width;
+    heights[item.id] = box.height;
     parts[item.id] = spans.map((s) => s.getBoundingClientRect().width);
     stage.removeChild(line);
   }
@@ -133,7 +153,14 @@ const measureInPage = (items, boxes, weight) => {
   for (const box of boxes) {
     const panel = document.createElement("div");
     panel.className = "panel";
-    panel.style.gap = `${box.gap ?? 0}px`;
+    // Просвет между строками по умолчанию считает САМА страница — той же
+    // формулой, что Captions.tsx (`Math.round(font.size * (line_height - 1))`).
+    // Взять его готовым числом из запроса значит подставить в обе стороны
+    // сверки одно и то же вычисление: ошибка в нём сократилась бы и тест
+    // прошёл бы при разъехавшемся кадре.
+    const gap =
+      box.gap ?? Math.round(baseSize * ((box.line_height ?? lineHeight ?? 1) - 1));
+    panel.style.gap = `${gap}px`;
     panel.style.padding = `${box.padding_y ?? 0}px ${box.padding_x ?? 0}px`;
     panel.style.border = `${box.border_width ?? 0}px solid transparent`;
     if (box.max_width) panel.style.maxWidth = `${box.max_width}px`;
@@ -143,7 +170,7 @@ const measureInPage = (items, boxes, weight) => {
     measured[box.id] = { width: rect.width, height: rect.height };
     stage.removeChild(panel);
   }
-  return { widths, parts, boxes: measured };
+  return { widths, heights, parts, boxes: measured };
 };
 
 const main = async () => {
@@ -174,7 +201,14 @@ const main = async () => {
       (family) => document.fonts.load(`100px "${family}"`).then(() => document.fonts.ready),
       "ReelbotMeasure",
     );
-    const result = await tab.evaluate(measureInPage, items, boxes, req.weight ?? 400);
+    const result = await tab.evaluate(
+      measureInPage,
+      items,
+      boxes,
+      req.weight ?? 400,
+      req.base_size ?? 100,
+      req.line_height ?? 1,
+    );
     process.stdout.write(JSON.stringify(result) + "\n");
   } finally {
     await browser.close({ silent: true });

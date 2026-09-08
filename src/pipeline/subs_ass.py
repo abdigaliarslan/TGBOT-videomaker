@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 from src.core.preset import Preset, to_ass_alpha, to_ass_colour
@@ -29,6 +30,15 @@ ALIGN = {"bottom": 2, "center": 5, "top": 8}
 OUTLINE_RATIO = 0.03
 BLUR_RATIO = 0.06
 SHADOW_RATIO = 0.045
+
+# Пол длительности анимации в кадрах. То же число и та же причина, что в
+# render/src/style.ts (MIN_ANIM_FRAMES): короче восьми кадров переход читается не
+# как движение, а как мигание. Пресеты просят 130-160 мс — это 3-5 кадров на
+# 24-30 fps, то есть закон Ф8 обходил ASS стороной, пока длительность бралась из
+# пресета как есть.
+MIN_ANIM_FRAMES = 8
+# Доля разгона в «пшике»: `popBump` в style.ts делит окно ровно так же.
+POP_RISE = 0.45
 
 
 def ass_time(seconds: float) -> str:
@@ -52,11 +62,49 @@ def escape(text: str) -> str:
 
 
 def _word_scale(word: PlanWord, preset: Preset) -> float:
+    """Кегль слова как доля кегля строки.
+
+    Считает его Python в `render_plan.wrap_block` — он же им мерил строку и решал
+    перенос, и длинное слово, ужатое под ширину строки, известно только ему.
+    Поэтому размер берём из плана, а из выделения выводим только там, где плана
+    нет (пресет без метрик шрифта): тогда оба рендерера падают на один и тот же
+    запасной путь.
+    """
+    if word.size and preset.font.size:
+        return word.size / float(preset.font.size)
     if word.emphasis == "accent":
         return preset.animation.accent_scale
     if word.emphasis == "shout":
         return preset.animation.shout_scale
     return 1.0
+
+
+def pop_ms(preset: Preset, fps: int) -> int:
+    """Желаемая длительность «пшика» в миллисекундах, но не короче восьми кадров."""
+    # Вверх, а не к ближайшему: round(8/24·1000) = 333 мс — это 7.992 кадра,
+    # то есть пол, который сам себя не берёт.
+    floor = math.ceil(MIN_ANIM_FRAMES / max(1, fps) * 1000)
+    return max(preset.animation.pop_ms, floor)
+
+
+def pop_window_ms(preset: Preset, fps: int, dialogue_ms: int) -> int:
+    """Сколько «пшик» длится ВНУТРИ своей реплики. Ноль — не анимируем вовсе.
+
+    Теги `\\t` отсчитываются от начала реплики, а реплика живёт от слова i до
+    слова i+1 — то есть длительность анимации ограничена сверху не пресетом, а
+    речью. Пол в восемь кадров, взятый из пресета как есть, этого не знает: на
+    24 fps он просит 334 мс, а 15 реплик эталонного ролика из 35 короче — «пшик»
+    не успевает вернуть слову его кегль, реплика кончается, следующая рисует то
+    же слово базовым кеглем, и выходит ЩЕЛЧОК ровно там, где Ф8 его убирала.
+    Хуже того, `\\fscx` в libass меняет раскладку, поэтому доля времени, когда
+    строка переливается по горизонтали, росла с 30 % до 54 %.
+
+    Поэтому окно считается по реплике, а пол остаётся законом, а не пожеланием:
+    не помещается восемь кадров — не рисуем ничего. Огрызок анимации хуже её
+    отсутствия, так же решает Broll.tsx при `travel < MIN_ANIM_FRAMES`.
+    """
+    total = min(pop_ms(preset, fps), max(0, dialogue_ms))
+    return total if total * max(1, fps) >= MIN_ANIM_FRAMES * 1000 else 0
 
 
 def _word_colour(word: PlanWord, preset: Preset) -> str:
@@ -68,35 +116,68 @@ def _word_colour(word: PlanWord, preset: Preset) -> str:
     return to_ass_colour(c.active)
 
 
-def _render_word(word: PlanWord, state: str, preset: Preset) -> str:
-    """Один токен с инлайновыми тегами под своё состояние."""
+def _render_word(word: PlanWord, state: str, preset: Preset, fps: int, dialogue_ms: int) -> str:
+    """Один токен с инлайновыми тегами под своё состояние.
+
+    Кегль слова ОДИН И ТОТ ЖЕ во всех трёх состояниях. Раньше выделение жило
+    только в `active`, а в `past` и `ghost` слово возвращалось к 100 %: libass
+    меряет `\\fscx` при раскладке, поэтому строка меняла ширину каждый раз,
+    когда акцентное слово меняло состояние, и весь блок прыгал по горизонтали.
+    Инвариант «контейнер не прыгает» (Ф1) обязан держаться в обоих рендерерах,
+    а не только в Remotion.
+
+    Что в ASS вылечить нечем: `\\fscx` меняет и ширину пролёта глифа, поэтому
+    строка переливается по горизонтали на время «пшика». В Remotion этого нет —
+    там кегль это layout, а «пшик» это `transform` поверх него. Амплитуда мала
+    (`pop_scale` 1.05-1.06 на одно слово), и ASS — быстрый предпросмотр, а не
+    финальный рендер, поэтому живём с этим.
+
+    Второе известное расхождение с Remotion, тоже неустранимое здесь: там «пшик»
+    считается от начала слова и продолжается, когда слово стало past, поэтому на
+    24-30 fps одновременно пульсируют до трёх слов подряд. В ASS активное слово
+    по построению ровно одно: реплика перерисовывает строку целиком, и у past
+    нет способа доиграть свою анимацию. Гасить «пшик» на переходе active→past в
+    Remotion ради симметрии нельзя — слово короче восьми кадров оборвало бы
+    масштаб на полпути, то есть щёлкнуло бы ровно так, как щёлкала эта функция.
+    """
     c = preset.colors
     a = preset.animation
     text = escape(word.text)
     if word.emoji:
         text = f"{text} {escape(word.emoji)}"
 
+    base = max(1, round(_word_scale(word, preset) * 100))
+    size = f"\\fscx{base}\\fscy{base}"
+
     if state == "active":
-        base = round(_word_scale(word, preset) * 100)
-        pop = round(base * a.pop_scale)
-        tags = [
-            to_ass_alpha(1.0),
-            f"\\c{_word_colour(word, preset)}",
-            f"\\fscx{pop}\\fscy{pop}",
-            f"\\t(0,{a.pop_ms},\\fscx{base}\\fscy{base})",
-        ]
+        # Транзиентный «пшик» ровно как в Remotion (`popBump`): вверх к пику и
+        # обратно к своему кеглю. Раньше слово ПОЯВЛЯЛОСЬ уже на пике — то есть
+        # скачком, который Ф8 и убирала на стороне TSX. Окно — своя реплика:
+        # `\t` обязан вернуть слову его кегль до её конца, иначе следующая
+        # реплика делает это скачком (см. `pop_window_ms`).
+        total = pop_window_ms(preset, fps, dialogue_ms)
+        tags = [to_ass_alpha(1.0), f"\\c{_word_colour(word, preset)}", size]
+        if total:
+            rise = max(1, round(total * POP_RISE))
+            peak = max(1, round(base * a.pop_scale))
+            tags += [
+                f"\\t(0,{rise},\\fscx{peak}\\fscy{peak})",
+                f"\\t({rise},{total},{size})",
+            ]
         if word.emphasis == "shout" and a.shout_rotate:
             tags.append(f"\\frz{a.shout_rotate:g}")
     elif state == "past":
-        tags = [to_ass_alpha(c.past_opacity), f"\\c{to_ass_colour(c.past)}", "\\fscx100\\fscy100"]
+        tags = [to_ass_alpha(c.past_opacity), f"\\c{to_ass_colour(c.past)}", size]
     else:  # ghost — слово ещё не прозвучало
-        tags = [to_ass_alpha(c.ghost_opacity), f"\\c{to_ass_colour(c.ghost)}", "\\fscx100\\fscy100"]
+        tags = [to_ass_alpha(c.ghost_opacity), f"\\c{to_ass_colour(c.ghost)}", size]
 
     joined = "".join(t if t.startswith("\\") else f"\\alpha{t}" for t in tags)
     return "{" + joined + "}" + text
 
 
-def _block_dialogues(block: PlanBlock, preset: Preset) -> list[tuple[float, float, str, int]]:
+def _block_dialogues(
+    block: PlanBlock, preset: Preset, fps: int
+) -> list[tuple[float, float, str, int]]:
     """Блок → список реплик (начало, конец, текст, выравнивание)."""
     words = block.words
     if not words:
@@ -117,10 +198,18 @@ def _block_dialogues(block: PlanBlock, preset: Preset) -> list[tuple[float, floa
         end = words[i + 1].start if i + 1 < len(words) else block.end
         if end <= start:
             continue
+        # Окно самой реплики: `\t` живёт внутри него и наружу не выходит.
+        dialogue_ms = round((end - start) * 1000)
         chunks: list[str] = []
         for line, line_pos in zip(block.lines, positions):
             rendered = [
-                _render_word(w, "active" if j == i else ("past" if j < i else "ghost"), preset)
+                _render_word(
+                    w,
+                    "active" if j == i else ("past" if j < i else "ghost"),
+                    preset,
+                    fps,
+                    dialogue_ms,
+                )
                 for w, j in zip(line, line_pos)
             ]
             chunks.append(" ".join(rendered))
@@ -186,7 +275,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     lines: list[str] = []
     for block in plan.blocks:
-        for start, end, text, align in _block_dialogues(block, preset):
+        for start, end, text, align in _block_dialogues(block, preset, plan.fps):
             body = "{" + f"\\an{align}\\blur{blur}" + "}" + text
             lines.append(
                 f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Main,,0,0,0,,{body}"

@@ -26,6 +26,7 @@ from src.core.geometry import (
     measure_line,
     measure_word,
     metrics_for,
+    space_width,
 )
 from src.core.preset import Preset, hex_to_rgb, load_preset
 from src.core.render_plan import (
@@ -156,6 +157,32 @@ def test_caption_never_shares_the_frame_with_a_picture(anchor: str):
     picture = plan.broll[0].rect
     assert isinstance(caption, Rect) and isinstance(picture, Rect)
     assert not caption.overlaps(picture)
+
+
+@pytest.mark.parametrize(
+    "anchor", ["top_left", "top_right", "bottom_left", "bottom_right", "center"]
+)
+def test_an_explicit_centre_block_still_gets_its_room(anchor: str):
+    """Гарантия Ф7 держится и на явном `center`, который режиссёр ставит сам.
+
+    Позиции блоков видит только сборка плана, и без них `broll_rect` берёт свою
+    лестницу по умолчанию: у glass в кадре 1080×1920 места на все три полосы нет,
+    и лестница отбрасывает `center` — то есть карточка получала право встать
+    ровно туда, куда режиссёр только что поставил блок. Здесь план обязан
+    передать позиции вниз и получить либо карточку мимо текста, либо полный кадр.
+    """
+    edl = broll_edl(anchor)
+    for block in edl.captions:
+        block.position = "center"
+    plan = build_plan(edl, "v.mp4", cfg=cfg())
+    picture = plan.broll[0].rect
+    assert isinstance(picture, Rect)
+    for block in plan.blocks:
+        assert block.position == "center"
+        assert isinstance(block.rect, Rect)
+        if picture.width >= plan.width:
+            continue  # места под карточку не осталось — осознанный полный кадр
+        assert not block.rect.overlaps(picture), anchor
 
 
 def test_caption_moves_away_from_a_picture_over_its_band():
@@ -470,7 +497,9 @@ def test_words_in_a_line_never_overlap(name: str):
     base = float(preset.font.size)
     ls = preset.font.letter_spacing
     budget = caption_text_width(preset, FRAME[0])
-    space = measure_word(" ", base, metrics=metrics, letter_spacing=ls)
+    # Пробел между словами меряет `space_width`, а не `measure_word(" ")`: в
+    # боксе слова краевой пробел схлопывается и стоит ноль, между боксами — нет.
+    space = space_width(base, metrics=metrics, letter_spacing=ls)
     assert space > 0
     seen = 0
     for block in all_blocks():

@@ -22,6 +22,7 @@ from src.core.geometry import (
     STOCK_ASPECT,
     Rect,
     SizedWord,
+    _round_px,
     blocks_caption,
     broll_free_band,
     broll_rect,
@@ -30,6 +31,7 @@ from src.core.geometry import (
     caption_zone,
     caption_text_width,
     emphasis_size,
+    line_box_height,
     line_gap,
     load_metrics,
     measure_line,
@@ -38,9 +40,10 @@ from src.core.geometry import (
     resting_anchor,
     safe_margin_y,
     sized_words,
+    space_width,
 )
 from src.core.preset import load_preset
-from src.core.render_plan import PlanBlock, PlanWord
+from src.core.render_plan import PlanBlock, PlanWord, _rect_of_lines, wrap_block
 
 REPO = Path(__file__).resolve().parents[1]
 FRAME = (1080, 1920)
@@ -123,6 +126,26 @@ def test_metrics_are_generated_for_every_bundled_font():
         assert load_metrics(ttf.name).units_per_em > 0
 
 
+def test_committed_metrics_are_exactly_what_the_tool_extracts():
+    """Данные в `presets/metrics` обязаны совпадать с выгрузкой из TTF, байт в байт.
+
+    JSON лежит в репозитории и в рантайме читается без fontTools — то есть это
+    ЕДИНСТВЕННЫЙ источник ширин для всей геометрии. Ни один тест не проверял, что
+    он соответствует шрифту: правка руками, обновление TTF без перевыгрузки или
+    смена репертуара в `tools/font_metrics.py` проходили молча, а разъезжалась бы
+    от этого вся раскладка сразу.
+    """
+    from tools.font_metrics import extract
+
+    for ttf in sorted((REPO / "assets" / "fonts").glob("*.ttf")):
+        committed = json.loads(
+            (REPO / "src" / "core" / "presets" / "metrics" / f"{ttf.stem}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert extract(ttf) == committed, ttf.name
+
+
 def test_kerning_is_extracted(metrics):
     """«ГА» без кернинга шире почти на 12 px при кегле 88 — это шесть допусков DoD."""
     assert metrics.kern("Г", "А") < 0
@@ -130,10 +153,107 @@ def test_kerning_is_extracted(metrics):
     assert naive - measure_word("ГА", 88, metrics=metrics) > 10
 
 
+def test_kerning_stops_at_a_script_boundary(metrics):
+    """Через границу письменности Chromium не кернит — HarfBuzz шейпит прогоны врозь.
+
+    Числа не из нашей же модели, а с линейки: «Сбербankовский» на кегле 88 со
+    спейсингом −0.015 занимает в Chromium 809.34 px. Наивная модель применяла
+    кернинг пар «б|a» (−12) и «k|о» (−24) и давала 806.17 — промах 3.2 px,
+    полтора бюджета DoD.
+    """
+    assert metrics.kern("б", "a") < 0, "в шрифте пара есть — это не про её отсутствие"
+    assert metrics.kern("k", "о") < 0
+    assert measure_word(
+        "Сбербankовский", 88, metrics=metrics, letter_spacing=-0.015
+    ) == pytest.approx(809.34, abs=0.1)
+
+
+def test_neutral_character_joins_the_script_on_its_left(metrics):
+    """Дефис в «PDF-файл» уходит в латиницу, и пара «-|ф» кернинг не получает.
+
+    Chromium: 469.57 px на кегле 88 со спейсингом −0.015. С кернингом через
+    границу выходило 470.45 — 0.9 px, половина бюджета DoD на ровном месте.
+    """
+    assert metrics.kern("-", "ф") > 0
+    assert measure_word("PDF-файл", 88, metrics=metrics, letter_spacing=-0.015) == pytest.approx(
+        469.57, abs=0.1
+    )
+
+
+def test_emoji_is_measured_as_one_cluster(metrics):
+    """Эмодзи — один кластер, одна ширина, один letter-spacing, сколько бы в нём
+    ни было кодовых точек.
+
+    108.48 px на кегле 88 со спейсингом −0.015 — замер в Chromium, одинаковый
+    для 🔥 (одна точка), ❤️ (две), 1️⃣ (три) и 👨‍👩‍👧 (пять). Модель, считающая
+    по кодовым точкам, давала на семье впятеро больше.
+    """
+    for emoji in ("🔥", "❤️", "1️⃣", "👨‍👩‍👧", "👍🏽", "🇷🇺"):
+        assert metrics.split(emoji) == [emoji], emoji
+        assert measure_word(
+            emoji, 88, metrics=metrics, letter_spacing=-0.015
+        ) == pytest.approx(108.48, abs=0.1), emoji
+    # Два эмодзи подряд — два кластера, а не один: склеивать их значит занизить
+    # строку вдвое.
+    assert metrics.split("😀🔥") == ["😀", "🔥"]
+
+
+def test_glyphs_of_the_font_are_not_hijacked_by_the_emoji_rule(metrics):
+    """Стрелка и математика есть в Montserrat — их меряет шрифт, а не оценка.
+
+    51.48 и 52.27 px на кегле 88 (Chromium). Правило «символ вне шрифта» обязано
+    смотреть на шрифт, а не на диапазон Unicode: стрелки лежат ровно в тех же
+    блоках, что эмодзи.
+    """
+    assert measure_word("→", 88, metrics=metrics, letter_spacing=-0.015) == pytest.approx(
+        51.48, abs=0.1
+    )
+    assert measure_word("≈", 88, metrics=metrics, letter_spacing=-0.015) == pytest.approx(
+        52.27, abs=0.1
+    )
+
+
 def test_unknown_glyph_falls_back_to_em(metrics):
-    """Эмодзи рисует чужой шрифт; его ширину этот TTF не знает и не выдумывает."""
-    assert measure_word("🔥", 100, metrics=metrics) == pytest.approx(
+    """Символ вне шрифта, который не эмодзи, — честная оценка, а не измерение."""
+    assert "ஃ" not in metrics.advances
+    assert measure_word("ஃ", 100, metrics=metrics) == pytest.approx(
         FALLBACK_ADVANCE_EM * 100
+    )
+
+
+def test_a_stray_combining_mark_takes_no_room(metrics):
+    """Диакритика и селекторы начертания ширины не занимают ни в одном шрифте.
+
+    Пока для них брался em, одинокий селектор стоил 88 px, которых в кадре нет.
+    """
+    assert measure_word("️", 88, metrics=metrics) == 0.0
+    assert measure_word("́", 88, metrics=metrics) == 0.0
+
+
+def test_edge_spaces_of_a_word_collapse(metrics):
+    """Бокс слова — inline-block: краевые пробелы CSS убирает, подряд идущие сводит.
+
+    Chromium на « пробел »: 348.92 px, ровно как на «пробел». Наивная модель
+    считала оба края и давала 397.50 — 48 px, два десятка бюджетов DoD.
+    """
+    plain = measure_word("пробел", 88, metrics=metrics, letter_spacing=-0.015)
+    assert plain == pytest.approx(348.92, abs=0.1)
+    assert measure_word(" пробел ", 88, metrics=metrics, letter_spacing=-0.015) == pytest.approx(
+        plain
+    )
+    assert measure_word("а  б", 88, metrics=metrics, letter_spacing=-0.015) == pytest.approx(
+        measure_word("а б", 88, metrics=metrics, letter_spacing=-0.015)
+    )
+    # Пробел ЦЕЛИКОМ схлопывается: в кадре у такого слова ширины нет.
+    assert measure_word(" ", 88, metrics=metrics) == 0.0
+    # А между словами он настоящий — там ему не с чем схлопываться.
+    assert space_width(88, metrics=metrics, letter_spacing=-0.015) == pytest.approx(24.29, abs=0.1)
+
+
+def test_non_breaking_space_is_not_collapsed(metrics):
+    """Неразрывный пробел рисуется, а не схлопывается: 135.27 px на «а б» (Chromium)."""
+    assert measure_word("а б", 88, metrics=metrics, letter_spacing=-0.015) == pytest.approx(
+        135.27, abs=0.1
     )
 
 
@@ -169,7 +289,7 @@ def test_line_uses_a_real_space_not_a_gap(metrics):
     words = [SizedWord("один", 88), SizedWord("два", 88)]
     line = measure_line(words, metrics=metrics, base_size=88)
     solo = sum(measure_word(w.text, w.size, metrics=metrics) for w in words)
-    assert line - solo == pytest.approx(measure_word(" ", 88, metrics=metrics))
+    assert line - solo == pytest.approx(space_width(88, metrics=metrics))
 
 
 def test_accent_word_widens_the_line(metrics):
@@ -193,6 +313,40 @@ def test_letter_spacing_of_an_accent_word_comes_from_the_line(metrics):
     from_own_size = measure_word("человек", 88 * 1.18, metrics=metrics, letter_spacing=-0.015)
     assert line > from_own_size
     assert line - from_own_size == pytest.approx(0.015 * (88 * 1.18 - 88) * 7)
+
+
+def test_line_box_is_never_shorter_than_the_strut():
+    """Строчный бокс не бывает ниже кегля КОНТЕЙНЕРА, как бы ни ужали слова.
+
+    Chromium: строка из слова кеглем 35 в glass занимает 93.27 px — ровно
+    струт 88×1.06, а не 37. Пока высоту считали по самому крупному СЛОВУ, блок,
+    прибитый к низу кадра, занижался на каждую ужатую строку, и весь промах
+    уходил вверх.
+    """
+    preset = load_preset("glass")
+    strut = preset.font.size * preset.caption.line_height
+    assert line_box_height([35.0], preset) == pytest.approx(93.28, abs=0.05)
+    assert line_box_height([35.0], preset) == pytest.approx(strut)
+    assert line_box_height([], preset) == pytest.approx(strut)
+    # Крупное слово бокс поднимает: 88×1.18×1.06 = 110.07 (Chromium 110.06).
+    assert line_box_height(
+        [preset.font.size * preset.animation.accent_scale], preset
+    ) == pytest.approx(110.07, abs=0.05)
+
+
+def test_pixel_rounding_matches_the_renderer():
+    """Округление половинок — вверх, как `Math.round` в TSX, а не банковское.
+
+    `round(2.5)` в Python это 2, а в JS 3. Оба числа считаются по обе стороны, и
+    на некоторых высотах кадра после `Preset.scaled` они расходились на пиксель.
+    """
+    assert _round_px(2.5) == 3
+    assert _round_px(3.5) == 4
+    assert _round_px(-0.5) == 0
+    preset = load_preset("glass").model_copy(deep=True)
+    preset.font.size = 50
+    preset.caption.line_height = 1.05  # 50 × 0.05 = 2.5 ровно
+    assert line_gap(preset) == 3
 
 
 def test_emphasis_size_follows_the_preset():
@@ -494,6 +648,53 @@ def _assert_matches_chromium(font_file: str, weight: int, base: float, spacing: 
     assert not report, "расхождение больше 2 px:\n" + "\n".join(report)
 
 
+def _hard_lines(base: float, accent: float, shout: float) -> dict[str, list[SizedWord]]:
+    """Случаи, которых в базовом плане нет, а в кадре они бывают.
+
+    Реальный прогон ловит только то, что уже случилось: в нём нет ни эмодзи, ни
+    смешанной письменности, ни ужатого слова. А ломалась модель ровно на них —
+    каждая строка здесь стоит на найденном промахе, не на фантазии.
+    """
+    return {
+        # Кернинг: пары с самым большим значением в шрифте.
+        "kern": [SizedWord("ГА", base), SizedWord("АУ", base), SizedWord("Ту", base)],
+        # Граница письменности внутри слова и через дефис: кернинг там не работает.
+        "script-inword": [SizedWord("Сбербankовский", base)],
+        "script-hyphen": [SizedWord("PDF-файл", base), SizedWord("v2.0", base)],
+        # Пробелы по краям слова схлопываются.
+        "spaces": [SizedWord(" пробел ", base), SizedWord("а  б", base)],
+        # Эмодзи: кластер целиком, сколько бы в нём ни было кодовых точек.
+        "emoji-word": [SizedWord("огонь 🔥", base)],
+        "emoji-zwj": [SizedWord("семья 👨‍👩‍👧", base)],
+        "emoji-keycap": [SizedWord("раз 1️⃣", base)],
+        "emoji-accent": [SizedWord("это", base), SizedWord("огонь 🔥", accent)],
+        "emoji-two": [SizedWord("двойной 😀🔥", base)],
+        # Свои символы шрифта в тех же блоках Unicode, что эмодзи.
+        "arrows": [SizedWord("→", base), SizedWord("≈", base), SizedWord("№1", base)],
+        # Три кегля в одной строке и лигатуры.
+        "sizes": [SizedWord("тише", base), SizedWord("едешь", accent), SizedWord("дальше", shout)],
+        "ligature": [SizedWord("fiction", base), SizedWord("affine", base)],
+        # Длинное слово ужатым кеглем — то, что делает `fit_size`.
+        "shrunk": [SizedWord("труднопроизносимое", base * 0.4)],
+        "long": [SizedWord("труднопроизносимое", base)],
+        "one-char": [SizedWord("я", base), SizedWord("Щ", shout)],
+        "punct": [SizedWord("«ёлки-палки»", base), SizedWord("…", base)],
+    }
+
+
+@pytest.mark.slow
+def test_python_predicts_chromium_on_hard_lines():
+    """DoD Ф4 на трудных случаях, а не только на том, что уже было в прогоне."""
+    preset = load_preset("glass")
+    items = _hard_lines(
+        preset.font.size, preset.animation.accent_scale * preset.font.size,
+        preset.animation.shout_scale * preset.font.size,
+    )
+    _assert_matches_chromium(
+        preset.font.file, preset.font.weight, preset.font.size, preset.font.letter_spacing, items
+    )
+
+
 @pytest.mark.slow
 def test_python_predicts_chromium_line_width():
     """DoD Ф4: расхождение с настоящим измерением в Chromium меньше 2 px."""
@@ -562,7 +763,8 @@ def test_caption_rect_matches_the_chromium_box():
                     [{"text": w.text, "size": w.size} for w in sized_words(line, preset)]
                     for line in b.lines
                 ],
-                "gap": line_gap(preset),
+                # `gap` намеренно не передаём: его считает сама страница
+                # формулой Captions.tsx, и сверка проверяет заодно `line_gap`.
                 "padding_x": preset.panel.padding_x,
                 "padding_y": preset.panel.padding_y,
                 "border_width": preset.panel.border_width,
@@ -583,3 +785,78 @@ def test_caption_rect_matches_the_chromium_box():
                 f"chromium {box['width']:.2f}×{box['height']:.2f}"
             )
     assert not report, "прямоугольник блока разъехался с Chromium:\n" + "\n".join(report)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name", ["glass", "bold"])
+def test_the_production_block_rect_matches_chromium(name: str):
+    """Тот же DoD, но на ПРОИЗВОДСТВЕННОМ пути: `wrap_block` + `_rect_of_lines`.
+
+    В план едет прямоугольник, который считает `render_plan`, а не
+    `geometry.caption_rect`: по нему меряется яркость фона (Ф9) и разводится
+    картинка (Ф7). Пока с Chromium сверяли только `caption_rect`, проверенным
+    оказывался код, которого в проде нет, — а расходились они как раз на том,
+    что в проде и бывает: на эмодзи и на ужатом переносом кегле.
+    """
+    preset = load_preset(name).scaled(FRAME[1])
+    blocks: dict[str, list[PlanWord]] = {}
+    for i, words in enumerate(
+        (
+            [("тише", "none", None), ("едешь", "accent", None)],
+            [("огонь", "none", "🔥"), ("прямо", "none", None), ("сейчас", "shout", "🚀")],
+            [("трансцендентальностью", "shout", None)],
+            [("Сбербankовский", "none", None), ("PDF-файл", "accent", None)],
+            [(w, "none", None) for w in "раз два три четыре пять шесть семь восемь".split()],
+            [("миллиард", "shout", "💥")],
+        )
+    ):
+        blocks[f"p{i}"] = [
+            PlanWord(
+                text=t.upper() if preset.font.uppercase else t,
+                start=0.0,
+                end=1.0,
+                emphasis=e,
+                emoji=emoji,
+                word_idx=j,
+            )
+            for j, (t, e, emoji) in enumerate(words)
+        ]
+
+    laid: dict[str, tuple[list[list[PlanWord]], list[float]]] = {
+        key: wrap_block(words, preset, FRAME[0]) for key, words in blocks.items()
+    }
+    request = {
+        "font": str(REPO / "assets" / "fonts" / preset.font.file),
+        "weight": preset.font.weight,
+        "base_size": preset.font.size,
+        "letter_spacing": preset.font.letter_spacing,
+        "line_height": preset.caption.line_height,
+        "items": [],
+        "boxes": [
+            {
+                "id": key,
+                "lines": [
+                    [{"text": w.text, "size": w.size, "emoji": w.emoji} for w in line]
+                    for line in lines
+                ],
+                # `gap` намеренно не передаём: его считает сама страница
+                # формулой Captions.tsx, и сверка проверяет заодно `line_gap`.
+                "padding_x": preset.panel.padding_x,
+                "padding_y": preset.panel.padding_y,
+                "border_width": preset.panel.border_width,
+            }
+            for key, (lines, _) in laid.items()
+        ],
+    }
+    measured = _measure_in_node(request)["boxes"]
+
+    report: list[str] = []
+    for key, (lines, widths) in laid.items():
+        rect = _rect_of_lines("bottom", lines, widths, preset, FRAME)
+        box = measured[key]
+        if abs(rect.width - box["width"]) >= 2.0 or abs(rect.height - box["height"]) >= 2.0:
+            report.append(
+                f"{name}/{key}: python {rect.width:.2f}×{rect.height:.2f}, "
+                f"chromium {box['width']:.2f}×{box['height']:.2f}"
+            )
+    assert not report, "прямоугольник плана разъехался с Chromium:\n" + "\n".join(report)

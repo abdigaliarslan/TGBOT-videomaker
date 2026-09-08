@@ -20,9 +20,12 @@ import json
 import logging
 import os
 import tempfile
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+
+import numpy as np
 
 from src.core.config import settings
 from src.core.edl import Word
@@ -95,8 +98,8 @@ def pick_backend(requested: str = "auto") -> Backend:
         return "faster_whisper"
     # auto: whisperx, если установлен — даже на CPU.
     #
-    # Точность границ — на фикстуре tests/fixtures/speech.mp4 (15.5 с, эталон:
-    # границы речи по энергии сигнала, tests/asr_accuracy.py):
+    # Точность границ фраз на фикстуре tests/fixtures/speech.mp4 (15.5 с,
+    # английский синтез, эталон размечен по энергии; tests/asr_accuracy.py):
     #
     #   бэкенд/модель            среднее |Δ|   максимум
     #   faster_whisper/small       234 мс       829 мс
@@ -104,22 +107,34 @@ def pick_backend(requested: str = "auto") -> Backend:
     #   whisperx/small              46 мс       101 мс
     #   whisperx/medium             46 мс       101 мс
     #
+    # То же на РАБОЧЕМ языке (samples/phase-0-source.mp4, русский, 20 с; эталон —
+    # возобновление речи после паузы по энергии, `asr_accuracy.py --media`):
+    #
+    #   бэкенд/модель          начало речи |Δ|   максимум
+    #   faster_whisper/small       341 мс         836 мс
+    #   faster_whisper/medium       99 мс         296 мс
+    #   whisperx/small              25 мс          53 мс
+    #   whisperx/medium             25 мс          53 мс
+    #
     # Границы слов у whisperx считает wav2vec2 по звуку, а не Whisper по своему
     # кросс-аттеншену, поэтому размер модели Whisper на них не влияет вовсе:
-    # small и medium дали ПОБУКВЕННО одинаковые тайминги. Отсюда и выбор
-    # whisper_model="small" по умолчанию — medium стоит времени и памяти, а
-    # попадание в речь не улучшает.
+    # small и medium дали ПОБУКВЕННО одинаковые тайминги на обоих языках. Отсюда
+    # и выбор whisper_model="small" по умолчанию — medium стоит времени и памяти,
+    # а попадание в речь не улучшает.
     #
-    # Цена — на эталонном ролике 20 с (12 ядер, без GPU, int8, 4 потока;
-    # «тёплый» = модели уже загружены прогревом воркера):
+    # Цена — на том же 20-секундном ролике (12 ядер, без GPU, int8, 4 потока;
+    # «тёплый» = модели уже загружены прогревом воркера, машина под нагрузкой,
+    # разброс тёплого прогона до двух раз):
     #
     #   бэкенд/модель          холодный   тёплый   пик RSS
-    #   faster_whisper/small     16.8 с    ~4 с     1.0 ГБ
-    #   whisperx/small           31.3 с    ~9 с     2.8 ГБ
+    #   faster_whisper/small      7.8 с     4.2 с    1.1 ГБ
+    #   faster_whisper/medium    20.2 с    14.4 с    2.0 ГБ
+    #   whisperx/small           19.9 с     8.7 с    3.1 ГБ
+    #   whisperx/medium          43.3 с    24.6 с    3.8 ГБ
     #
-    # Вдвое дороже по времени и втрое по памяти — за пятикратную точность
-    # границ. Для пословных субтитров это решающе: 234 мс это ровно то, на
-    # сколько подсветка уезжает вперёд по слову.
+    # Вдвое дороже по времени и втрое по памяти — за пятикратную (на русском —
+    # четырнадцатикратную) точность границ. Для пословных субтитров это
+    # решающе: 341 мс это ровно то, на сколько подсветка уезжает вперёд по слову.
     if _has_whisperx():
         return "whisperx"
     return "faster_whisper"
@@ -170,6 +185,132 @@ def _finalize(raw: list[tuple[str, float, float, float]], *, duration: float) ->
         words.append(Word(idx=len(words), text=t, start=round(s, 3), end=round(e, 3), prob=round(float(prob), 3)))
         prev_end = e
     return words
+
+
+# ------------------------------------------------- обрезка тишины на краях слова
+#
+# Оба бэкенда растягивают ПОСЛЕДНЕЕ слово перед паузой на саму паузу: на эталонном
+# ролике whisperx отдаёт «других» 10.80..13.00, хотя речь там кончается на 11.17
+# (замер энергии, tests/asr_accuracy.py --media). Для подсветки это ещё терпимо
+# (слово просто висит), а вот для нарезки пауз — нет: director.build_cuts считает
+# паузу как `w.start - prev.end`, и проглоченная словом тишина в неё не попадает.
+# Пауза остаётся в ролике, причём внутри «ядра» куска, которое нельзя трогать.
+#
+# Поэтому границы слова подрезаются по энергии сигнала — того же рода замер, что
+# и эталон фикстуры. Только внутрь: время речи мы не выдумываем, а отдаём назад
+# то, что бэкенд прихватил из тишины.
+
+_ENV_HOP = 0.010  # шаг огибающей, с
+_ENV_WIN = 0.020  # окно RMS, с
+# Короче 150 мс — не пауза, а придыхание или атака согласной; трогать её значит
+# резать речь ради статистики.
+_TRIM_MIN = 0.15
+_TRIM_MIN_WORD = 0.06  # столько слово живёт даже после обрезки
+# Порог «речь/тишина» ставится между шумовым полом и уровнем речи самой записи:
+# абсолютных дБ тут быть не может, громкость исходника не нормирована.
+_TRIM_FLOOR_Q, _TRIM_SPEECH_Q = 10.0, 90.0
+# Доля пути от шумового пола к уровню речи. Подобрано замером (tests/asr_accuracy.py
+# --media samples/phase-0-source.mp4): 0.35 оставляет паузу внутри слова (конец
+# слова промахивается на 135 мс), 0.5 сажает промах на 15 мс. Дальше 0.5 порог
+# заезжает на тихую речь — там уже режется не тишина.
+_TRIM_MIX = 0.50
+# Потолок в абсолютных дБ: на записи с громким фоном относительный порог поднялся
+# бы внутрь речи. Выше него тишины не бывает — лучше не обрезать вовсе.
+_TRIM_MAX_DB = -40.0
+# Меньший разброс уровней — на записи нет тишины, отделять нечего.
+_TRIM_MIN_RANGE_DB = 12.0
+# Одиночный щелчок не должен держать границу: речью считается серия кадров.
+_TRIM_RUN = 3
+_TRIM_RUN_MIN = 3
+
+
+def _envelope(wav: Path) -> tuple[np.ndarray, float] | None:
+    """RMS-огибающая моно-wav в дБ и шаг кадра. None — если файл не PCM.
+
+    Читается stdlib-модулем `wave`: ASR всё равно работает с wav, который сам же
+    и извлёк (моно 16 кГц PCM16), а лишний запуск ffmpeg ради замера энергии —
+    это ещё один процесс на каждый ролик.
+    """
+    try:
+        with wave.open(str(wav), "rb") as f:
+            if f.getsampwidth() != 2:
+                return None
+            sr, channels = f.getframerate(), f.getnchannels()
+            raw = f.readframes(f.getnframes())
+    except Exception as e:  # noqa: BLE001 — не PCM, битый файл: обрезки просто не будет
+        log.debug("огибающая недоступна (%s): %s", type(e).__name__, e)
+        return None
+
+    samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    if channels > 1:
+        samples = samples[: len(samples) // channels * channels].reshape(-1, channels).mean(axis=1)
+    hop, win = int(sr * _ENV_HOP), int(sr * _ENV_WIN)
+    if hop <= 0 or len(samples) < win:
+        return None
+    # Скользящее окно через кумулятивную сумму квадратов: матрица кадров на
+    # трёхминутном ролике весила бы под полсотни мегабайт, а нужен один RMS.
+    squares = np.concatenate(([0.0], np.cumsum(samples.astype(np.float64) ** 2)))
+    starts = np.arange(1 + (len(samples) - win) // hop) * hop
+    rms = np.sqrt((squares[starts + win] - squares[starts]) / win + 1e-12)
+    return 20.0 * np.log10(rms + 1e-12), hop / sr
+
+
+def _loud_mask(db: np.ndarray, threshold: float) -> np.ndarray:
+    """Кадры, попавшие в серию из `_TRIM_RUN`, где громких не меньше `_TRIM_RUN_MIN`."""
+    loud = (db > threshold).astype(np.float32)
+    if len(loud) < _TRIM_RUN:
+        return loud > 0
+    kernel = np.ones(_TRIM_RUN, dtype=np.float32)
+    return np.convolve(loud, kernel, mode="same") >= _TRIM_RUN_MIN
+
+
+def trim_word_silence(words: list[Word], wav: Path) -> int:
+    """Подрезать края слов до фактической речи. Правит список на месте.
+
+    Возвращает число изменённых слов. Границы только сдвигаются ВНУТРЬ слова,
+    поэтому монотонность (end[i] <= start[i+1]) сохраняется по построению.
+    """
+    env = _envelope(wav)
+    if env is None or not words:
+        return 0
+    db, hop = env
+    floor, speech = np.percentile(db, [_TRIM_FLOOR_Q, _TRIM_SPEECH_Q])
+    if speech - floor < _TRIM_MIN_RANGE_DB:
+        # Ровный уровень: либо сплошная речь без пауз, либо запись без динамики.
+        # Порога, отделяющего тишину, здесь просто нет — не выдумываем его.
+        log.debug("обрезка тишины пропущена: разброс уровней %.1f дБ", speech - floor)
+        return 0
+    threshold = min(float(floor + _TRIM_MIX * (speech - floor)), _TRIM_MAX_DB)
+    mask = _loud_mask(db, threshold)
+
+    changed = 0
+    for w in words:
+        i0 = max(0, round(w.start / hop))
+        # Правая граница исключающая: кадр, начинающийся ровно на конце слова,
+        # принадлежит уже следующему — иначе его речь удержала бы границу на месте.
+        i1 = min(len(mask), round(w.end / hop))
+        if i1 - i0 < 2:
+            continue
+        loud = np.nonzero(mask[i0:i1])[0]
+        if len(loud) == 0:
+            # Слово целиком под порогом — скорее ошибка порога, чем слова.
+            continue
+        # Время считается по НОМЕРУ кадра, а не от начала слова: слово начинается
+        # между кадрами, и отсчёт от него сдвинул бы обе границы на полкадра.
+        start = float(i0 + loud[0]) * hop
+        end = float(i0 + loud[-1] + 1) * hop
+        new_start = start if start - w.start >= _TRIM_MIN else w.start
+        new_end = end if w.end - end >= _TRIM_MIN else w.end
+        new_end = max(new_end, new_start + _TRIM_MIN_WORD)
+        new_start = min(new_start, new_end - _TRIM_MIN_WORD)
+        # Наружу не выпускаем: обрезка не имеет права ДОБАВИТЬ слову времени.
+        new_start, new_end = max(new_start, w.start), min(new_end, w.end)
+        if new_end - new_start < _TRIM_MIN_WORD:
+            continue
+        if new_start != w.start or new_end != w.end:
+            w.start, w.end = round(new_start, 3), round(new_end, 3)
+            changed += 1
+    return changed
 
 
 # ------------------------------------------------------------------ бэкенды
@@ -235,6 +376,23 @@ def _transcribe_faster_whisper(wav: Path, *, language: str | None, model_name: s
     )
 
 
+def _limit_torch_threads() -> None:
+    """Ограничить потоки torch тем же числом, что и ctranslate2.
+
+    `whisperx.load_model(threads=...)` держит только распознавание; выравнивание
+    считает torch, а он по умолчанию берёт все ядра — тот самый пик тока, из-за
+    которого гаснет ноутбук (см. _ffmpeg_cmd в core/proc.py). Замерено: на 20 с
+    ролике 4 потока против «всех» дают 22.2 с против 21.3 с (разница в пределах
+    разброса), зато средняя загрузка падает с 345% до 256%.
+    """
+    try:
+        import torch
+
+        torch.set_num_threads(max(1, settings.whisper_cpu_threads))
+    except Exception as e:  # noqa: BLE001 — ограничение потоков не условие работы
+        log.debug("не удалось ограничить потоки torch: %s", e)
+
+
 def _whisperx_model(model_name: str, language: str | None):
     """Модель whisperx из кеша. Ключ включает язык: он влияет на загрузку."""
     import whisperx  # type: ignore[import-not-found]
@@ -261,6 +419,7 @@ def _transcribe_whisperx(wav: Path, *, language: str | None, model_name: str) ->
     import whisperx  # type: ignore[import-not-found]
 
     device, compute = _device_and_compute()
+    _limit_torch_threads()
     model = _whisperx_model(model_name, language)
 
     audio = whisperx.load_audio(str(wav))
@@ -344,6 +503,11 @@ def transcribe(
     try:
         fn = _transcribe_whisperx if chosen == "whisperx" else _transcribe_faster_whisper
         result = fn(wav, language=lang or None, model_name=model_name)
+        if settings.asr_trim_word_silence:
+            trimmed = trim_word_silence(result.words, wav)
+            result.meta["trimmed_words"] = trimmed
+            if trimmed:
+                log.info("обрезано тишины на краях слов: %d слов из %d", trimmed, len(result.words))
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)
@@ -389,6 +553,7 @@ def prewarm(language: str | None = None, model: str | None = None) -> None:
     import whisperx  # type: ignore[import-not-found]
 
     device, _compute = _device_and_compute()
+    _limit_torch_threads()
     _whisperx_model(model_name, lang or None)
 
     if not lang:

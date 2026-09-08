@@ -14,15 +14,31 @@
 Кернинг не роскошь: пара «ГА» в Montserrat это −0.138 em, на кегле 88 — почти
 12 пикселей, шесть бюджетов допуска DoD Ф4.
 
-Чего модуль сознательно не умеет: эмодзи и любой символ вне репертуара шрифта
-рисуются фолбэком системы, их ширину этот TTF не знает. Для них берётся
-`FALLBACK_ADVANCE_EM` — оценка, а не измерение (см. `FontMetrics.advance_em`).
+Три места, где браузер ведёт себя не так, как наивная сумма advance-ширин, и
+каждое замерено линейкой `render/measure.mjs` в том самом Chromium, которым идёт
+рендер (числа — в комментариях у соответствующих функций):
+
+1. Кернинг НЕ работает через границу письменности: HarfBuzz режет текст на
+   прогоны по скрипту, и пара «б|a» в «Сбербankовский» не кернится. Наивная
+   модель занижала это слово на 3.2 px — полтора бюджета DoD (`_script`).
+2. Пробелы по краям слова схлопываются: слово в кадре — inline-block, и
+   CSS убирает у него краевой пробел, а идущие подряд пробелы сводит в один
+   (`_collapse`). Без этого « пробел » мерился на 48 px шире.
+3. Эмодзи рисует не наш TTF, а системный цветной шрифт, и весь ZWJ-кластер
+   («👨‍👩‍👧») занимает ОДНУ ширину и получает ОДИН letter-spacing, а не по
+   одному на кодовую точку (`EMOJI_ADVANCE_EM`, `_emoji_cluster`).
+
+Чего модуль сознательно не умеет: символ вне репертуара шрифта, который не
+эмодзи, рисуется фолбэком системы, и его ширину этот TTF не знает — для него
+берётся `FALLBACK_ADVANCE_EM`, оценка, а не измерение.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
+import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -32,11 +48,166 @@ log = logging.getLogger(__name__)
 
 METRICS_DIR = Path(__file__).resolve().parent / "presets" / "metrics"
 
-# Ширина символа, которого нет в шрифте. Эмодзи почти во всех цветных шрифтах
-# квадратные и занимают ровно em, поэтому единица — честная оценка сверху для
-# них и грубая для всего остального. Точно измерить чужой шрифт мы не можем:
-# какой фолбэк подставит Chromium, зависит от системы, а не от пресета.
+# Ширина символа, которого нет в шрифте и который не эмодзи. Точно измерить
+# чужой шрифт мы не можем: какой фолбэк подставит Chromium, зависит от системы,
+# а не от пресета. Единица — грубая оценка, и «оценкой сверху» она не является:
+# замер показал, что настоящий фолбэк бывает и шире em (см. EMOJI_ADVANCE_EM).
 FALLBACK_ADVANCE_EM = 1.0
+
+# Ширина эмодзи-кластера в em — сам глиф, без letter-spacing. Цветной глиф рисует
+# не наш TTF, а системный Noto Color Emoji, метрик у него в пресете нет. Число
+# измерено линейкой `render/measure.mjs` в том же Chromium, которым идёт рендер:
+# 🔥 на кегле 88 с letter-spacing −0.015 занимает 108.48 px, то есть 1.2478 em
+# минус один спейсинг. Эмодзи из одной, двух и пяти кодовых точек (🔥, ❤️, 1️⃣,
+# 👨‍👩‍👧) дали ровно ту же ширину — значит меряется КЛАСТЕР целиком и спейсинг
+# Chromium добавляет к нему один раз, а не по разу на кодовую точку.
+#
+# Число зависит от ХОСТА: цветной шрифт ставит система, а не пресет. Другой
+# эмодзи-шрифт — другая ширина, и никакой метрикой мы это не поймаем. Пока
+# рендер идёт на своей машине, это допущение; при переезде в образ эмодзи-шрифт
+# надо закреплять там же, где и Montserrat.
+EMOJI_ADVANCE_EM = 1.2478
+
+
+# --------------------------------------------------------------------- текст глазами браузера
+
+
+def _round_px(value: float) -> int:
+    """Округление «половина вверх» — как `Math.round` в TSX, а не как `round`.
+
+    Питоновский `round` банковский: `round(2.5)` это 2, а `Math.round(2.5)` — 3.
+    Числа геометрии считаются по обе стороны (`line_gap`, `safe_margin_y` есть и
+    в Captions.tsx), и на ровной половинке они расходились на пиксель — молча и
+    только на некоторых высотах кадра после `Preset.scaled`.
+    """
+    return int(math.floor(value + 0.5))
+
+
+# Границы письменностей, по которым HarfBuzz режет текст на прогоны. Кернинг
+# внутри прогона работает, ЧЕРЕЗ границу — нет: Chromium шейпит прогоны
+# независимо. Замерено на «Сбербankовский»: пары «б|a» (−12) и «k|о» (−24) в
+# сумме дают 3.2 px на кегле 88, полтора бюджета DoD, и наивная модель ровно на
+# столько занижала слово.
+_CYRILLIC = ((0x0400, 0x052F), (0x2DE0, 0x2DFF), (0xA640, 0xA69F))
+_GREEK = ((0x0370, 0x03FF), (0x1F00, 0x1FFF))
+_LATIN = ((0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F), (0x1E00, 0x1EFF))
+
+
+def _script(unit: str) -> str:
+    """Письменность единицы: `lat`, `cyr`, `grk` или `""` для нейтральных.
+
+    Нейтральные — цифры, пунктуация, пробел, эмодзи: собственной письменности у
+    них нет, её они получают от соседей (`_resolve_scripts`).
+    """
+    code = ord(unit[0])
+    for ranges, name in ((_LATIN, "lat"), (_CYRILLIC, "cyr"), (_GREEK, "grk")):
+        for lo, hi in ranges:
+            if lo <= code <= hi:
+                return name
+    return ""
+
+
+def _resolve_scripts(units: Sequence[str]) -> list[str]:
+    """Письменность каждой единицы после итемизации.
+
+    Нейтральный символ прилипает к тому, что СЛЕВА (так делает ICU), а в начале
+    строки — к тому, что справа. Отсюда и берётся граница в «PDF-файл»: дефис
+    уходит в латиницу, и пара «-|ф» кернинг не получает, хотя в шрифте он есть
+    (+10 единиц, 0.9 px на кегле 88 — ровно на столько наивная модель и
+    расходилась с Chromium).
+    """
+    out = [_script(u) for u in units]
+    previous = ""
+    for i, script in enumerate(out):
+        if script:
+            previous = script
+        else:
+            out[i] = previous
+    following = ""
+    for i in range(len(out) - 1, -1, -1):
+        if out[i]:
+            following = out[i]
+        else:
+            out[i] = following
+    return out
+
+
+# Эмодзи. Точное определение из UTS #51 сюда не нужно: нам важно только отличить
+# цветной глиф чужого шрифта от символа своего, а «символ своего» решается
+# наличием в `advances` — стрелки и математика в Montserrat есть, и эмодзи их
+# правилом не перехватит (проверено: «→» и «≈» меряются шрифтом с точностью
+# 0.03 px).
+_EMOJI_BASE = (
+    (0x203C, 0x2049), (0x2122, 0x2122), (0x2139, 0x2139), (0x2194, 0x21AA),
+    (0x231A, 0x231B), (0x2328, 0x2328), (0x23CF, 0x23FA), (0x24C2, 0x24C2),
+    (0x25AA, 0x25FE), (0x2600, 0x27BF), (0x2934, 0x2935), (0x2B00, 0x2B55),
+    (0x3030, 0x3030), (0x303D, 0x303D), (0x3297, 0x3299),
+    (0x1F000, 0x1FAFF),
+)
+# Что прилипает к базе, не заводя новый кластер. Кодами, а не литералами: все
+# эти символы невидимы, и опечатку в литерале не увидит никто.
+_ZWJ = "‍"  # соединитель: 👨‍👩‍👧 это пять кодовых точек и одна ширина
+_VS = ("︎", "️")  # селекторы начертания: текстовое и эмодзи
+_KEYCAP = "⃣"  # хвост клавиши: 1️⃣
+_MODIFIER = frozenset((*_VS, _KEYCAP))
+# База клавиши — обычный символ, эмодзи из него делает только хвост.
+_KEYCAP_BASE = frozenset("#*0123456789")
+
+
+def _in_ranges(code: int, ranges: tuple[tuple[int, int], ...]) -> bool:
+    return any(lo <= code <= hi for lo, hi in ranges)
+
+
+def _is_emoji_base(ch: str) -> bool:
+    return _in_ranges(ord(ch), _EMOJI_BASE)
+
+
+def _is_regional(ch: str) -> bool:
+    return 0x1F1E6 <= ord(ch) <= 0x1F1FF
+
+
+def _is_skin_tone(ch: str) -> bool:
+    return 0x1F3FB <= ord(ch) <= 0x1F3FF
+
+
+def _emoji_cluster(text: str, i: int) -> int:
+    """Длина эмодзи-кластера, начинающегося в позиции i. 0 — там не эмодзи.
+
+    Кластер, а не кодовая точка: «👨‍👩‍👧» это пять кодовых точек, но в кадре одна
+    ширина и один letter-spacing. Два соседних эмодзи — два кластера: склеивать
+    их значит занизить строку вдвое, поэтому продолжение кластера разрешено
+    только модификаторам и явному соединителю.
+    """
+    if _is_regional(text[i]):  # флаг — ровно пара индикаторов
+        return 2 if i + 1 < len(text) and _is_regional(text[i + 1]) else 1
+    keycap = text[i] in _KEYCAP_BASE and (
+        text.startswith(_VS[1] + _KEYCAP, i + 1) or text.startswith(_KEYCAP, i + 1)
+    )
+    if not keycap and not _is_emoji_base(text[i]):
+        return 0
+    j = i + 1
+    while j < len(text):
+        if text[j] in _MODIFIER or _is_skin_tone(text[j]):
+            j += 1
+        elif text[j] == _ZWJ and j + 1 < len(text) and _is_emoji_base(text[j + 1]):
+            j += 2  # соединитель тянет за собой следующую базу
+        else:
+            break
+    return j - i
+
+
+def _collapse(text: str) -> str:
+    """Текст так, как его увидит браузер внутри бокса слова.
+
+    Слово в кадре — `display: inline-block`, то есть собственный контекст: CSS
+    убирает у него краевые пробелы, а идущие подряд сводит в один. Замерено:
+    « пробел » в Chromium 348.92 px против 397.50 у наивной модели — 48 px, два
+    десятка бюджетов DoD. Неразрывный пробел не трогаем: он не схлопывается и
+    ширину имеет (проверено на «а б»).
+    """
+    if " " not in text:
+        return text
+    return " ".join(p for p in text.split(" ") if p)
 
 
 # --------------------------------------------------------------------------- прямоугольник
@@ -119,6 +290,10 @@ class FontMetrics:
     line_gap: int
     cap_height: int | None
     x_height: int | None
+    # Ширина .notdef ЭТОГО шрифта. Лежит в выгрузке, но в расчёте не участвует
+    # намеренно: пустой квадратик рисует не Montserrat, а тот фолбэк, который
+    # Chromium подобрал под символ, и его .notdef другой ширины. Врать точным
+    # числом от чужого шрифта хуже, чем честно взять `FALLBACK_ADVANCE_EM`.
     notdef_advance: int
     advances: dict[str, int]
     ligatures: tuple[str, ...]
@@ -149,24 +324,40 @@ class FontMetrics:
     # -- разбор текста ------------------------------------------------------
 
     def split(self, text: str, *, ligatures: bool = True) -> list[str]:
-        """Текст → последовательность «единиц»: символ или лигатура.
+        """Текст → последовательность «единиц»: то, что ложится в строку одним шагом.
+
+        Единица — символ, лигатура или эмодзи-кластер целиком. Кластер не режется
+        на кодовые точки, потому что Chromium его не режет: «👨‍👩‍👧» получает одну
+        ширину и один letter-spacing, а не пять.
 
         Лигатуры отключаются, когда задан letter-spacing: Chromium в этом случае
         не склеивает `fi`, иначе спейсинг было бы некуда вставить.
         """
-        if not ligatures or not self.ligatures:
-            return list(text)
         out: list[str] = []
         i = 0
         while i < len(text):
-            for lig in self.ligatures:  # отсортированы по убыванию длины
-                if text.startswith(lig, i):
-                    out.append(lig)
-                    i += len(lig)
-                    break
-            else:
-                out.append(text[i])
-                i += 1
+            size = _emoji_cluster(text, i)
+            # Своя буква эмодзи-правилом не перехватывается: стрелки и
+            # математика в Montserrat есть, и меряет их шрифт. Но кластер длиннее
+            # одной кодовой точки перехватывается всегда: «1️⃣» начинается
+            # обычной единицей, а рисуется цветной клавишей, и «→️» с селектором
+            # эмодзи-начертания — тоже.
+            if size and (size > 1 or text[i] not in self.advances):
+                out.append(text[i : i + size])
+                i += size
+                continue
+            if ligatures:
+                for lig in self.ligatures:  # отсортированы по убыванию длины
+                    if text.startswith(lig, i):
+                        out.append(lig)
+                        i += len(lig)
+                        break
+                else:
+                    out.append(text[i])
+                    i += 1
+                continue
+            out.append(text[i])
+            i += 1
         return out
 
     def advance(self, unit: str) -> int:
@@ -174,10 +365,21 @@ class FontMetrics:
         found = self.advances.get(unit)
         if found is not None:
             return found
+        if _emoji_cluster(unit, 0) == len(unit):
+            return round(EMOJI_ADVANCE_EM * self.units_per_em)
+        if all(unicodedata.category(c) in ("Mn", "Me", "Cf") for c in unit):
+            # Диакритика и невидимые управляющие ширины не занимают ни в одном
+            # шрифте: селектор начертания, оставшийся без своей базы, стоил бы
+            # иначе целый em (88 px), которого в кадре нет.
+            return 0
         return round(FALLBACK_ADVANCE_EM * self.units_per_em)
 
     def kern(self, left: str, right: str) -> int:
-        """Кернинг пары в единицах шрифта (обычно отрицательный)."""
+        """Кернинг пары по GPOS, в единицах шрифта (обычно отрицательный).
+
+        Это то, что говорит шрифт. Применит ли его браузер — решает контекст:
+        через границу письменности не применит (см. `advance_em`).
+        """
         l = self.kern_left.get(left)  # noqa: E741 — это сторона пары, не единица длины
         if l is None:
             return 0
@@ -192,7 +394,11 @@ class FontMetrics:
         if not units:
             return 0.0
         total = sum(self.advance(u) for u in units)
-        total += sum(self.kern(a, b) for a, b in zip(units, units[1:]))
+        scripts = _resolve_scripts(units)
+        total += sum(
+            self.kern(a, b) if sa == sb else 0
+            for a, b, sa, sb in zip(units, units[1:], scripts, scripts[1:])
+        )
         return total / self.units_per_em
 
     def units_count(self, text: str, *, ligatures: bool = True) -> int:
@@ -235,6 +441,7 @@ class SizedWord:
 class _HasEmphasis(Protocol):
     text: str
     emphasis: str
+    emoji: str | None
 
 
 def measure_word(
@@ -261,17 +468,34 @@ def measure_word(
     контейнере строки и наследуется уже в пикселях: акцентное слово крупнее, а
     спейсинг у него тот же, что у соседей. Считать em от кегля акцента —
     ошибка в 1.6 px на слове из семи букв.
+
+    Пробелы по краям слова НЕ считаются: бокс слова — inline-block, и CSS их
+    убирает (`_collapse`). Ширину одиночного пробела между словами берёт
+    `space_width`: там пробел лежит между боксами и схлопнуться ему не с чем.
     """
     if not text:
         return 0.0
     if uppercase:
         text = text.upper()
+    text = _collapse(text)
+    if not text:
+        return 0.0
     use_ligatures = letter_spacing == 0.0
     width = metrics.advance_em(text, ligatures=use_ligatures) * font_size
     if letter_spacing:
         spacing_px = letter_spacing * (font_size if spacing_size is None else spacing_size)
         width += spacing_px * metrics.units_count(text, ligatures=use_ligatures)
     return width
+
+
+def space_width(font_size: float, *, metrics: FontMetrics, letter_spacing: float = 0.0) -> float:
+    """Ширина пробела МЕЖДУ словами.
+
+    Отдельная функция, а не `measure_word(" ")`: в боксе слова краевой пробел
+    схлопывается и стоит ноль, а между двумя inline-block-боксами он настоящий и
+    рисуется кеглем строки. Одной функцией эти два случая не описать.
+    """
+    return (metrics.advance(" ") / metrics.units_per_em + letter_spacing) * font_size
 
 
 def measure_line(
@@ -313,7 +537,7 @@ def measure_line(
         )
         for w in items
     )
-    space = measure_word(" ", base_size, metrics=metrics, letter_spacing=letter_spacing)
+    space = space_width(base_size, metrics=metrics, letter_spacing=letter_spacing)
     return total + space * (len(items) - 1)
 
 
@@ -334,8 +558,19 @@ def emphasis_size(emphasis: str, preset: Any) -> float:
 
 
 def sized_words(words: Iterable[_HasEmphasis], preset: Any) -> list[SizedWord]:
-    """Слова плана → слова с кеглями пресета."""
-    return [SizedWord(w.text, emphasis_size(getattr(w, "emphasis", "none"), preset)) for w in words]
+    """Слова плана → слова с кеглями пресета.
+
+    Эмодзи входит в текст слова: в кадре он лежит внутри спана слова, за
+    пробелом и его кеглем (Captions.tsx). Забыть его — значит занизить строку на
+    полторы ширины em, то есть на 130 px при кегле 88.
+    """
+    return [
+        SizedWord(
+            f"{w.text} {w.emoji}" if getattr(w, "emoji", None) else w.text,
+            emphasis_size(getattr(w, "emphasis", "none"), preset),
+        )
+        for w in words
+    ]
 
 
 # --------------------------------------------------------------------------- субтитр
@@ -351,7 +586,7 @@ def safe_margin_y(preset: Any, frame_height: int) -> float:
     Прижатый к краю текст обрезает интерфейс ленты, этого не хочет ни один
     пресет, поэтому нижняя граница жёсткая (так же считает Captions.tsx).
     """
-    return max(preset.caption.margin, round(frame_height * preset.geometry.safe_area_ratio))
+    return max(preset.caption.margin, _round_px(frame_height * preset.geometry.safe_area_ratio))
 
 
 def caption_text_width(preset: Any, frame_width: int) -> float:
@@ -370,18 +605,51 @@ def caption_text_width(preset: Any, frame_width: int) -> float:
 
 def line_gap(preset: Any) -> float:
     """Просвет между строками блока (flex-`gap` в Captions.tsx)."""
-    return round(preset.font.size * (preset.caption.line_height - 1))
+    return float(_round_px(preset.font.size * (preset.caption.line_height - 1)))
 
 
-def _line_height(line: Sequence[SizedWord], preset: Any) -> float:
-    """Высота строчного бокса: `line-height` пресета от самого крупного слова.
+def line_box_height(sizes: Iterable[float], preset: Any) -> float:
+    """Высота строчного бокса по кеглям слов в строке.
 
     `line-height` задан числом, значит наследуется множителем и считается от
-    собственного кегля элемента. Строчный бокс поднимает самое высокое слово —
-    акцентное.
+    собственного кегля элемента: бокс поднимает самое крупное слово. Но не
+    бывает ниже СТРУТА — кегля самого контейнера строки, то есть кегля пресета:
+    как бы сильно перенос ни ужал слова, строка остаётся высотой
+    `font.size * line_height` (замерено в Chromium: строка из слова кеглем 35
+    занимает 93.27 px, ровно струт, а не 37).
+
+    Единственная реализация на оба пути — `caption_rect` и `_rect_of_lines`.
+    Пока их было две, вторая знала про струт, а первая нет.
     """
-    biggest = max((w.size for w in line), default=preset.font.size)
+    biggest = max([float(preset.font.size), *(float(s) for s in sizes)])
     return biggest * preset.caption.line_height
+
+
+def block_rect(
+    position: str, text_w: float, text_h: float, preset: Any, frame_size: tuple[int, int]
+) -> Rect:
+    """Коробка блока вокруг текста: паддинги, рамка и привязка к краю кадра.
+
+    Одно место на оба пути расчёта субтитра. Числа обязаны совпадать с
+    Captions.tsx: паддинг и рамка панели, отступ от края с нижней границей по
+    безопасной зоне, центрирование по горизонтали (блок центрирован всегда,
+    `caption.align` управляет выключкой ВНУТРИ панели).
+    """
+    width, height = frame_size
+    panel = preset.panel
+    chrome_x = 2 * (panel.padding_x + panel.border_width) if panel.enabled else 0.0
+    chrome_y = 2 * (panel.padding_y + panel.border_width) if panel.enabled else 0.0
+    box_w = text_w + chrome_x
+    box_h = text_h + chrome_y
+
+    margin = safe_margin_y(preset, height)
+    if position == "top":
+        y = float(margin)
+    elif position == "center":
+        y = (height - box_h) / 2
+    else:
+        y = height - margin - box_h
+    return Rect((width - box_w) / 2, y, box_w, box_h)
 
 
 class _HasLines(Protocol):
@@ -392,16 +660,24 @@ class _HasLines(Protocol):
 def caption_rect(block: _HasLines, preset: Any, frame_size: tuple[int, int]) -> Rect:
     """Прямоугольник, который займёт блок субтитра, — вместе с панелью.
 
+    Кегли выводятся из ВЫДЕЛЕНИЯ слов (`sized_words`), поэтому функция отвечает
+    на вопрос «куда попадёт вот такой блок», а не «куда попал вот этот». В план
+    едет прямоугольник от `render_plan._rect_of_lines`: там кегли уже посчитаны
+    переносом (длинное слово ужато) и ширина взята из него же. Обе функции
+    считают коробку и привязку к краю одним `block_rect` и высоту строки одним
+    `line_box_height` — разъехаться им негде.
+
     Два условия на входе. Пресет уже приведён к высоте кадра (`Preset.scaled`):
     кегли и паддинги берутся как есть. Текст слов уже в экранной форме
     (`display_text`): регистр и пунктуация решены до нас, второй раз их трогать
     нельзя, иначе ширина разойдётся с тем, что нарисует рендерер.
 
-    Ширина текста ограничена бюджетом `caption_text_width`. Это не подгонка, а
-    контракт: в TSX на панели стоит `max-width`, поэтому шире она не станет в
-    любом случае. Уложить слова в бюджет — задача переноса строк (Ф5).
+    Ширина текста ограничена бюджетом `caption_text_width`: уложить слова в
+    бюджет — задача переноса строк (Ф5), и блок, который в него не уложили,
+    здесь не расширяется. `_rect_of_lines` в этом месте ведёт себя иначе и не
+    зажимает ничего — сознательно, см. его комментарий.
     """
-    width, height = frame_size
+    width, _ = frame_size
     metrics = metrics_for(preset)
     ls = preset.font.letter_spacing
     lines = [sized_words(line, preset) for line in block.lines if line]
@@ -415,28 +691,11 @@ def caption_rect(block: _HasLines, preset: Any, frame_size: tuple[int, int]) -> 
                 line, metrics=metrics, letter_spacing=ls, base_size=float(preset.font.size)
             ),
         )
-        text_h += _line_height(line, preset)
+        text_h += line_box_height((w.size for w in line), preset)
         if i:
             text_h += line_gap(preset)
     text_w = min(text_w, caption_text_width(preset, width))
-
-    panel = preset.panel
-    chrome_x = 2 * (panel.padding_x + panel.border_width) if panel.enabled else 0.0
-    chrome_y = 2 * (panel.padding_y + panel.border_width) if panel.enabled else 0.0
-    box_w = text_w + chrome_x
-    box_h = text_h + chrome_y
-
-    margin = safe_margin_y(preset, height)
-    if block.position == "top":
-        y = float(margin)
-    elif block.position == "center":
-        y = (height - box_h) / 2
-    else:
-        y = height - margin - box_h
-
-    # Блок центрируется по кадру всегда: `caption.align` управляет выключкой
-    # текста внутри панели, а не положением самой панели.
-    return Rect((width - box_w) / 2, y, box_w, box_h)
+    return block_rect(block.position, text_w, text_h, preset, frame_size)
 
 
 # --------------------------------------------------------------------------- картинки
