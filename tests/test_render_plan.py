@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -753,6 +754,76 @@ def _luminance(color: str) -> float:
 
 def _contrast(a: float, b: float) -> float:
     return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def _to_srgb(linear: float) -> float:
+    """Линейная яркость → sRGB. Chromium смешивает альфу именно здесь."""
+    return 12.92 * linear if linear <= 0.0031308 else 1.055 * linear ** (1 / 2.4) - 0.055
+
+
+def _to_linear(srgb: float) -> float:
+    return srgb / 12.92 if srgb <= 0.04045 else ((srgb + 0.055) / 1.055) ** 2.4
+
+
+def _panel_opacity(preset: Any, bg: float) -> float:
+    """Прозрачность панели glass под фоном `bg` — тот же расчёт, что в `lookFor`.
+
+    Стилевая часть у этого пресета нулевая (обе опорные прозрачности 0), поэтому
+    остаётся только аварийный рычаг: подъём ровно до порога.
+    """
+    rule = preset.contrast
+    text = _luminance(preset.colors.active)
+    panel = _luminance(preset.panel.color)
+    span = rule.luma_light - rule.luma_dark
+    t = min(1.0, max(0.0, (bg - rule.luma_dark) / span))
+    opacity = rule.panel_opacity_dark + (rule.panel_opacity_light - rule.panel_opacity_dark) * t
+
+    def under(alpha: float) -> float:
+        return _to_linear(_to_srgb(bg) + (_to_srgb(panel) - _to_srgb(bg)) * alpha)
+
+    if _contrast(text, under(opacity)) < rule.min_ratio:
+        target = (text + 0.05) / rule.min_ratio - 0.05
+        lo, hi = _to_srgb(bg), _to_srgb(panel)
+        opacity = max(opacity, min(1.0, max(0.0, (_to_srgb(target) - lo) / (hi - lo))))
+    return min(1.0, max(0.0, opacity))
+
+
+def test_glass_panel_is_a_safeguard_and_not_a_background():
+    """Плашка под субтитром — аварийная, а не декоративная.
+
+    Пользователь просил убрать фон, но у glass панель была ЕДИНСТВЕННЫМ рычагом
+    контраста: обе опорные точки текста белые, и без панели белый текст на
+    светлом фоне остаётся без защиты. Ответ соседнего bold — переброс текста в
+    чёрный — здесь не годится: белый перестаёт брать порог уже на `bg_luma`
+    0.183, то есть на обычной комнатной стене, и субтитр чернел бы посреди
+    ролика.
+
+    Поэтому панель осталась включённой, но её стилевая часть обнулена: базовая
+    прозрачность и обе опорные — нули. Видно её ровно там, где белый физически
+    не читается, и ровно настолько, насколько требует порог.
+    """
+    preset = load_preset("glass")
+    assert preset.panel.enabled, "панель — рычаг контраста, выключать её нельзя"
+    assert preset.panel.opacity == 0.0, "базовая прозрачность — это фон без замера"
+    assert preset.panel.blur == 0, "размытие видно даже при нулевой заливке"
+    assert preset.panel.border_opacity == 0.0, "рамка обводит невидимую панель"
+
+    # Тёмный фон — панели нет вовсе. Кадр пользователя лежит здесь.
+    assert _panel_opacity(preset, 0.05) == 0.0
+    assert _panel_opacity(preset, 0.15) == 0.0
+
+    text = _luminance(preset.colors.active)
+    panel_luma = _luminance(preset.panel.color)
+    previous = 0.0
+    for step in range(101):
+        bg = step / 100
+        alpha = _panel_opacity(preset, bg)
+        under = _to_linear(_to_srgb(bg) + (_to_srgb(panel_luma) - _to_srgb(bg)) * alpha)
+        assert _contrast(text, under) >= preset.contrast.min_ratio - 1e-6, (bg, alpha)
+        assert alpha >= previous - 1e-9, f"панель обязана расти по яркости фона: {bg}"
+        previous = alpha
+    # На самом светлом фоне плашка всё же нужна — иначе рычага нет вообще.
+    assert _panel_opacity(preset, 1.0) > 0.5
 
 
 @pytest.mark.parametrize("name", ["glass", "bold"])

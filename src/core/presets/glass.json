@@ -23,13 +23,13 @@
   "panel": {
     "enabled": true,
     "color": "#0B0F14",
-    "opacity": 0.5,
-    "blur": 24,
+    "opacity": 0.0,
+    "blur": 0,
     "radius": 30,
     "padding_x": 34,
     "padding_y": 22,
     "border_color": "#FFFFFF",
-    "border_opacity": 0.14,
+    "border_opacity": 0.0,
     "border_width": 1
   },
   "caption": {
@@ -45,8 +45,8 @@
     "min_ratio": 4.5,
     "luma_dark": 0.2,
     "luma_light": 0.8,
-    "panel_opacity_dark": 0.5,
-    "panel_opacity_light": 0.86,
+    "panel_opacity_dark": 0.0,
+    "panel_opacity_light": 0.0,
     "text_dark": "#FFFFFF",
     "text_light": "#FFFFFF"
   },
