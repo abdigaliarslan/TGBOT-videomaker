@@ -93,6 +93,9 @@ class PlanBroll:
     # Место картинки В ПОКОЕ. `fullscreen_to_inset` стартует с полного кадра,
     # но живёт здесь, и разводить с субтитром надо именно это место.
     rect: Rect | None = None
+    # Направление медленного наезда, −1 или 1 (М3). Приезжает из EDL, чтобы
+    # перерендер того же листа дал ровно то же видео.
+    kb_dir: int = 1
 
 
 @dataclass(slots=True)
@@ -140,6 +143,7 @@ class RenderPlan:
                     asset=x.get("asset"),
                     query=x.get("query", ""),
                     rect=_rect_from(x.get("rect")),
+                    kb_dir=int(x.get("kb_dir", 1) or 1),
                 )
                 for x in data.get("broll", [])
             ],
@@ -176,6 +180,7 @@ class RenderPlan:
                     "asset": x.asset,
                     "query": x.query,
                     "rect": x.rect.to_dict() if x.rect else None,
+                    "kb_dir": x.kb_dir,
                 }
                 for x in self.broll
             ],
@@ -512,6 +517,7 @@ def build_plan(
                 asset=b.asset,
                 query=b.query,
                 rect=rect_of_broll(b.anchor, anim),
+                kb_dir=1 if getattr(b, "kb_dir", 1) >= 0 else -1,
             )
         )
 

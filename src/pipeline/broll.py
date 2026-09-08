@@ -270,6 +270,11 @@ def sanitize_items(edl: EDL, items: list[dict[str, Any]]) -> list[Broll]:
         last_at = at
         if len(kept) >= _cap(edl):
             break
+    # Направление наезда чередуется по позиции в ролике: две вставки подряд,
+    # едущие в одну сторону, читаются как один длинный проезд. Из индекса, а не
+    # из `random`, — иначе перерендер того же листа даёт другое видео (М3).
+    for i, item in enumerate(kept):
+        item.kb_dir = 1 if i % 2 else -1
     return kept
 
 

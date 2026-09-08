@@ -16,7 +16,7 @@
 import React from "react";
 import { Img, interpolate, spring, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
 import type { PlanBroll, Preset, Rect } from "../types";
-import { MIN_ANIM_FRAMES, animFrames, easeOut, motionPx, springFrames } from "../style";
+import { MIN_ANIM_FRAMES, animFrames, animNum, easeOut, motionPx, springFrames } from "../style";
 
 /** Появление и уход карточки. Обе фазы одной природы — тормозят к своему концу. */
 const FADE_MS = 220;
@@ -154,6 +154,29 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
 
   const border = preset.panel.border_width * 2 * chrome;
 
+  /**
+   * Ken Burns (М3): картинка едет всю свою жизнь, от появления до ухода.
+   * Неподвижный кадр поверх видео читается как наклейка — это и есть основная
+   * причина, по которой вставки выглядят вставленными.
+   *
+   * Живёт на отдельном слое ВНУТРИ карточки, а не на самой карточке: скругление,
+   * рамка и тень принадлежат карточке и ехать вместе с содержимым не должны.
+   *
+   * Сдвиг считается от высоты БОКСА, а не кадра. В плане стоит доля высоты кадра
+   * (0.012), и для полноэкранной вставки это одно и то же, но у карточки в углу
+   * высота вчетверо меньше: 23 px сдвига при запасе `kb_scale/2 · 475 = 9.5 px`
+   * вытащили бы из-под краёв пустоту. От высоты бокса запас держится сам —
+   * `kb_shift_ratio` меньше половины `kb_scale`, и оба растут по `p` линейно.
+   */
+  const life = Math.max(1, endFrame - startFrame);
+  const p = interpolate(framesIn, [0, life], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const kbScale = 1 + animNum(preset.animation, "kb_scale", 0.04) * p;
+  const kbRatio = animNum(preset.animation, "kb_shift_ratio", 0.012);
+  const kbShift = (item.kb_dir ?? 1) * rest.height * kbRatio * p;
+
   return (
     <div
       style={{
@@ -174,48 +197,62 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
         willChange: "transform, opacity",
       }}
     >
-      {isFull ? (
-        // Полный кадр: `cover` здесь режет по-крупному и это не устранить
-        // пропорцией карточки — сток отдаёт 2:3, кадр 9:16, и максимум из
-        // (1080/800, 1920/1200) = 1.6 уводит за края по 100 px исходника с
-        // каждой стороны, 15.6 % ширины. Поэтому объект вписывается целиком, а
-        // поля закрывает размытая копия того же кадра.
-        <>
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          transform: `translateY(${kbShift}px) scale(${kbScale})`,
+          willChange: "transform",
+        }}
+      >
+        {isFull ? (
+          // Полный кадр: `cover` здесь режет по-крупному и это не устранить
+          // пропорцией карточки — сток отдаёт 2:3, кадр 9:16, и максимум из
+          // (1080/800, 1920/1200) = 1.6 уводит за края по 100 px исходника с
+          // каждой стороны, 15.6 % ширины. Поэтому объект вписывается целиком, а
+          // поля закрывает размытая копия того же кадра.
+          <>
+            <Img
+              src={staticFile(item.asset)}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                filter: `blur(${Math.round(height * 0.025)}px) brightness(0.65)`,
+                // Блюр размазывает края в прозрачность — подложку берём с запасом.
+                transform: "scale(1.15)",
+              }}
+            />
+            <Img
+              src={staticFile(item.asset)}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "contain",
+              }}
+            />
+          </>
+        ) : (
+          // Карточка наследует пропорцию источника, поэтому в покое `cover` не
+          // режет ничего. Во время перелёта бокс масштабируется до полного кадра
+          // и края уходят за него — это цена движения, а не постоянный кроп.
+          // Если источник всё же другой пропорции, смотрим выше центра: сток
+          // кладёт объект в верхнюю треть кадра.
           <Img
             src={staticFile(item.asset)}
             style={{
-              position: "absolute",
-              inset: 0,
               width: "100%",
               height: "100%",
               objectFit: "cover",
-              filter: `blur(${Math.round(height * 0.025)}px) brightness(0.65)`,
-              // Блюр размазывает края в прозрачность — подложку берём с запасом.
-              transform: "scale(1.15)",
+              objectPosition: "center 30%",
             }}
           />
-          <Img
-            src={staticFile(item.asset)}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              objectFit: "contain",
-            }}
-          />
-        </>
-      ) : (
-        // Карточка наследует пропорцию источника, поэтому в покое `cover` не
-        // режет ничего. Во время перелёта бокс масштабируется до полного кадра
-        // и края уходят за него — это цена движения, а не постоянный кроп.
-        // Если источник всё же другой пропорции, смотрим выше центра: сток
-        // кладёт объект в верхнюю треть кадра.
-        <Img
-          src={staticFile(item.asset)}
-          style={{ width: "100%", height: "100%", objectFit: "cover", objectPosition: "center 30%" }}
-        />
-      )}
+        )}
+      </div>
     </div>
   );
 };

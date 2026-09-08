@@ -86,16 +86,15 @@ export const popBump = (q: number, rise = 0.45): number => {
  * Пиксельные из них пересчитывает под высоту кадра `Preset.scaled(height)`;
  * миллисекунды и множители от высоты не зависят.
  *
- * В `types.ts` (чужой файл) поля ещё не объявлены, поэтому читаем через узкий
- * каст и запасное значение — старый план без этих полей рендерится по-старому.
+ * Читаются через запасное значение: план, собранный пресетом без этого поля
+ * (сохранённый лист, чужой инструмент), обязан рендериться по-старому, а не
+ * падать на `undefined`. Ключи берутся из самого типа пресета — новое поле в
+ * `types.ts` становится доступно здесь само.
  */
 type AnimNumbers = {
-  block_shift_px?: number;
-  block_leave_px?: number;
-  broll_slide_px?: number;
-  block_overlap_min_ms?: number;
-  block_leave_falloff?: number;
-  block_leave_scale?: number;
+  [K in keyof Preset["animation"] as undefined extends Preset["animation"][K]
+    ? K
+    : never]: Preset["animation"][K];
 };
 
 export const animNum = (
@@ -103,7 +102,7 @@ export const animNum = (
   key: keyof AnimNumbers,
   fallback: number,
 ): number => {
-  const value = (animation as AnimNumbers)[key];
+  const value = animation[key];
   return typeof value === "number" ? value : fallback;
 };
 

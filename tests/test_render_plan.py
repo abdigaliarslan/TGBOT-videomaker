@@ -232,6 +232,28 @@ def test_broll_is_timed_and_clamped():
     assert item.end - item.start == pytest.approx(2.0, abs=0.05)
 
 
+def test_ken_burns_direction_reaches_the_renderer(tmp_path):
+    """М3: знак наезда едет из EDL в план и переживает запись на диск.
+
+    Проверяется именно сквозной путь: рендерер не имеет права выбирать
+    направление сам, а значит план обязан его донести — в том числе перерендер,
+    который читает сохранённый JSON.
+    """
+    edl = broll_edl("center")
+    edl.broll[0].kb_dir = -1
+    plan = build_plan(edl, "v.mp4", cfg=cfg())
+    assert plan.broll[0].kb_dir == -1
+    assert RenderPlan.from_dict(plan.to_dict()).broll[0].kb_dir == -1
+
+
+def test_plan_without_ken_burns_still_reads():
+    """План, собранный до М3, полей наезда не содержит — читается по-старому."""
+    plan = build_plan(broll_edl("center"), "v.mp4", cfg=cfg())
+    data = plan.to_dict()
+    del data["broll"][0]["kb_dir"]
+    assert RenderPlan.from_dict(data).broll[0].kb_dir == 1
+
+
 def test_plan_round_trips_through_json():
     plan = build_plan(sample_edl(), "v.mp4", cfg=cfg())
     again = RenderPlan.from_dict(plan.to_dict())

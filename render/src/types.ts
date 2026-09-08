@@ -56,6 +56,12 @@ export type PlanBroll = {
   query: string;
   /** Место картинки в покое: `fullscreen_to_inset` едет с полного кадра сюда. */
   rect?: Rect | null;
+  /**
+   * Направление медленного наезда, −1 или 1 (М3). Считает Python из позиции
+   * вставки в ролике. `Math.random` здесь запрещён: перерендер обязан давать
+   * то же самое видео.
+   */
+  kb_dir?: number;
 };
 
 
@@ -113,7 +119,14 @@ export type Preset = {
     shout_rotate: number;
     /** Ход движения в пикселях кадра 1920; пересчитывает Preset.scaled(). */
     block_shift_px?: number;
+    block_leave_px?: number;
     broll_slide_px?: number;
+    block_overlap_min_ms?: number;
+    block_leave_falloff?: number;
+    block_leave_scale?: number;
+    /** Ken Burns на вставке: наезд и сползание за всю жизнь картинки (М3). */
+    kb_scale?: number;
+    kb_shift_ratio?: number;
   };
   /** Геометрия в долях кадра: раньше эти числа были константами в компонентах. */
   geometry: {
