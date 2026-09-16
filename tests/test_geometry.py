@@ -515,8 +515,14 @@ def test_caption_rect_never_exceeds_the_width_budget():
 
 
 def test_caption_text_width_leaves_room_for_the_panel():
-    """Доля кадра не должна выталкивать панель за безопасную зону."""
+    """Доля кадра не должна выталкивать панель за безопасную зону.
+
+    Панель включается ЗДЕСЬ, а не берётся из темы: ни у одной поставляемой темы
+    её больше нет (фон под субтитром убран целиком), но арифметика бюджета
+    обязана остаться верной для любой будущей темы с панелью.
+    """
     preset = load_preset("glass").model_copy(deep=True)
+    preset.panel.enabled = True
     preset.geometry.max_line_width_ratio = 0.99
     budget = caption_text_width(preset, FRAME[0])
     safe = FRAME[0] - 2 * FRAME[0] * preset.geometry.safe_area_ratio
@@ -1035,9 +1041,13 @@ def test_caption_rect_matches_the_chromium_box():
                 ],
                 # `gap` намеренно не передаём: его считает сама страница
                 # формулой Captions.tsx, и сверка проверяет заодно `line_gap`.
-                "padding_x": preset.panel.padding_x,
-                "padding_y": preset.panel.padding_y,
-                "border_width": preset.panel.border_width,
+                # Хром панели ровно так же, как в `Captions.tsx`: у выключенной
+                # панели его нет вовсе. Раньше здесь стоял хром из пресета без
+                # оглядки на `enabled`, и стоило убрать фон у темы, как сверка
+                # разъехалась на 70×46 px — на сам этот хром.
+                "padding_x": preset.panel.padding_x if preset.panel.enabled else 0,
+                "padding_y": preset.panel.padding_y if preset.panel.enabled else 0,
+                "border_width": preset.panel.border_width if preset.panel.enabled else 0,
                 "max_width": caption_text_width(preset, FRAME[0]),
             }
             for key, b in blocks.items()
@@ -1111,9 +1121,13 @@ def test_the_production_block_rect_matches_chromium(name: str):
                 ],
                 # `gap` намеренно не передаём: его считает сама страница
                 # формулой Captions.tsx, и сверка проверяет заодно `line_gap`.
-                "padding_x": preset.panel.padding_x,
-                "padding_y": preset.panel.padding_y,
-                "border_width": preset.panel.border_width,
+                # Хром панели ровно так же, как в `Captions.tsx`: у выключенной
+                # панели его нет вовсе. Раньше здесь стоял хром из пресета без
+                # оглядки на `enabled`, и стоило убрать фон у темы, как сверка
+                # разъехалась на 70×46 px — на сам этот хром.
+                "padding_x": preset.panel.padding_x if preset.panel.enabled else 0,
+                "padding_y": preset.panel.padding_y if preset.panel.enabled else 0,
+                "border_width": preset.panel.border_width if preset.panel.enabled else 0,
             }
             for key, (lines, _) in laid.items()
         ],

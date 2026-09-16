@@ -21,18 +21,18 @@
     "shadow": "#000000"
   },
   "panel": {
-    "enabled": true,
+    "enabled": false,
     "color": "#0B0F14",
     "opacity": 0.0,
-    "blur": 12,
+    "blur": 0,
     "radius": 30,
     "padding_x": 34,
     "padding_y": 22,
     "border_color": "#FFFFFF",
-    "border_opacity": 0.55,
-    "border_width": 2,
+    "border_opacity": 0.0,
+    "border_width": 1,
     "glass_color": "#FFFFFF",
-    "glass_opacity": 0.14
+    "glass_opacity": 0.0
   },
   "caption": {
     "position": "bottom",
@@ -45,7 +45,7 @@
     "pinned": true
   },
   "contrast": {
-    "enabled": true,
+    "enabled": false,
     "min_ratio": 4.5,
     "luma_dark": 0.2,
     "luma_light": 0.8,

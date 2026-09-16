@@ -883,8 +883,15 @@ def _panel_opacity(preset: Any, bg: float) -> float:
 
     Стилевая часть у этого пресета нулевая (обе опорные прозрачности 0), поэтому
     остаётся только аварийный рычаг: подъём ровно до порога.
+
+    Два выхода в начале — не оптимизация, а повтор `lookFor`: там правило с
+    `enabled: false` возвращает базу целиком, а подъём до порога стоит под
+    `preset.panel.enabled`. Без них зеркало считало панель у темы, где панели
+    нет вовсе, и показывало 0.019 там, где рендерер рисует ноль.
     """
     rule = preset.contrast
+    if not rule.enabled or not preset.panel.enabled:
+        return preset.panel.opacity if preset.panel.enabled else 0.0
     text = _luminance(preset.colors.active)
     panel = _luminance(preset.panel.color)
     span = rule.luma_light - rule.luma_dark
@@ -901,50 +908,41 @@ def _panel_opacity(preset: Any, bg: float) -> float:
     return min(1.0, max(0.0, opacity))
 
 
-def test_glass_panel_is_a_safeguard_and_not_a_background():
-    """Плашка под субтитром — аварийная, а не декоративная.
+def test_glass_has_no_background_under_the_caption_at_all():
+    """У glass фона под субтитром нет НИ ПРИ КАКОМ фоне кадра — решение владельца.
 
-    Пользователь просил убрать фон, но у glass панель была ЕДИНСТВЕННЫМ рычагом
-    контраста: обе опорные точки текста белые, и без панели белый текст на
-    светлом фоне остаётся без защиты. Ответ соседнего bold — переброс текста в
-    чёрный — здесь не годится: белый перестаёт брать порог уже на `bg_luma`
-    0.183, то есть на обычной комнатной стене, и субтитр чернел бы посреди
-    ролика.
+    Здесь снят предохранитель, а не украшение, и это осознанно. Правило Ф9
+    поднимало тёмную заслонку там, где белый текст не берёт порог 4.5 — то есть
+    на светлом фоне, начиная примерно с `bg_luma` 0.18. Владелец продукта видел
+    этот аргумент и ответил: фон убрать совсем, случай светлой стены не
+    рассматривать. Читаемость держит одна мягкая тень (`softShadow`).
 
-    Поэтому ЗАСЛОНКА (`panel.color`/`opacity`) осталась включённой, но её
-    стилевая часть обнулена: базовая прозрачность и обе опорные — нули. Видно её
-    ровно там, где белый физически не читается, и ровно настолько, насколько
-    требует порог.
+    Замер эталона на его стороне: из тринадцати блоков одиннадцать идут вообще
+    без подложки, и ни один — с непрозрачной. Оставшиеся два несли матовое
+    стекло, но это украшение, а не предохранитель: с яркостью фона под блоком и
+    с его суетливостью оно не коррелирует (STYLE_PLAN §1.4).
 
-    Матовое стекло (`glass_*`, `blur`, рамка) — это ДРУГОЙ слой, украшение, и
-    оно приходит только к блокам с флагом `panel`. Здесь проверяется, что оно
-    не подменяет собой заслонку: цвет заслонки обязан остаться тёмным, иначе у
-    правила контраста пропадёт рычаг.
+    Тест сторожит именно РЕШЕНИЕ. Если кто-то вернёт панель ради контраста, он
+    сначала уронит этот тест и прочитает, почему её убрали.
     """
     preset = load_preset("glass")
-    assert preset.panel.enabled, "панель — рычаг контраста, выключать её нельзя"
-    assert preset.panel.opacity == 0.0, "базовая прозрачность — это фон без замера"
-    assert _luminance(preset.panel.color) < 0.05, (
-        "заслонка обязана быть тёмной: светлой белый текст не спасти"
+    assert not preset.panel.enabled, "фон под субтитром убран целиком"
+    assert not preset.contrast.enabled, (
+        "правило Ф9 выключено: его единственный рычаг у этой темы — панель"
     )
-    assert preset.panel.glass_opacity > 0.0, "стекло у темы есть — его носят помеченные блоки"
+    # Ни одна ручка панели не должна оставаться взведённой: выключенный флаг
+    # прячет их сегодня, но включённый обратно вернул бы фон молча.
+    assert preset.panel.opacity == 0.0
+    assert preset.panel.glass_opacity == 0.0
+    assert preset.panel.border_opacity == 0.0
+    assert preset.panel.blur == 0
+    assert preset.contrast.panel_opacity_dark == 0.0
+    assert preset.contrast.panel_opacity_light == 0.0
 
-    # Тёмный фон — панели нет вовсе. Кадр пользователя лежит здесь.
-    assert _panel_opacity(preset, 0.05) == 0.0
-    assert _panel_opacity(preset, 0.15) == 0.0
-
-    text = _luminance(preset.colors.active)
-    panel_luma = _luminance(preset.panel.color)
-    previous = 0.0
+    # Правило выключено — значит панели нет на ЛЮБОЙ яркости фона, включая ту,
+    # ради которой предохранитель и существовал.
     for step in range(101):
-        bg = step / 100
-        alpha = _panel_opacity(preset, bg)
-        under = _to_linear(_to_srgb(bg) + (_to_srgb(panel_luma) - _to_srgb(bg)) * alpha)
-        assert _contrast(text, under) >= preset.contrast.min_ratio - 1e-6, (bg, alpha)
-        assert alpha >= previous - 1e-9, f"панель обязана расти по яркости фона: {bg}"
-        previous = alpha
-    # На самом светлом фоне плашка всё же нужна — иначе рычага нет вообще.
-    assert _panel_opacity(preset, 1.0) > 0.5
+        assert _panel_opacity(preset, step / 100) == 0.0
 
 
 @pytest.mark.parametrize("name", ["glass", "bold"])
@@ -961,6 +959,8 @@ def test_contrast_rule_has_a_lever_on_every_background(name: str):
     """
     preset = load_preset(name)
     rule = preset.contrast
+    if not rule.enabled:
+        pytest.skip(f"{name}: правило контраста выключено сознательно — гарантировать нечего")
     anchors = (rule.text_dark, rule.text_light)
     for step in range(101):
         bg = step / 100
