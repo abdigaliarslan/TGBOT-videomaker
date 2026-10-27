@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.core.config import Settings, settings as default_settings
-from src.db.models import Base, Job, JobStatus, LLMCall, User
+from src.db.models import Base, Job, JobStatus, LLMCall, Payment, User
 from src.llm.client import Usage
 
 log = logging.getLogger(__name__)
@@ -110,6 +110,18 @@ async def get_user(user_id: int) -> User | None:
         return await s.get(User, user_id)
 
 
+async def set_user_lang(user_id: int, lang: str) -> None:
+    async with session() as s:
+        await s.execute(update(User).where(User.id == user_id).values(lang=lang))
+
+
+async def user_ids_with_chosen_lang() -> list[tuple[int, str]]:
+    """Пользователи, выбиравшие язык руками, — только у них в чате бывает своя кнопка меню."""
+    async with session() as s:
+        q = select(User.id, User.lang).where(User.lang.isnot(None))
+        return [(row.id, row.lang) for row in (await s.execute(q)).all()]
+
+
 async def set_user_preset(user_id: int, preset: str) -> None:
     async with session() as s:
         await s.execute(update(User).where(User.id == user_id).values(preset=preset))
@@ -125,6 +137,10 @@ async def bump_videos_done(user_id: int) -> None:
 # ------------------------------------------------------------------ задачи
 
 
+class InsufficientBalance(Exception):
+    """На балансе нет ни одного ролика — задачу не создаём."""
+
+
 async def create_job(
     user_id: int,
     *,
@@ -133,8 +149,28 @@ async def create_job(
     source_size: int | None,
     preset: str,
     chat_id: int | None = None,
+    options: dict[str, Any] | None = None,
+    charge: bool = False,
 ) -> Job:
+    """Создаёт задачу. С `charge=True` — списывает ролик в ТОЙ ЖЕ транзакции.
+
+    Списание и задача — одна транзакция намеренно: по отдельности обрыв между
+    ними оставлял бы либо списанный ролик без задачи, либо задачу без оплаты.
+    Проверка баланса и списание — один UPDATE с условием, поэтому две
+    одновременные загрузки не уведут баланс в минус.
+    """
     async with session() as s:
+        if charge:
+            left = (
+                await s.execute(
+                    update(User)
+                    .where(User.id == user_id, User.balance >= 1)
+                    .values(balance=User.balance - 1)
+                    .returning(User.balance)
+                )
+            ).scalar_one_or_none()
+            if left is None:
+                raise InsufficientBalance(user_id)
         job = Job(
             user_id=user_id,
             source_file_id=source_file_id,
@@ -143,6 +179,8 @@ async def create_job(
             preset=preset,
             chat_id=chat_id,
             status=JobStatus.QUEUED,
+            options=options,
+            charged=charge,
         )
         s.add(job)
         await s.flush()
@@ -166,11 +204,12 @@ async def mark_running(job_id: uuid.UUID | str) -> None:
     )
 
 
-async def mark_failed(job_id: uuid.UUID | str, error: str) -> None:
+async def mark_failed(job_id: uuid.UUID | str, error: str, *, code: str = "failed") -> None:
     await update_job(
         job_id,
         status=JobStatus.FAILED,
         error=error[:4000],
+        error_code=code[:32],
         finished_at=datetime.now(timezone.utc),
     )
 
@@ -200,16 +239,115 @@ async def jobs_in_flight() -> list[Job]:
 
     Нужны при старте бота: наблюдатели живут в памяти процесса, и после
     рестарта пользователь иначе никогда не дождётся своего ролика.
+
+    Сюда же попадают УЖЕ ГОТОВЫЕ, но не отданные. Если монтаж доделался, пока
+    бот лежал, задача больше не «в работе» — и без этой ветки файл так и
+    остался бы лежать в хранилище. Проверено на живом ролике.
     """
     async with session() as s:
         q = (
             select(Job)
             .where(
-                Job.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+                Job.status.in_([JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.DONE]),
+                Job.delivered.is_(False),
                 Job.chat_id.isnot(None),
                 Job.status_message_id.isnot(None),
             )
             .order_by(Job.created_at)
+        )
+        return list((await s.execute(q)).scalars())
+
+
+async def mark_delivered(job_id: uuid.UUID | str) -> None:
+    """Ролик ушёл пользователю — второй раз слать не нужно."""
+    await update_job(job_id, delivered=True)
+
+
+async def refund_job(job_id: uuid.UUID | str) -> bool:
+    """Возвращает списанный за задачу ролик. Ровно один раз; без списания — ничего.
+
+    Флаг снимается и баланс растёт в одной транзакции: повторный вызов (воркер
+    упал и задачу разбирают снова) находит `charged = false` и ничего не делает.
+    """
+    async with session() as s:
+        owner = (
+            await s.execute(
+                update(Job)
+                .where(Job.id == uuid.UUID(str(job_id)), Job.charged.is_(True))
+                .values(charged=False)
+                .returning(Job.user_id)
+            )
+        ).scalar_one_or_none()
+        if owner is None:
+            return False
+        await s.execute(update(User).where(User.id == owner).values(balance=User.balance + 1))
+        return True
+
+
+async def credit_payment(
+    user_id: int, *, charge_id: str, stars: int, videos: int, payload: str
+) -> bool:
+    """Зачисляет оплату. False — этот платёж уже зачислен (повторный апдейт)."""
+    async with session() as s:
+        inserted = (
+            await s.execute(
+                pg_insert(Payment)
+                .values(
+                    user_id=user_id,
+                    telegram_charge_id=charge_id,
+                    stars=stars,
+                    videos=videos,
+                    payload=payload[:128],
+                    created_at=datetime.now(timezone.utc),
+                )
+                .on_conflict_do_nothing(index_elements=[Payment.telegram_charge_id])
+                .returning(Payment.id)
+            )
+        ).scalar_one_or_none()
+        if inserted is None:
+            return False
+        await s.execute(update(User).where(User.id == user_id).values(balance=User.balance + videos))
+        return True
+
+
+async def jobs_with_expired_files(cutoff: datetime, limit: int = 500) -> list[Job]:
+    """Законченные задачи старше `cutoff`, у которых файлы ещё не удалены.
+
+    Только законченные: у задачи в работе исходник нужен воркеру прямо сейчас.
+    Возраст — от окончания, а у задач, упавших до старта, — от создания.
+    """
+    async with session() as s:
+        q = (
+            select(Job)
+            .where(
+                Job.status.in_([JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED]),
+                Job.files_purged_at.is_(None),
+                func.coalesce(Job.finished_at, Job.created_at) < cutoff,
+            )
+            .order_by(Job.created_at)
+            .limit(limit)
+        )
+        return list((await s.execute(q)).scalars())
+
+
+async def mark_files_purged(job_id: uuid.UUID | str) -> None:
+    await update_job(
+        job_id,
+        source_key=None,
+        result_key=None,
+        source_local_path=None,
+        files_purged_at=datetime.now(timezone.utc),
+    )
+
+
+async def user_jobs(user_id: int, limit: int = 30) -> list[Job]:
+    """Все задачи пользователя, свежие сверху — для экрана «Ролики»."""
+    async with session() as s:
+        q = (
+            select(Job)
+            .where(Job.user_id == user_id)
+            .order_by(Job.created_at.desc())
+            .limit(limit)
         )
         return list((await s.execute(q)).scalars())
 

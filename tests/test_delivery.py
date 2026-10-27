@@ -88,3 +88,28 @@ async def test_logic_errors_are_not_retried(tmp_path):
     with pytest.raises(TelegramBadRequest):
         await mod._send_video(bot, 1, job(), tmp_path / "r.mp4", "glass")
     assert bot.calls == 1
+
+
+async def test_the_video_is_sent_with_its_real_frame(tmp_path, monkeypatch):
+    """Без ширины и высоты iPhone показывал вертикальный ролик растянутым почти в квадрат."""
+    from src.pipeline import probe as probe_mod
+
+    class Info:
+        width, height, duration = 1080, 1920, 31.77
+
+    monkeypatch.setattr(probe_mod, "probe", lambda _p: Info())
+    sent = {}
+
+    class Bot:
+        async def send_video(self, **kw):
+            sent.update(kw)
+
+    await mod._send_video(Bot(), 1, job(), tmp_path / "r.mp4", "glass")
+    assert (sent["width"], sent["height"], sent["duration"]) == (1080, 1920, 32)
+
+
+async def test_an_unreadable_file_is_still_sent(tmp_path):
+    """Не прочитали размеры — отправляем как раньше, а не теряем ролик."""
+    bot = FakeBot(fail=0)
+    await mod._send_video(bot, 1, job(), tmp_path / "missing.mp4", "glass")
+    assert bot.calls == 1

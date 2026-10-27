@@ -1,0 +1,139 @@
+# Прод на общем сервере. Запуск: deploy/deploy.sh (или вручную из корня репозитория)
+#
+#   docker compose -p reelbot -f deploy/compose.yml up -d --build
+#
+# Наружу не открыт ни один порт: база, Redis и MinIO живут только во внутренней
+# сети проекта, а Mini App выходит в интернет через cloudflared изнутри
+# контейнера бота. На сервере уже заняты 80/443/5432/6379/8080 другими
+# проектами — пересечься с ними нечем.
+#
+# `restart: unless-stopped` поднимает всё после перезагрузки сервера и после
+# падения процесса. Лимиты памяти и процессора — потому что сервер общий:
+# рендер ролика съест всё, что ему дадут, а соседние сервисы должны жить.
+
+name: reelbot
+
+x-app: &app
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  image: reelbot-app:latest
+  restart: unless-stopped
+  env_file: .env
+  environment: &app-env
+    # Адреса внутри сети проекта перекрывают локальные из .env.
+    POSTGRES_DSN: postgresql+asyncpg://reelbot:${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в deploy/.env}@postgres:5432/reelbot
+    REDIS_URL: redis://redis:6379/0
+    S3_ENDPOINT: http://minio:9000
+    S3_ACCESS_KEY: reelbot
+    S3_SECRET_KEY: ${S3_SECRET_KEY:?задайте S3_SECRET_KEY в deploy/.env}
+    BOT_API_URL: ""
+    ASR_BACKEND: faster_whisper
+    WORK_DIR: /data/work
+    WEBAPP_HOST: 127.0.0.1
+    WEBAPP_TUNNEL: "1"
+  volumes:
+    - work:/data/work
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: reelbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: reelbot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reelbot -d reelbot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    mem_limit: 512m
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 256m
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: reelbot
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    mem_limit: 512m
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  # Миграции — один раз перед стартом бота и воркера.
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  bot:
+    <<: *app
+    command: ["python", "-m", "src.bot.main"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    cpus: 1.0
+    mem_limit: 768m
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "arq", "src.worker.tasks.WorkerSettings"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    volumes:
+      - work:/data/work
+      - models:/models
+    # Распознавание, ffmpeg и Chromium рендера. Половина ядер сервера, чтобы
+    # соседние проекты не вставали, пока монтируется ролик.
+    cpus: 3.0
+    mem_limit: 4g
+    shm_size: 1g
+
+  # Почасовая уборка рабочих папок, переживших падение воркера.
+  janitor:
+    <<: *app
+    command: ["python", "-m", "arq", "src.worker.tasks.LightWorkerSettings"]
+    depends_on:
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    cpus: 0.25
+    mem_limit: 256m
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  work:
+  models:

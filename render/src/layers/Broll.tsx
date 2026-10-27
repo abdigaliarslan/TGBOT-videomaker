@@ -14,10 +14,12 @@
  */
 
 import React from "react";
+import { lightLeak } from "@remotion/effects/light-leak";
 import {
   Img,
   OffthreadVideo,
   Sequence,
+  Solid,
   interpolate,
   spring,
   staticFile,
@@ -138,6 +140,10 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
   // единственная геометрия, которую можно взять, ничего не решая самому.
   const rest: Rect = item.rect ?? { x: 0, y: 0, width, height };
   const isFull = rest.width >= width - 1 && rest.height >= height - 1;
+  // Источник уже в пропорции кадра — значит `cover` ничего не срежет и
+  // подложка под ним не нужна. Допуск в 1 % берёт и ровные 9:16, и то, что
+  // модель отдаёт на пиксель мимо (1080×1920 против 1024×1820).
+  const fitsFrame = item.aspect != null && Math.abs(item.aspect - width / height) < 0.01;
 
   let scale = 1;
   let shiftX = 0;
@@ -247,17 +253,22 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
           willChange: "transform",
         }}
       >
-        {isFull && item.kind !== "video" ? (
-          // Полный кадр ФОТО: `cover` здесь режет по-крупному и это не устранить
-          // пропорцией карточки — сток отдаёт 2:3, кадр 9:16, и максимум из
-          // (1080/800, 1920/1200) = 1.6 уводит за края по 100 px исходника с
-          // каждой стороны, 15.6 % ширины. Поэтому объект вписывается целиком, а
-          // поля закрывает размытая копия того же кадра.
+        {isFull && item.kind !== "video" && !fitsFrame ? (
+          // Полный кадр ФОТО ЧУЖОЙ ПРОПОРЦИИ: `cover` здесь режет по-крупному и
+          // это не устранить пропорцией карточки — сток отдаёт 2:3, кадр 9:16, и
+          // максимум из (1080/800, 1920/1200) = 1.6 уводит за края по 100 px
+          // исходника с каждой стороны, 15.6 % ширины. Поэтому объект
+          // вписывается целиком, а поля закрывает размытая копия того же кадра.
           //
-          // Для клипа этот приём не берём: у Pexels `orientation=portrait` — это
-          // 1080x1920, то есть ровно кадр, резать почти нечего. А подложка стоила
-          // бы ВТОРОГО декодирования того же клипа на каждом кадре рендера, при
-          // том что М4 и так платит одним лишним видеопотоком.
+          // Картинку, нарисованную сразу под 9:16, этот приём только портит:
+          // резать нечего, а размытая рамка по краям превращает полноэкранную
+          // вставку обратно в «фотографию в рамке» — ровно то, от чего уходили.
+          // Отсюда `fitsFrame` ниже.
+          //
+          // Для клипа приём не берём по той же причине: у Pexels
+          // `orientation=portrait` — это 1080x1920, то есть ровно кадр. А
+          // подложка стоила бы ВТОРОГО декодирования того же клипа на каждом
+          // кадре рендера, при том что М4 и так платит лишним видеопотоком.
           <>
             <Img
               src={staticFile(item.asset)}
@@ -307,10 +318,65 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
   );
 };
 
+/**
+ * Вспышка света поверх реза на вход полноэкранной вставки. Пик засвета стоит
+ * ровно на первом кадре картинки: вспышка разгорается над видео и гаснет уже
+ * над вставкой, поэтому сама подмена кадра прячется в самом ярком месте.
+ *
+ * Карточке в углу вспышка не положена — у неё видны края, и засвет на весь
+ * кадр ради маленькой картинки читался бы как сбой экспозиции. Из этого же
+ * правила исключение — `fullscreen_to_inset`: он входит полным кадром.
+ *
+ * Шейдер WebGL2, в рендере без GPU — программный (swangle/angle). Стоит он
+ * только на кадрах самой вспышки: вне окна компонент ничего не рисует.
+ */
+const LightLeak: React.FC<{ item: PlanBroll; preset: Preset; seed: number }> = ({
+  item,
+  preset,
+  seed,
+}) => {
+  const frame = useCurrentFrame();
+  const { fps, width, height } = useVideoConfig();
+  const leakMs = animNum(preset.animation, "leak_ms", 0);
+  if (!item.asset || leakMs <= 0) return null;
+  const span = animFrames(leakMs, fps);
+
+  const rest = item.rect;
+  const isFull = !rest || (rest.width >= width - 1 && rest.height >= height - 1);
+  if (!isFull && item.anim !== "fullscreen_to_inset") return null;
+
+  const cut = Math.round(item.start * fps);
+  const from = cut - Math.floor(span / 2);
+  if (frame < from || frame > from + span) return null;
+
+  return (
+    <Solid
+      width={width}
+      height={height}
+      color="transparent"
+      style={{ position: "absolute", inset: 0 }}
+      effects={[
+        lightLeak({
+          seed,
+          hueShift: animNum(preset.animation, "leak_hue", 0),
+          progress: interpolate(frame, [from, from + span], [0, 1], {
+            extrapolateLeft: "clamp",
+            extrapolateRight: "clamp",
+          }),
+        }),
+      ]}
+    />
+  );
+};
+
 export const Broll: React.FC<{ items: PlanBroll[]; preset: Preset }> = ({ items, preset }) => (
   <>
     {items.map((item, i) => (
-      <Item key={`${item.start}-${i}`} item={item} preset={preset} />
+      <React.Fragment key={`${item.start}-${i}`}>
+        <Item item={item} preset={preset} />
+        {/* Сид по номеру вставки: две вспышки в ролике не повторяют одна другую. */}
+        <LightLeak item={item} preset={preset} seed={i} />
+      </React.Fragment>
     ))}
   </>
 );

@@ -11,12 +11,15 @@ stdout. Никакого HTTP-сервиса между ними (§1).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from src.core.config import Settings, settings as default_settings
 from src.core.proc import ProcError, arun, run
@@ -41,6 +44,7 @@ class RenderRequest:
     crf: int = 18
     concurrency: int | None = None
     x264_preset: str = "medium"
+    gl: str | None = None
 
 
 def _stage_asset(src: str | Path, assets_dir: Path) -> str:
@@ -97,6 +101,8 @@ def _request_payload(req: RenderRequest) -> str:
     }
     if req.concurrency:
         payload["concurrency"] = req.concurrency
+    if req.gl:
+        payload["gl"] = req.gl
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -123,9 +129,10 @@ def render_remotion(
     assets_dir: str | Path,
     job_key: str = "job",
     cfg: Settings | None = None,
-    crf: int = 18,
+    crf: int | None = None,
 ) -> Path:
     cfg = cfg or default_settings
+    crf = cfg.render_crf if crf is None else crf
     if not RENDER_CLI.exists():
         raise RenderError(f"нет {RENDER_CLI}: проект рендера не установлен")
     if not (RENDER_DIR / "node_modules").exists():
@@ -140,6 +147,8 @@ def render_remotion(
         job_key=job_key,
         crf=crf,
         concurrency=cfg.render_concurrency,
+        x264_preset=cfg.render_x264_preset,
+        gl=cfg.render_gl or None,
     )
     try:
         stdout = run(["node", str(RENDER_CLI)], stdin=_request_payload(req), timeout=10_800)
@@ -152,6 +161,62 @@ def render_remotion(
     return produced
 
 
+_PROGRESS = re.compile(r"\[render\] progress (\d+)")
+
+
+async def _run_node_with_progress(
+    payload: str, *, timeout: float, on_progress: Callable[[float], Awaitable[None] | None] | None
+) -> str:
+    """Запуск рендера с чтением stderr по строкам, а не одним куском в конце.
+
+    `arun` отдаёт вывод только после выхода процесса, а рендер — самый долгий
+    этап: на 30-секундном ролике он шёл четыре минуты, и всё это время полоса
+    прогресса стояла на месте. Пользователь видел «завис на 97 %».
+    """
+    cmd = ["node", str(RENDER_CLI)]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    tail: list[str] = []
+
+    async def pump_stderr() -> None:
+        assert proc.stderr is not None
+        async for raw in proc.stderr:
+            line = raw.decode("utf-8", "replace").rstrip()
+            tail.append(line)
+            del tail[:-200]  # в ошибку уходит хвост, а не весь лог рендера
+            m = _PROGRESS.search(line)
+            if m and on_progress is not None:
+                try:
+                    res = on_progress(min(1.0, int(m.group(1)) / 100))
+                    if hasattr(res, "__await__"):
+                        await res  # type: ignore[misc]
+                except Exception as e:  # noqa: BLE001 — прогресс не должен ронять рендер
+                    log.warning("прогресс рендера не записан: %s", e)
+
+    async def run() -> bytes:
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(payload.encode())
+        await proc.stdin.drain()
+        proc.stdin.close()
+        out, _ = await asyncio.gather(proc.stdout.read(), pump_stderr())
+        await proc.wait()
+        return out
+
+    try:
+        out = await asyncio.wait_for(run(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+    if proc.returncode != 0:
+        raise ProcError(cmd, proc.returncode or -1, "\n".join(tail))
+    return out.decode("utf-8", "replace")
+
+
 async def arender_remotion(
     plan: RenderPlan,
     out: str | Path,
@@ -159,18 +224,26 @@ async def arender_remotion(
     assets_dir: str | Path,
     job_key: str = "job",
     cfg: Settings | None = None,
-    crf: int = 18,
+    crf: int | None = None,
+    on_progress: Callable[[float], Awaitable[None] | None] | None = None,
 ) -> Path:
-    """Асинхронный вариант: воркер не должен блокировать loop на рендере."""
+    """Асинхронный вариант: воркер не должен блокировать loop на рендере.
+
+    `on_progress(доля 0..1)` вызывается по мере рендера кадров.
+    """
     cfg = cfg or default_settings
+    crf = cfg.render_crf if crf is None else crf
     assets_dir = Path(assets_dir)
     plan = prepare_assets(plan, assets_dir, cfg=cfg)
     req = RenderRequest(
         plan=plan, out=Path(out), assets_dir=assets_dir, job_key=job_key,
         crf=crf, concurrency=cfg.render_concurrency,
+        x264_preset=cfg.render_x264_preset, gl=cfg.render_gl or None,
     )
     try:
-        stdout = await arun(["node", str(RENDER_CLI)], stdin=_request_payload(req), timeout=10_800)
+        stdout = await _run_node_with_progress(
+            _request_payload(req), timeout=10_800, on_progress=on_progress
+        )
     except ProcError as e:
         raise RenderError(f"Remotion не отрендерил: {e}") from e
     produced = Path(stdout.strip().splitlines()[-1]) if stdout.strip() else req.out

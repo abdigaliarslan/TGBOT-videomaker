@@ -1,4 +1,4 @@
-"""Хранилище: MinIO (S3-совместимое) — исходники, результаты, кеш картинок.
+"""Хранилище: MinIO (S3-совместимое) или папка на диске — исходники, результаты, кеш картинок.
 
 boto3 синхронный, поэтому все вызовы уходят в поток: воркер не должен
 блокировать loop на заливке гигабайтного файла.
@@ -88,6 +88,17 @@ class Storage:
     def delete_sync(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)
 
+    def delete_older_than_sync(self, cutoff: datetime) -> int:
+        """Удаляет объекты, изменённые раньше `cutoff`. Возвращает, сколько удалено."""
+        removed = 0
+        pages = self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket)
+        for page in pages:
+            old = [{"Key": o["Key"]} for o in page.get("Contents", []) if o["LastModified"] < cutoff]
+            for i in range(0, len(old), 1000):
+                self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": old[i : i + 1000]})
+                removed += len(old[i : i + 1000])
+        return removed
+
     def presigned_url_sync(self, key: str, expires: int = 86_400) -> str:
         return self.client.generate_presigned_url(
             "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires
@@ -109,6 +120,9 @@ class Storage:
     async def delete(self, key: str) -> None:
         await asyncio.to_thread(self.delete_sync, key)
 
+    async def delete_older_than(self, cutoff: datetime) -> int:
+        return await asyncio.to_thread(self.delete_older_than_sync, cutoff)
+
     async def presigned_url(self, key: str, expires: int = 86_400) -> str:
         return await asyncio.to_thread(self.presigned_url_sync, key, expires)
 
@@ -121,4 +135,84 @@ class Storage:
             return False
 
 
-storage = Storage()
+class LocalStorage(Storage):
+    """То же хранилище, но в папке на диске — для выкладки на один сервер.
+
+    Бот и воркер на одной машине видят один диск, и S3 между ними — лишний
+    сервис. На сервере без root его вдобавок нечем поднять: сборки MinIO больше
+    не раздаются, а Docker недоступен. Ключи те же, что у S3, поэтому БД и код
+    не отличают один бэкенд от другого.
+    """
+
+    def __init__(self, cfg: Settings | None = None) -> None:
+        super().__init__(cfg)
+        self.root = Path(self.cfg.storage_dir).resolve()
+
+    def _path(self, key: str) -> Path:
+        path = (self.root / key).resolve()
+        # Ключ приходит из БД; «../» в нём не должен выводить за пределы хранилища.
+        if self.root != path and self.root not in path.parents:
+            raise ValueError(f"ключ выходит за пределы хранилища: {key!r}")
+        return path
+
+    def ensure_bucket(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def upload_sync(self, path: str | Path, key: str, *, content_type: str | None = None) -> str:
+        import shutil
+
+        dst = self._path(key)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        part = dst.with_name(dst.name + ".part")
+        shutil.copyfile(path, part)
+        part.replace(dst)  # читатель никогда не увидит недописанный файл
+        return key
+
+    def download_sync(self, key: str, path: str | Path) -> Path:
+        import shutil
+
+        src = self._path(key)
+        if not src.is_file():
+            raise FileNotFoundError(f"в хранилище нет {key}")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, path)
+        return path
+
+    def exists_sync(self, key: str) -> bool:
+        return self._path(key).is_file()
+
+    def delete_sync(self, key: str) -> None:
+        self._path(key).unlink(missing_ok=True)
+
+    def delete_older_than_sync(self, cutoff: datetime) -> int:
+        """Файлы старше `cutoff` и опустевшие после них папки дат и задач."""
+        if not self.root.is_dir():
+            return 0
+        border = cutoff.timestamp()
+        removed = 0
+        for path in list(self.root.rglob("*")):
+            if path.is_file() and path.stat().st_mtime < border:
+                path.unlink(missing_ok=True)
+                removed += 1
+        # Снизу вверх: сначала папки задач, потом дней, месяцев, лет.
+        for folder in sorted((p for p in self.root.rglob("*") if p.is_dir()), key=lambda p: -len(p.parts)):
+            try:
+                folder.rmdir()  # только пустые
+            except OSError:
+                pass
+        return removed
+
+    def presigned_url_sync(self, key: str, expires: int = 86_400) -> str:
+        raise NotImplementedError("у локального хранилища нет ссылок — ролик отдаёт сам бот")
+
+    async def healthy(self) -> bool:
+        return self.root.is_dir()
+
+
+def make_storage(cfg: Settings | None = None) -> Storage:
+    cfg = cfg or default_settings
+    return LocalStorage(cfg) if cfg.storage_backend == "local" else Storage(cfg)
+
+
+storage = make_storage()

@@ -1,0 +1,13 @@
+[Unit]
+Description=ReelBot — Redis (пользовательский, порт 6390)
+
+[Service]
+Environment=LD_LIBRARY_PATH=%h/reelbot-runtime/sys/usr/lib/x86_64-linux-gnu
+ExecStartPre=/bin/mkdir -p %h/reelbot-runtime/redis
+ExecStart=%h/reelbot-runtime/sys/usr/bin/redis-server --port 6390 --bind 127.0.0.1 --dir %h/reelbot-runtime/redis --appendonly yes --save "60 1" --daemonize no
+Restart=always
+RestartSec=5
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

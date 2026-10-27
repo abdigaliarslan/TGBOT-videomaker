@@ -72,9 +72,26 @@ def capture(cmd: list[str], *, timeout: float | None = None) -> tuple[int, str, 
     return p.returncode, p.stdout or "", p.stderr or ""
 
 
+def _ffmpeg_cmd(args: list[str]) -> list[str]:
+    """Общая часть вызова ffmpeg, включая потолок по потокам.
+
+    Без `-threads` ffmpeg берёт все ядра. На тонком ноутбуке (15-ваттный
+    Ryzen U) это разом поднимает потребление до предела, и машина с изношенной
+    батареей просто выключается — проверено дважды, оба раза журнал обрывается
+    на полуслове, без штатного завершения. Ограничение стоит нескольких
+    процентов скорости и снимает пик.
+    """
+    from src.core.config import settings
+
+    base = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
+    if settings.ffmpeg_threads > 0:
+        base += ["-threads", str(settings.ffmpeg_threads)]
+    return [*base, *args]
+
+
 def ffmpeg(args: list[str], *, timeout: float | None = None) -> str:
-    return run(["ffmpeg", "-hide_banner", "-nostdin", "-y", *args], timeout=timeout)
+    return run(_ffmpeg_cmd(args), timeout=timeout)
 
 
 async def affmpeg(args: list[str], *, timeout: float | None = None) -> str:
-    return await arun(["ffmpeg", "-hide_banner", "-nostdin", "-y", *args], timeout=timeout)
+    return await arun(_ffmpeg_cmd(args), timeout=timeout)

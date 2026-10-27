@@ -1,8 +1,20 @@
 """M7: b-roll — план вставок от vision-модели и добыча картинок.
 
-Порядок источников: сток (Pexels) дешевле генерации, генерация (WaveSpeed) —
-запасной путь, когда стока нет. Результат кешируется по хешу запроса: один и
-тот же «vintage film camera» не должен стоить дважды.
+Порядок источников задаёт `broll_source`:
+
+- `generate` (по умолчанию) — картинку РИСУЮТ по описанию кадра, сток остаётся
+  запасным путём. Так вставка попадает в смысл фразы и в палитру ролика, а не в
+  ближайшее к слову изображение с чужого стола. Ровно этим эталонный ролик и
+  отличается от нашего: там графика заказная (`STYLE_PLAN.md §5`).
+- `stock` — прежний порядок: клип Pexels → фото Pexels → генерация.
+
+Сток при этом можно выключить целиком, не трогая код: без `PEXELS_API_KEY`
+`_fetch_stock` сразу возвращает `None`, и единственным источником остаётся
+генерация. Не нарисовалось — вставка отменяется молча, как и раньше при полном
+провале. Так оно и настроено сейчас.
+
+Результат кешируется по хешу запроса: один и тот же «vintage film camera» не
+должен стоить дважды, а генерация, в отличие от стока, стоит денег.
 
 ⚠ Моделям запрещено рисовать текст на картинках: кириллицу они врут (§5 M7).
 Надписи накладывает слой субтитров.
@@ -18,15 +30,16 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import httpx
 
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, Broll, BrollAnim, Timeline
 from src.core.proc import ProcError, ffmpeg, run
+from src.llm import images as imagegen
 from src.llm.client import LLMBadOutput, LLMClient, LLMUnavailable
-from src.llm.schemas import BROLL_SCHEMA
+from src.llm.schemas import BROLL_SCHEMA, IMAGE_CHECK_SCHEMA
 from src.pipeline.director import words_table
 from src.pipeline.probe import MediaInfo, probe
 
@@ -35,7 +48,6 @@ log = logging.getLogger(__name__)
 from src.core.edl import BROLL_MAX, BROLL_WINDOW  # потолок один на весь проект
 FRAMES_FOR_VISION = 4
 PEXELS_URL = "https://api.pexels.com/v1/search"
-WAVESPEED_URL = "https://api.wavespeed.ai/api/v3"
 
 # Какую нарезку брать у Pexels. Параметр `orientation=portrait` в поиске
 # отбирает вертикальные СНИМКИ, но не влияет на то, какую версию файла отдадут.
@@ -51,12 +63,30 @@ PEXELS_FALLBACK_RENDITIONS = ("large2x", "original", "large")
 # ⚠ Проверено на реальной генерации: одного «no text» мало — модель всё равно
 # рисует на предметах фальшивые надписи и перевёрнутые буквы (§5 M7 ⚠).
 # Поэтому просим не только убрать текст, но и выбрать ракурс, где надписей
-# просто не бывает: крупный план, поверхность без брендов.
+# просто не бывает: поверхность без брендов, никаких экранов и упаковок.
+#
+# Стилевых слов здесь больше нет. Раньше сюда была вшита «photographic,
+# natural light, shallow depth of field» — то есть у каждой вставки любого
+# ролика был один и тот же навязанный вид. Стиль теперь приезжает из самого
+# ролика (`ReelStyle`), и зашитая фотографичность ему прямо мешала: эталонная
+# вставка — не фотография, а нарисованный кадр.
 NO_TEXT_SUFFIX = (
-    "photographic, natural light, shallow depth of field, clean unbranded surfaces, "
-    "close-up angle that avoids any labels, "
+    "clean unbranded surfaces, no screens, no packaging, "
     "no text, no letters, no numbers, no words, no captions, no signage, "
     "no watermark, no logo, no brand name, no user interface, no typography"
+)
+
+# Чем дописывается промпт, когда памятки нет: модель не вернула `style` или
+# её вовсе не спрашивали. Нейтрально и коротко — лучше, чем пустота, и
+# заведомо хуже, чем снятое с кадров ролика.
+FALLBACK_STYLE_HINT = "cinematic, restrained colours, soft directional light"
+
+# Композиция кадра. Едет отдельной строкой, а не внутри промпта модели: это
+# наша раскладка, а не её замысел (§0). Вертикаль и запас по краям — потому
+# что сверху и снизу лягут субтитры.
+COMPOSITION_HINT = (
+    "vertical 9:16 composition, single subject centred, "
+    "generous empty margin at the top and bottom of the frame"
 )
 
 # --- подача картинки (Ф7) ---------------------------------------------------
@@ -152,6 +182,76 @@ GLUE_WORDS = frozenset(
 
 class BrollError(RuntimeError):
     pass
+
+
+# --------------------------------------------------------------------------- стиль
+
+
+@dataclass(slots=True)
+class ReelStyle:
+    """Как выглядит ЭТОТ ролик: палитра, свет, настроение.
+
+    Заполняется один раз на ролик тем же vision-вызовом, который планирует
+    вставки, — он и так смотрит на кадры, поэтому отдельного запроса и
+    отдельных денег памятка не стоит.
+
+    Смысл её в том, что промпт вставки описывает ПРЕДМЕТ, а памятка — мир, в
+    котором этот предмет снят. Без неё две вставки одного ролика приходят из
+    двух разных миров, и обе — не из того, куда их вставляют.
+    """
+
+    palette: str = ""
+    light: str = ""
+    mood: str = ""
+
+    @classmethod
+    def from_raw(cls, raw: Any) -> "ReelStyle":
+        if not isinstance(raw, dict):
+            return cls()
+        def text(name: str) -> str:
+            value = raw.get(name)
+            return value.strip()[:120] if isinstance(value, str) else ""
+        return cls(palette=text("palette"), light=text("light"), mood=text("mood"))
+
+    def hint(self) -> str:
+        parts = [p for p in (self.mood, self.palette, self.light) if p]
+        return ", ".join(parts) if parts else FALLBACK_STYLE_HINT
+
+    def __bool__(self) -> bool:
+        return bool(self.palette or self.light or self.mood)
+
+
+def build_image_prompt(subject: str, style: ReelStyle | None, *, fix: str = "") -> str:
+    """Полный промпт генерации: предмет → мир ролика → раскладка → запрет текста.
+
+    Порядок не случаен. Первым идёт предмет, потому что именно он обязан
+    выжить, если модель обрежет длинный промпт; запрет надписей идёт последним,
+    потому что на него модели реагируют тем хуже, чем раньше он упомянут
+    (проверено на живых генерациях, §5 M7 ⚠).
+    """
+    hint = (style or ReelStyle()).hint()
+    parts = [subject.strip().rstrip(".")]
+    if fix:
+        parts.append(fix.strip().rstrip("."))
+    # Памятка помечена словами «цвет и свет»: без пометки модель читает её как
+    # продолжение описания сцены и пытается мирить несовместимое — «горный
+    # хребет на закате» плюс «уютный вечерний интерьер» из памятки. Пометка
+    # переводит её в разряд обработки, а место остаётся за промптом вставки.
+    parts += [f"Colour and light: {hint}", COMPOSITION_HINT, NO_TEXT_SUFFIX]
+    return ". ".join(p for p in parts if p)
+
+
+@dataclass(slots=True)
+class BrollPlan:
+    """Что vision-вызов решил про вставки: сами вставки, стиль и кадры ролика.
+
+    Кадры возвращаются вместе с планом, а не перечитываются с диска: они уже
+    прочитаны для самого вызова, и именно они идут референсом в генерацию.
+    """
+
+    items: list[Broll]
+    style: ReelStyle
+    frames: list[bytes]
 
 
 # --------------------------------------------------------------------------- кадры
@@ -287,12 +387,12 @@ async def plan_broll(
     llm: LLMClient,
     info: MediaInfo | None = None,
     cfg: Settings | None = None,
-) -> list[Broll]:
-    """Vision-вызов: кадры + транскрипт → план вставок."""
+) -> BrollPlan:
+    """Vision-вызов: кадры + транскрипт → план вставок и стиль ролика."""
     cfg = cfg or default_settings
     cap = _cap(edl)
     if cap <= 0:
-        return []
+        return BrollPlan([], ReelStyle(), [])
 
     frames = extract_frames(src, work / "frames", info=info)
     images = [p.read_bytes() for p in frames]
@@ -317,21 +417,29 @@ async def plan_broll(
         )
     except (LLMUnavailable, LLMBadOutput) as e:
         log.warning("план b-roll не получен: %s", e)
-        return []
+        return BrollPlan([], ReelStyle(), images)
 
     items = sanitize_items(edl, result.data.get("items") or [])
+    style = ReelStyle.from_raw(result.data.get("style"))
     log.info("b-roll: модель предложила %d, оставлено %d (потолок %d)",
              len(result.data.get("items") or []), len(items), cap)
-    return items
+    if style:
+        log.info("стиль ролика: %s", style.hint())
+    return BrollPlan(items, style, images)
 
 
 # --------------------------------------------------------------------------- картинки
 
 
-def cache_key(query: str, prompt: str | None, size: str) -> str:
+def cache_key(query: str, prompt: str | None, size: str, *, model: str = "", style: str = "") -> str:
     # Нарезка входит в ключ намеренно: сменили её — старые файлы другого
     # разрешения перестают подходить, и кеш обязан это заметить сам.
-    raw = f"{query}|{prompt or ''}|{size}|{PEXELS_RENDITION}".lower().strip()
+    #
+    # Модель и стиль — по той же причине. Один и тот же «vintage film camera»,
+    # нарисованный другой моделью или под другую палитру, — это ДРУГАЯ
+    # картинка, и отдавать вместо неё старую значит молча проигнорировать
+    # смену настроек. Оба поля пустые у стока, поэтому его ключи не съехали.
+    raw = f"{query}|{prompt or ''}|{size}|{PEXELS_RENDITION}|{model}|{style}".lower().strip()
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -507,53 +615,81 @@ async def fetch_pexels_video(
     return None
 
 
-async def generate_wavespeed(
-    client: httpx.AsyncClient, prompt: str, cfg: Settings
-) -> bytes | None:
-    """Диффузия как фолбэк, когда стока нет."""
-    if not cfg.wavespeed_api_key:
-        return None
-    headers = {"Authorization": f"Bearer {cfg.wavespeed_api_key}", "Content-Type": "application/json"}
-    body = {
-        "prompt": f"{prompt}. {NO_TEXT_SUFFIX}",
-        "size": cfg.wavespeed_size,
-        "enable_base64_output": False,
-    }
-    try:
-        r = await client.post(
-            f"{WAVESPEED_URL}/{cfg.wavespeed_model}", json=body, headers=headers, timeout=60
-        )
-        r.raise_for_status()
-        data = r.json().get("data") or {}
-        poll_url = (data.get("urls") or {}).get("get")
-        job_id = data.get("id")
-        if not poll_url and job_id:
-            poll_url = f"{WAVESPEED_URL}/predictions/{job_id}/result"
-        if not poll_url:
-            log.warning("WaveSpeed не вернул ссылку на результат: %s", r.text[:200])
-            return None
+# --- генерация (вместо поиска) ----------------------------------------------
 
-        for _ in range(60):  # до ~60 с
-            await asyncio.sleep(1.0)
-            got = await client.get(poll_url, headers=headers, timeout=30)
-            got.raise_for_status()
-            payload = got.json().get("data") or {}
-            status = payload.get("status")
-            if status in ("completed", "succeeded"):
-                outputs = payload.get("outputs") or []
-                if not outputs:
-                    return None
-                img = await client.get(outputs[0], timeout=60)
-                img.raise_for_status()
-                return img.content
-            if status in ("failed", "error"):
-                log.warning("WaveSpeed отказал: %s", payload.get("error"))
-                return None
-        log.warning("WaveSpeed не успел за отведённое время")
+
+async def check_image(
+    llm: LLMClient | None, data: bytes, *, prompt: str, subject: str
+) -> tuple[bool, str]:
+    """Приёмка картинки: `(годится, что поправить)`.
+
+    Спрашиваем у vision-модели две вещи — то ли нарисовано и нет ли букв.
+    Второе важнее: фальшивая надпись видна в кадре сразу, а заметить её в
+    готовом ролике уже поздно.
+
+    Любая осечка самой проверки — это «годится». Приёмка не должна отменять
+    вставку, которую, возможно, не за что отменять: цена ошибки во вторую
+    сторону (лишний кадр в ролике) ниже, чем пустота на месте картинки.
+    """
+    if llm is None or not llm.ready:
+        return True, ""
+    try:
+        result = await llm.complete(
+            "check_image",
+            {"prompt": prompt, "subject": subject},
+            IMAGE_CHECK_SCHEMA,
+            "vision",
+            images=[data],
+            max_tokens=2_000,
+        )
+    except (LLMUnavailable, LLMBadOutput) as e:
+        log.debug("приёмка картинки не сработала: %s", e)
+        return True, ""
+    shows = bool(result.data.get("shows_subject", True))
+    has_text = bool(result.data.get("has_text", False))
+    fix = result.data.get("fix")
+    return (shows and not has_text), (fix if isinstance(fix, str) else "")
+
+
+async def generate_image(
+    client: httpx.AsyncClient,
+    item: Broll,
+    cfg: Settings,
+    *,
+    style: ReelStyle | None = None,
+    refs: Sequence[bytes] = (),
+    llm: LLMClient | None = None,
+) -> bytes | None:
+    """Нарисовать вставку: промпт + референсы, при надобности вторая попытка.
+
+    Повторов ровно один. Второй провал означает, что модель не понимает этот
+    предмет, и дальнейшие попытки только жгут деньги и время: уходим на сток,
+    который для того и остался.
+    """
+    if not imagegen.ready(cfg):
         return None
-    except (httpx.HTTPError, ValueError) as e:
-        log.warning("WaveSpeed не сгенерировал %r: %s", prompt[:40], e)
+    subject = item.prompt or item.query
+    prompt = build_image_prompt(subject, style)
+    data = await imagegen.generate(client, prompt, refs=refs, cfg=cfg)
+    if data is None:
         return None
+    if not cfg.broll_verify:
+        return data
+
+    ok, fix = await check_image(llm, data, prompt=subject, subject=item.query)
+    if ok:
+        return data
+    log.info("картинка %r не принята (%s) — вторая попытка", item.query, fix or "без пояснения")
+    retry = await imagegen.generate(
+        client, build_image_prompt(subject, style, fix=fix), refs=refs, cfg=cfg
+    )
+    if retry is None:
+        return None
+    ok, _ = await check_image(llm, retry, prompt=subject, subject=item.query)
+    if ok:
+        return retry
+    log.info("картинка %r не принята и со второй попытки — иду на сток", item.query)
+    return None
 
 
 @dataclass(slots=True)
@@ -585,18 +721,14 @@ def _cached_video(cache_dir: Path, key: str) -> Asset | None:
     return None
 
 
-async def fetch_asset(
-    client: httpx.AsyncClient, item: Broll, cache_dir: Path, cfg: Settings
+async def _fetch_stock(
+    client: httpx.AsyncClient, item: Broll, cache_dir: Path, cfg: Settings, key: str
 ) -> Asset | None:
-    """Видео → фото → генерация → None. Результат кешируется по хешу запроса.
+    """Сток: клип → фото. Клип впереди (М4) — он читается как монтаж сразу.
 
-    Порядок именно такой (М4): клип читается как монтаж, фото — как наклейка.
-    Но видео есть не на всякий запрос, поэтому откат на фото обязан быть молчаливым
-    — для вызывающего кода разницы нет, он получает файл.
+    Видео есть не на всякий запрос, поэтому откат на фото обязан быть
+    молчаливым: для вызывающего кода разницы нет, он получает файл.
     """
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    key = cache_key(item.query, item.prompt, cfg.wavespeed_size)
-
     if cfg.broll_video and cfg.pexels_api_key:
         hit = _cached_video(cache_dir, key)
         if hit is not None:
@@ -613,30 +745,84 @@ async def fetch_asset(
             path.write_bytes(data)
             return Asset(path, "video", start)
 
-    cached = cache_dir / f"{key}.jpg"
-    if cached.exists() and cached.stat().st_size > 1024:
-        log.debug("b-roll из кеша: %s", item.query)
-        return Asset(cached)
-
-    data_bytes: bytes | None = None
-    if cfg.pexels_api_key:
-        data_bytes = await fetch_pexels(client, item.query, cfg.pexels_api_key)
-    if data_bytes is None:
-        prompt = item.prompt or item.query
-        data_bytes = await generate_wavespeed(client, prompt, cfg)
-    if not data_bytes:
+    if not cfg.pexels_api_key:
         return None
-
-    cached.write_bytes(data_bytes)
+    data = await fetch_pexels(client, item.query, cfg.pexels_api_key)
+    if not data:
+        return None
+    cached = cache_dir / f"{key}.jpg"
+    cached.write_bytes(data)
     return Asset(cached)
+
+
+async def fetch_asset(
+    client: httpx.AsyncClient,
+    item: Broll,
+    cache_dir: Path,
+    cfg: Settings,
+    *,
+    style: ReelStyle | None = None,
+    refs: Sequence[bytes] = (),
+    llm: LLMClient | None = None,
+) -> Asset | None:
+    """Достать картинку для вставки. Порядок источников решает `broll_source`.
+
+    `generate` — рисуем, а не ищем: сток отдаёт чужой предмет в чужом кадре, и
+    на переходе это видно. Не нарисовалось — уходим на сток, он для того и
+    остался. `stock` возвращает прежний порядок целиком.
+
+    Что бы ни вышло, результат один: файл на диске или `None`. Вызывающий код
+    про источник не знает и знать не должен.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    generating = cfg.broll_source == "generate" and imagegen.ready(cfg)
+    # Ключ генерации помнит модель и стиль, ключ стока — нет: сток по тому же
+    # запросу отдаёт то же самое независимо от наших настроек.
+    gen_key = cache_key(
+        item.query,
+        item.prompt,
+        imagegen.size_tag(cfg),
+        model=imagegen.image_model(cfg),
+        style=(style or ReelStyle()).hint(),
+    )
+    stock_key = cache_key(item.query, item.prompt, cfg.wavespeed_size)
+
+    if generating:
+        cached = cache_dir / f"{gen_key}.jpg"
+        if cached.exists() and cached.stat().st_size > 1024:
+            log.debug("b-roll из кеша (генерация): %s", item.query)
+            return Asset(cached)
+        data = await generate_image(client, item, cfg, style=style, refs=refs, llm=llm)
+        if data:
+            cached.write_bytes(data)
+            return Asset(cached)
+        log.info("нарисовать %r не вышло — пробую сток", item.query)
+
+    hit_dir = cache_dir / f"{stock_key}.jpg"
+    if hit_dir.exists() and hit_dir.stat().st_size > 1024:
+        log.debug("b-roll из кеша: %s", item.query)
+        return Asset(hit_dir)
+    asset = await _fetch_stock(client, item, cache_dir, cfg, stock_key)
+    if asset is not None:
+        return asset
+
+    # Сток пуст, а генерацию либо не звали, либо она не была первой. Пробуем
+    # её последней — это прежнее поведение `stock`, и оно же последний шанс.
+    if not generating and imagegen.ready(cfg):
+        data = await generate_image(client, item, cfg, style=style, refs=refs, llm=llm)
+        if data:
+            cached = cache_dir / f"{gen_key}.jpg"
+            cached.write_bytes(data)
+            return Asset(cached)
+    return None
 
 
 def asset_aspect(path: str | Path) -> float | None:
     """Пропорция скачанного файла (ширина/высота) или None, если не прочитался.
 
     Нужна геометрии: карточка наследует пропорцию источника, иначе `cover` режет
-    (AUDIT §8.3). Сток отдаёт 2:3, генерация — то, что заказано в
-    `wavespeed_size`, и это разные числа, поэтому меряется файл, а не источник.
+    (AUDIT §8.3). Сток отдаёт 2:3, генерация — заказанную вертикаль 9:16, клип —
+    свою третью; числа разные, поэтому меряется файл, а не источник.
     """
     try:
         out = run(
@@ -652,6 +838,60 @@ def asset_aspect(path: str | Path) -> float | None:
     return w / h if w > 0 and h > 0 else None
 
 
+def _ref_frame(frames: Sequence[bytes], at: float, duration: float) -> list[bytes]:
+    """Кадр ролика, ближайший к моменту вставки.
+
+    Кадры сняты равномерно (`extract_frames`: t = span·(i+0.5)/count), поэтому
+    номер восстанавливается арифметикой, а не поиском. Берём именно ближний, а
+    не первый: свет в ролике меняется, и вставка обязана попасть в тот кусок,
+    рядом с которым она встанет.
+    """
+    if not frames or duration <= 0:
+        return list(frames[:1])
+    i = int(round(at / duration * len(frames) - 0.5))
+    return [frames[max(0, min(len(frames) - 1, i))]]
+
+
+async def _generate_series(
+    client: httpx.AsyncClient,
+    items: list[Broll],
+    cache_dir: Path,
+    cfg: Settings,
+    *,
+    plan: BrollPlan,
+    llm: LLMClient | None,
+    tl: Timeline,
+    by_idx: dict[int, Any],
+    duration: float,
+) -> list[Asset | None]:
+    """Вставки рисуются по очереди, и каждая следующая видит предыдущую.
+
+    Очередь здесь не от бедности, а ради связности: вторая картинка ролика,
+    сгенерированная с первой перед глазами, выходит из того же комплекта, а не
+    из соседнего. Потолок вставок — две (`BROLL_MAX`), так что очередь стоит
+    одного лишнего ожидания на ролик, и на фоне рендера это не видно.
+    """
+    out: list[Asset | None] = []
+    made: list[bytes] = []
+    for item in items:
+        word = by_idx.get(item.word_idx)
+        window = tl.word_window(word) if word is not None else None
+        refs = _ref_frame(plan.frames, window[0] if window else 0.0, duration)
+        # Предыдущая вставка идёт ВТОРЫМ референсом: первым обязан остаться
+        # кадр ролика, иначе комплект начнёт уезжать от самого видео.
+        refs = refs + made[-1:]
+        asset = await fetch_asset(
+            client, item, cache_dir, cfg, style=plan.style, refs=refs, llm=llm
+        )
+        out.append(asset)
+        if asset is not None and asset.kind == "photo":
+            try:
+                made.append(asset.path.read_bytes())
+            except OSError:
+                pass
+    return out
+
+
 async def plan_and_fetch(
     edl: EDL,
     src: str | Path,
@@ -664,16 +904,35 @@ async def plan_and_fetch(
     """Полный шаг M7. Проставляет `edl.broll` и возвращает число вставок."""
     cfg = cfg or default_settings
     work = Path(work)
-    items = await plan_broll(edl, src, work, llm=llm, info=info, cfg=cfg)
+    plan = await plan_broll(edl, src, work, llm=llm, info=info, cfg=cfg)
+    items = plan.items
     if not items:
         edl.broll = []
         return 0
 
     cache_dir = Path(cfg.work_dir) / "broll-cache"
+    tl = edl.timeline()
+    by_idx = {w.idx: w for w in edl.words}
+    generating = cfg.broll_source == "generate" and imagegen.ready(cfg)
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        assets = await asyncio.gather(
-            *(fetch_asset(client, item, cache_dir, cfg) for item in items)
-        )
+        # Очередь — только ради референсов: вторая картинка ролика рисуется с
+        # первой перед глазами и выходит из того же комплекта. Провайдеру,
+        # который референсы выбрасывает (WaveSpeed), очередь не даёт ничего и
+        # стоит лишнего ожидания на каждую вставку. Сток — тем более: это
+        # чистый ввод-вывод.
+        if generating and imagegen.uses_refs(cfg):
+            assets = await _generate_series(
+                client, items, cache_dir, cfg,
+                plan=plan, llm=llm, tl=tl, by_idx=by_idx, duration=edl.out_duration,
+            )
+        else:
+            style = plan.style if generating else None
+            assets = list(await asyncio.gather(
+                *(
+                    fetch_asset(client, item, cache_dir, cfg, style=style, llm=llm)
+                    for item in items
+                )
+            ))
 
     resolved: list[Broll] = []
     for item, asset in zip(items, assets):
@@ -684,9 +943,9 @@ async def plan_and_fetch(
         item.kind = asset.kind
         item.asset_start = asset.start
         # Пропорция меряется у ФАЙЛА, а не берётся у источника: сток отдаёт 2:3,
-        # генерация — то, что заказано в `wavespeed_size`, а клип приходит своей
-        # третьей. Карточка наследует её, иначе `cover` режет источник
-        # (AUDIT §8.3); дальше число едет в `broll_rect` через план.
+        # генерация — заказанную вертикаль, а клип приходит своей третьей.
+        # Карточка наследует её, иначе `cover` режет источник (AUDIT §8.3);
+        # дальше число едет в `broll_rect` через план.
         item.asset_aspect = asset_aspect(asset.path)
         if item.asset_aspect:
             log.info(
@@ -712,17 +971,25 @@ if __name__ == "__main__":  # проверка добычи одной карт�
     setup_logging("INFO")
 
     async def _main() -> None:
+        # python -m src.pipeline.broll "vintage film camera" [кадр.jpg]
+        #
+        # Второй аргумент — кадр ролика: с ним видно главное, ради чего затеяна
+        # генерация, — попала ли картинка в палитру и свет исходника.
         query = sys.argv[1] if len(sys.argv) > 1 else "vintage film camera on a desk"
+        refs = [Path(sys.argv[2]).read_bytes()] if len(sys.argv) > 2 else []
         item = Broll(
             word_idx=0, duration=1.5, query=query, anim=BrollAnim.POP_IN, anchor="top_right"
         )
         cache = Path(default_settings.work_dir) / "broll-cache"
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            got = await fetch_asset(client, item, cache, default_settings)
+            got = await fetch_asset(client, item, cache, default_settings, refs=refs)
         print(
             json.dumps(
                 {
                     "query": query,
+                    "source": default_settings.broll_source,
+                    "model": imagegen.image_model(default_settings),
+                    "refs": len(refs),
                     "kind": got.kind if got else None,
                     "asset": str(got.path) if got else None,
                     "start": got.start if got else None,

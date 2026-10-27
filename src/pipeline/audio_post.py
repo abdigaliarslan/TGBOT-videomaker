@@ -522,6 +522,7 @@ def build_audio(
     *,
     preset: Preset | None = None,
     apply_cuts: bool = True,
+    sfx: bool = True,
     cfg: Settings | None = None,
 ) -> AudioTrack | None:
     """Нарезанное видео + EDL → готовая звуковая дорожка. None, если звука нет.
@@ -568,7 +569,12 @@ def build_audio(
     if total <= 0:
         return None
 
-    if not edl.sfx:
+    # `sfx=False` — пользователь снял галочку «звуковые эффекты». Громкость и
+    # подложка при этом остаются: выключаются только акценты. EDL тоже очищается,
+    # чтобы сохранённый лист описывал реальный микс, а не отвергнутые эффекты.
+    if not sfx:
+        edl.sfx = []
+    elif not edl.sfx:
         edl.sfx = plan_sfx(edl, preset=preset, apply_cuts=apply_cuts)
     marks = sfx_marks(edl, edl.sfx, cfg=cfg, apply_cuts=apply_cuts)
     music = resolve_music(edl, preset=preset, cfg=cfg)

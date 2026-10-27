@@ -1,0 +1,15 @@
+[Unit]
+Description=ReelBot — Postgres 16 (пользовательский, порт 5439)
+
+[Service]
+Environment=LD_LIBRARY_PATH=%h/reelbot-runtime/sys/usr/lib/x86_64-linux-gnu
+ExecStart=%h/reelbot-runtime/sys/usr/lib/postgresql/16/bin/postgres -D %h/reelbot-runtime/pgdata -p 5439 -k %h/reelbot-runtime/run -c listen_addresses=127.0.0.1
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGINT
+Restart=always
+RestartSec=5
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

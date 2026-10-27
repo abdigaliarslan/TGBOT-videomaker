@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable
 
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, validate_edl
+from src.core.options import JobOptions, apply_accent
 from src.core.preset import load_preset
 from src.core.render_plan import build_plan
 from src.core.track import load_track
@@ -43,15 +44,36 @@ STAGES = [
     ("cut", "Режу паузы", 0.66),
     ("audio", "Свожу звук", 0.70),
     ("crop", "Кадрирую 9:16", 0.78),
-    ("render", "Рисую субтитры", 0.97),
+    # Рендер — самый долгий этап, поэтому ему отдан диапазон 0.80…0.97: полоса
+    # стартует с нижней границы и идёт по мере готовых кадров (`render_share`).
+    ("render", "Рисую субтитры", 0.80),
     ("done", "Готово", 1.0),
 ]
 STAGE_TITLES = {key: title for key, title, _ in STAGES}
+RENDER_SHARE_END = 0.97
+
+
+def render_share(done: float) -> float:
+    """Доля всего монтажа, когда рендер готов на `done` (0..1)."""
+    start = dict((k, v) for k, _, v in STAGES)["render"]
+    return round(start + (RENDER_SHARE_END - start) * max(0.0, min(1.0, done)), 3)
+# Обратный ход: воркер получает в прогресс русский заголовок, а интерфейсу нужен
+# ключ, чтобы показать стадию на языке пользователя.
+STAGE_KEYS_BY_TITLE = {title: key for key, title, _ in STAGES}
 STAGE_SHARE = {key: share for key, _, share in STAGES}
 
 
 class JobError(RuntimeError):
-    """Ошибка, текст которой можно показать пользователю."""
+    """Ошибка, которую можно показать пользователю.
+
+    Текст исключения — русский, для логов и поля `jobs.error`. Пользователь его
+    не видит: интерфейс показывает фразу по `code` на языке пользователя
+    (`core.i18n.ERROR_CODES`).
+    """
+
+    def __init__(self, message: str, code: str = "failed") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass
@@ -121,9 +143,16 @@ async def process_video(
     backend: str | None = None,
     cfg: Settings | None = None,
     keep_work: bool | None = None,
+    options: JobOptions | None = None,
 ) -> JobResult:
-    """Полный прогон: probe → asr → direct → broll → cut → crop → render."""
+    """Полный прогон: probe → asr → direct → broll → cut → crop → render.
+
+    `options` — галочки пользователя (Mini App). Без них поведение прежнее: всё
+    включено, цвет выделения — как в теме. Нарезка по-прежнему управляется
+    `cut_pauses`; вызывающий сводит одно с другим сам.
+    """
     cfg = cfg or default_settings
+    options = options or JobOptions()
     src = Path(src)
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
@@ -143,22 +172,23 @@ async def process_video(
 
         if info.duration < cfg.min_video_seconds:
             raise JobError(
-                f"Видео короче {cfg.min_video_seconds:.0f} с — монтировать нечего."
+                f"Видео короче {cfg.min_video_seconds:.0f} с — монтировать нечего.", "too_short"
             )
         if info.duration > cfg.max_video_seconds:
             raise JobError(
                 f"Видео длиннее {cfg.max_video_minutes:.0f} мин. "
-                f"Пришлите кусок покороче."
+                f"Пришлите кусок покороче.",
+                "too_long",
             )
         if not info.has_audio:
-            raise JobError("В видео нет звуковой дорожки — субтитры делать не из чего.")
+            raise JobError("В видео нет звуковой дорожки — субтитры делать не из чего.", "no_audio")
 
         await _notify(progress, "asr")
         t = time.perf_counter()
         asr = transcribe(src)
         mark("asr", t)
         if not asr.words:
-            raise JobError("Речь не распознана. Возможно, в ролике только музыка или шум.")
+            raise JobError("Речь не распознана. Возможно, в ролике только музыка или шум.", "no_speech")
 
         # ---------------------------------------------------------- правка ASR
         words = asr.words
@@ -185,13 +215,19 @@ async def process_video(
         mark("direct", t)
         errors = validate_edl(edl)
         if errors:
-            raise JobError("Не удалось собрать монтажный лист: " + "; ".join(errors[:3]))
+            raise JobError("Не удалось собрать монтажный лист: " + "; ".join(errors[:3]), "edl_invalid")
         edl_from_llm = bool(llm and llm.ready and any(u.prompt == "direct" for u in llm.usages))
-        style = load_preset(preset or edl.preset)
+        style = apply_accent(load_preset(preset or edl.preset), options.accent)
+        if not options.camera:
+            # Движение камеры выключено: один план на весь ролик. Правится EDL, а
+            # не кроп, — тогда и звуковые акценты на укрупнениях пропадают сами,
+            # и сохранённый лист честно описывает то, что видно в кадре.
+            for c in edl.cuts:
+                c.framing = "wide"
 
         # ---------------------------------------------------------- b-roll
         broll_used = 0
-        if cfg.broll_enabled and llm is not None and llm.ready:
+        if cfg.broll_enabled and options.broll and llm is not None and llm.ready:
             await _notify(progress, "broll")
             t = time.perf_counter()
             try:
@@ -214,7 +250,7 @@ async def process_video(
             # Оборванный ffmpeg (упавший воркер, kill) оставляет mp4 без
             # moov-атома. Дальше он поедет в рендер и упадёт там, где причину
             # уже не видно.
-            raise JobError("Нарезка оборвалась — файл повреждён. Пришлите видео ещё раз.")
+            raise JobError("Нарезка оборвалась — файл повреждён. Пришлите видео ещё раз.", "cut_broken")
         mark("cut", t)
 
         # ---------------------------------------------------------- звук (Ф2)
@@ -226,7 +262,10 @@ async def process_video(
             await _notify(progress, "audio")
             t = time.perf_counter()
             try:
-                track = build_audio(edl, cut_path, work / "audio.wav", preset=style, cfg=cfg)
+                track = build_audio(
+                    edl, cut_path, work / "audio.wav", preset=style,
+                    apply_cuts=cut_pauses, sfx=options.sfx, cfg=cfg,
+                )
                 if track is not None:
                     audio_path = str(track.path)
                     audio_report = {
@@ -253,7 +292,7 @@ async def process_video(
                 cfg=cfg, track_out=work / "track.json",
             )
         if not is_playable(staged):
-            raise JobError("Кадрирование оборвалось — файл повреждён. Пришлите видео ещё раз.")
+            raise JobError("Кадрирование оборвалось — файл повреждён. Пришлите видео ещё раз.", "crop_broken")
         mark("crop", t)
 
         t = time.perf_counter()
@@ -298,8 +337,16 @@ async def process_video(
         if chosen == "ass":
             render_ass(plan, out_path, work_dir=work, cfg=cfg)
         else:
+            async def on_render(done: float) -> None:
+                if progress is None:
+                    return
+                res = progress(STAGE_TITLES["render"], render_share(done))
+                if hasattr(res, "__await__"):
+                    await res  # type: ignore[misc]
+
             await arender_remotion(
-                plan, out_path, assets_dir=work, job_key=work.name, cfg=cfg
+                plan, out_path, assets_dir=work, job_key=work.name, cfg=cfg,
+                on_progress=on_render,
             )
         mark("render", t)
 
@@ -364,7 +411,7 @@ async def process_from_edl(
         edl.preset = preset
     errors = validate_edl(edl)
     if errors:
-        raise JobError("Монтажный лист не проходит валидацию: " + "; ".join(errors[:3]))
+        raise JobError("Монтажный лист не проходит валидацию: " + "; ".join(errors[:3]), "edl_invalid")
 
     t = time.perf_counter()
     cut_path = work / "cut.mp4"
@@ -373,7 +420,7 @@ async def process_from_edl(
     else:
         shutil.copy2(src, cut_path)
     if not is_playable(cut_path):
-        raise JobError("Нарезка оборвалась — файл повреждён.")
+        raise JobError("Нарезка оборвалась — файл повреждён.", "cut_broken")
     mark("cut", t)
 
     style = load_preset(edl.preset)
@@ -405,7 +452,7 @@ async def process_from_edl(
             cfg=cfg, track_out=work / "track.json",
         )
     if not is_playable(staged):
-        raise JobError("Кадрирование оборвалось — файл повреждён.")
+        raise JobError("Кадрирование оборвалось — файл повреждён.", "crop_broken")
     mark("crop", t)
 
     t = time.perf_counter()

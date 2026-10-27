@@ -7,7 +7,7 @@ from dataclasses import dataclass, asdict
 from fractions import Fraction
 from pathlib import Path
 
-from src.core.proc import run
+from src.core.proc import ProcError, run
 
 
 @dataclass(slots=True)
@@ -64,6 +64,20 @@ def _rotation(stream: dict) -> int:
         except (TypeError, ValueError):
             pass
     return 0
+
+
+def is_playable(path: str | Path) -> bool:
+    """Файл читается целиком, а не только начало.
+
+    Оборванный ffmpeg оставляет mp4 без moov-атома: размер большой, а файл
+    нечитаем. Такой промежуточный результат обязан отсеиваться там, где он
+    появился, а не всплывать сообщением про moov в рендерере.
+    """
+    try:
+        probe(path)
+        return True
+    except (ProcError, ValueError, FileNotFoundError):
+        return False
 
 
 def probe(path: str | Path) -> MediaInfo:

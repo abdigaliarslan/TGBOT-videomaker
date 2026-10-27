@@ -23,8 +23,9 @@ from arq.connections import RedisSettings
 from src.core.config import settings
 from src.core.logging import setup_logging
 from src.db import repo
+from src.core.options import JobOptions, apply_accent
 from src.llm.client import LLMClient, Usage
-from src.pipeline.job import JobError, process_video
+from src.pipeline.job import STAGE_KEYS_BY_TITLE, JobError, process_video
 from src.storage.s3 import RESULTS, SOURCES, storage
 
 log = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ async def fetch_source(job: Any, dst: Path) -> Path:
     if job.source_key:
         await storage.download(job.source_key, dst)
         return dst
-    raise JobError("Исходный файл потерялся. Пришлите видео ещё раз.")
+    raise JobError("Исходный файл потерялся. Пришлите видео ещё раз.", "source_lost")
 
 
 # --------------------------------------------------------------------------- задача
@@ -76,10 +77,13 @@ async def process_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
     work.mkdir(parents=True, exist_ok=True)
     await repo.mark_running(job.id)
 
-    async def publish(stage: str, share: float) -> None:
+    async def publish(stage: str, share: float, key: str | None = None) -> None:
+        # `stage` — русский заголовок для логов и старых читателей, `stage_key` —
+        # то, по чему интерфейс покажет стадию на языке пользователя.
+        key = key or STAGE_KEYS_BY_TITLE.get(stage)
         await redis.set(
             progress_key(str(job.id)),
-            json.dumps({"stage": stage, "progress": share}, ensure_ascii=False),
+            json.dumps({"stage": stage, "stage_key": key, "progress": share}, ensure_ascii=False),
             ex=PROGRESS_TTL,
         )
         await repo.update_job(job.id, stage=stage[:32], progress=share)
@@ -87,19 +91,22 @@ async def process_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
     llm = LLMClient(usage_sink=_usage_sink(job.id))
 
     try:
-        await publish("Скачиваю файл", 0.01)
+        await publish("Скачиваю файл", 0.01, "download")
         src_path = await fetch_source(job, work / "source.mp4")
 
+        options = JobOptions.from_stored(job.options)
         result = await process_video(
             src_path,
             work,
             preset=job.preset,
             llm=llm,
             progress=publish,
+            cut_pauses=options.cut,
             cfg=settings,
+            options=options,
         )
 
-        await publish("Загружаю результат", 0.99)
+        await publish("Загружаю результат", 0.99, "upload")
         result_key = storage.key_for(RESULTS, str(job.id), "result.mp4")
         await storage.upload(result.output, result_key, content_type="video/mp4")
 
@@ -126,16 +133,21 @@ async def process_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
     except JobError as e:
         # Понятная пользователю причина: показываем как есть.
         log.warning("задача %s отклонена: %s", job.id, e)
-        await repo.mark_failed(job.id, str(e))
+        await repo.mark_failed(job.id, str(e), code=e.code)
+        await _refund(job.id)
         await redis.set(
             progress_key(str(job.id)),
-            json.dumps({"stage": "failed", "progress": 0.0, "error": str(e)}, ensure_ascii=False),
+            json.dumps(
+                {"stage": "failed", "progress": 0.0, "error": str(e), "error_code": e.code},
+                ensure_ascii=False,
+            ),
             ex=PROGRESS_TTL,
         )
         raise
     except Exception as e:  # noqa: BLE001 — любая другая поломка тоже должна дойти до юзера
         log.exception("задача %s упала", job.id)
-        await repo.mark_failed(job.id, f"{type(e).__name__}: {e}")
+        await repo.mark_failed(job.id, f"{type(e).__name__}: {e}", code="failed")
+        await _refund(job.id)
         await redis.set(
             progress_key(str(job.id)),
             json.dumps(
@@ -143,6 +155,7 @@ async def process_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
                     "stage": "failed",
                     "progress": 0.0,
                     "error": "Не получилось смонтировать этот ролик. Мы записали ошибку.",
+                    "error_code": "failed",
                 },
                 ensure_ascii=False,
             ),
@@ -154,6 +167,16 @@ async def process_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
             shutil.rmtree(work, ignore_errors=True)
         else:
             log.info("DEBUG=1: рабочая папка сохранена — %s", work)
+
+
+async def _refund(job_id: uuid.UUID) -> None:
+    """Ролик не получился — оплата за него возвращается, в том числе за «короткое
+    видео» и «нет речи». Платят за готовый монтаж, а не за попытку."""
+    try:
+        if await repo.refund_job(job_id):
+            log.info("задача %s: ролик возвращён на баланс", job_id)
+    except Exception as e:  # noqa: BLE001 — возврат не должен скрыть исходную ошибку
+        log.error("задача %s: НЕ удалось вернуть ролик на баланс: %s", job_id, e)
 
 
 def _usage_sink(job_id: uuid.UUID):
@@ -182,7 +205,7 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
     if job is None:
         raise RuntimeError(f"задача {job_id} не найдена")
     if not job.edl:
-        raise JobError("Монтажный лист не сохранился — пересобрать нечем.")
+        raise JobError("Монтажный лист не сохранился — пересобрать нечем.", "edl_missing")
 
     work = Path(settings.work_dir) / f"{job.id}-rerender"
     work.mkdir(parents=True, exist_ok=True)
@@ -192,8 +215,18 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
         edl.preset = preset
 
         info = probe(src_path)
-        style = load_preset(preset)
-        cut_path = apply_cuts(edl, src_path, work / "cut.mp4", info=info, cfg=settings)
+        # Перерендер меняет тему, а выбранный пользователем цвет выделения
+        # сохраняет: он выбирал цвет, а не «цвет конкретной темы».
+        options = JobOptions.from_stored(job.options)
+        style = apply_accent(load_preset(preset), options.accent)
+        # Нарезка — решение пользователя, и перерендер обязан его повторить: без
+        # этого ролик, смонтированный без вырезания пауз, при смене темы
+        # нарезался бы, а субтитры и звук разъехались бы с картинкой.
+        cut_path = work / "cut.mp4"
+        if options.cut:
+            apply_cuts(edl, src_path, cut_path, info=info, cfg=settings)
+        else:
+            shutil.copy2(src_path, cut_path)
         # Пресет и крупность передаются ЯВНО. Без них перерендер брал цветокор из
         # `cfg.default_preset`, а не из пресета задачи, и снимал весь ролик одной
         # крупностью — то есть §0.4 «сохранённый EDL + другой пресет = новое
@@ -201,7 +234,7 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
         # предупреждает в своём докстринге; правка была за владельцем вызова.
         vertical = autocrop(
             cut_path, work / "vertical.mp4", work_dir=work, cfg=settings,
-            preset=style, framing=framing_spans(edl),
+            preset=style, framing=framing_spans(edl, applied_cuts=options.cut),
             track_out=work / "track.json",
         )
         staged_info = probe(vertical)
@@ -214,7 +247,7 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
         plan = build_plan(
             edl, str(vertical), fps=int(round(staged_info.fps)),
             width=staged_info.width, height=staged_info.height,
-            preset=style, cfg=settings,
+            preset=style, apply_cuts=options.cut, cfg=settings,
             track=load_track(work / "track.json"),
         )
         out = work / "result.mp4"
@@ -236,18 +269,86 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
             shutil.rmtree(work, ignore_errors=True)
 
 
+# Общие папки внутри WORK_DIR: они не принадлежат ни одной задаче и живут
+# своим сроком, поэтому у них смотрятся ФАЙЛЫ, а не сама папка. Снести их
+# целиком по mtime папки означало бы выбросить живой кеш вместе с содержимым.
+#
+# `media-cache` — копии готовых роликов для перемотки в приложении.
+# `broll-cache` — скачанные и НАРИСОВАННЫЕ вставки. Второе стоит денег:
+# суточный срок сжигал оплаченные генерации каждый день заново, поэтому у него
+# свой срок из конфига.
+def _shared_caches() -> dict[str, float]:
+    day = 24 * 3600
+    return {
+        "media-cache": day,
+        "broll-cache": max(1, settings.broll_cache_days) * day,
+    }
+
+
 async def cleanup_old_files(ctx: dict[str, Any]) -> int:
     """Периодическая уборка рабочих папок, переживших падение воркера."""
     removed = 0
-    cutoff = datetime.now(timezone.utc).timestamp() - 24 * 3600
+    now = datetime.now(timezone.utc).timestamp()
+    cutoff = now - 24 * 3600
     root = Path(settings.work_dir)
+    shared = _shared_caches()
     for child in root.iterdir() if root.exists() else []:
+        if child.name in shared:
+            continue  # не папка задачи — чистится пофайлово ниже
         if child.is_dir() and child.stat().st_mtime < cutoff:
             shutil.rmtree(child, ignore_errors=True)
             removed += 1
+    for name, ttl in shared.items():
+        cache = root / name
+        stale = now - ttl
+        for f in cache.rglob("*") if cache.is_dir() else []:
+            if f.is_file() and f.stat().st_mtime < stale:
+                f.unlink(missing_ok=True)
+                removed += 1
     if removed:
-        log.info("уборка: удалено %d старых рабочих папок", removed)
+        log.info("уборка: удалено %d старых рабочих папок и файлов кеша", removed)
     return removed
+
+
+# Удаление по сроку: запас к сроку для прохода по самому хранилищу. Файлы задач
+# удаляются точно в срок по базе, а проход по хранилищу подбирает то, чего база
+# не знает (ролики перерендера), — и запас гарантирует, что он никогда не
+# опередит учёт и не сотрёт файл задачи, пока та ещё не помечена.
+STORAGE_SWEEP_GRACE = 24 * 3600
+
+
+async def purge_expired_files(ctx: dict[str, Any]) -> dict[str, int]:
+    """Удаляет исходники и готовые ролики старше `STORAGE_RETENTION_DAYS`.
+
+    Ролик у пользователя уже лежит в чате — Telegram хранит его сам. На сервере
+    копия нужна только для перерендера в другой стиль и плеера в приложении, и
+    держать её вечно при 14 ГБ свободного диска нельзя.
+    """
+    from datetime import timedelta
+
+    days = settings.storage_retention_days
+    if days <= 0:
+        return {"jobs": 0, "files": 0, "swept": 0}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    jobs = await repo.jobs_with_expired_files(cutoff)
+    files = 0
+    for job in jobs:
+        for key in {job.source_key, job.result_key} - {None}:
+            try:
+                await storage.delete(key)
+                files += 1
+            except Exception as e:  # noqa: BLE001 — один битый ключ не должен стопорить уборку
+                log.warning("задача %s: не удалил %s: %s", job.id, key, e)
+        await repo.mark_files_purged(job.id)
+
+    swept = await storage.delete_older_than(cutoff - timedelta(seconds=STORAGE_SWEEP_GRACE))
+    if jobs or swept:
+        log.info(
+            "срок хранения %d дн.: задач %d, файлов задач %d, прочих файлов %d",
+            days, len(jobs), files, swept,
+        )
+    return {"jobs": len(jobs), "files": files, "swept": swept}
 
 
 # --------------------------------------------------------------------------- воркеры
@@ -298,12 +399,39 @@ class WorkerSettings:
     redis_settings = redis_settings()
 
 
-class LightWorkerSettings(WorkerSettings):
-    """Пул `light`: уборка и мелкие задачи, не занимает CPU-слот."""
+async def light_startup(ctx: dict[str, Any]) -> None:
+    """Старт пула уборки: без прогрева распознавания и Chromium.
 
-    functions = [cleanup_old_files]
-    # Раз в час: подчищаем папки джобов, переживших падение воркера.
-    cron_jobs = [cron(cleanup_old_files, minute=17, run_at_startup=False)]
+    Унаследованный `startup` грузил модель Whisper и браузер рендера — уборщику
+    они не нужны, а в его лимит памяти на сервере это просто не помещается.
+    """
+    setup_logging(settings.log_level)
+    repo.init_engine(settings)
+    log.info("уборщик поднят")
+
+
+class LightWorkerSettings(WorkerSettings):
+    """Пул `light`: уборка и мелкие задачи, не занимает CPU-слот.
+
+    ⚠ arq читает настройки из `__dict__` класса, а не через наследование: всё,
+    что не объявлено здесь явно, для него не существует. Без явного
+    `redis_settings` пул подключался к Redis по умолчанию, localhost:6379, — на
+    общем сервере это оказался Redis соседнего проекта.
+    """
+
+    redis_settings = WorkerSettings.redis_settings
+    on_shutdown = WorkerSettings.on_shutdown
+    max_tries = WorkerSettings.max_tries
+    keep_result = WorkerSettings.keep_result
+    on_startup = light_startup
+    functions = [cleanup_old_files, purge_expired_files]
+    # Раз в час: папки задач, переживших падение воркера, и файлы старше срока
+    # хранения. Второе — сразу при старте тоже: после долгого простоя ждать час
+    # незачем, а работа идемпотентна.
+    cron_jobs = [
+        cron(cleanup_old_files, minute=17, run_at_startup=False),
+        cron(purge_expired_files, minute=47, run_at_startup=True),
+    ]
     queue_name = QUEUE_LIGHT
     max_jobs = 4
     job_timeout = 600
@@ -311,6 +439,13 @@ class LightWorkerSettings(WorkerSettings):
 
 class GpuWorkerSettings(WorkerSettings):
     """Пул `gpu`: ASR. На машине без GPU совпадает с cpu по поведению."""
+
+    # Явно, а не наследованием: arq читает только `__dict__` класса.
+    redis_settings = WorkerSettings.redis_settings
+    on_startup = WorkerSettings.on_startup
+    on_shutdown = WorkerSettings.on_shutdown
+    max_tries = WorkerSettings.max_tries
+    keep_result = WorkerSettings.keep_result
 
     functions = [process_job]
     queue_name = QUEUE_GPU

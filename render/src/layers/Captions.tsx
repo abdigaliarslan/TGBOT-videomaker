@@ -349,12 +349,40 @@ const Word: React.FC<{ word: PlanWord; preset: Preset; neutral: string }> = ({
 
   // ghost_opacity гасит слово, но не убирает его из потока: место под него
   // зарезервировано, и панель не меняет размер, когда слово зазвучит.
-  const opacity =
+  const target =
     state === "active"
       ? 1
       : state === "past"
         ? preset.colors.past_opacity
         : preset.colors.ghost_opacity;
+
+  // Проявление слова (`word_in_ms`). Ноль — прежнее мгновенное включение.
+  //
+  // Раньше слово переключалось из ghost в active за ОДИН кадр: с
+  // `ghost_opacity: 0.0` это значит из небытия сразу в полную силу. У эталона
+  // на том же месте четыре кадра нарастающей яркости (замерено по слову
+  // «вставляет», 8.9-9.2 с). Разница видна именно в движении: блок приходит
+  // мягко, а слова внутри него щёлкают.
+  //
+  // Порог `MIN_ANIM_FRAMES` здесь не применяется, и это `fadeFrames`, а не
+  // `animFrames`: восемь кадров — закон про ДВИЖЕНИЕ, а проявление эталона
+  // втрое короче (см. комментарий у самого `fadeFrames`).
+  const reveal = animNum(a, "word_in_ms", 0);
+  const revealed =
+    reveal > 0 && state !== "ghost"
+      ? interpolate(framesSinceStart, [0, fadeFrames(reveal, fps)], [0, 1], {
+          extrapolateLeft: "clamp",
+          extrapolateRight: "clamp",
+        })
+      : 1;
+  // Ведём от ghost к цели, а не от нуля: у темы с видимым ghost (bold, 0.22)
+  // слово уже стоит в кадре, и падать до нуля ему незачем — это читалось бы
+  // как моргание, а не как проявление.
+  const opacity = preset.colors.ghost_opacity + (target - preset.colors.ghost_opacity) * revealed;
+
+  // Выезд слова снизу — только трансформом. Кегль и трекинг трогать нельзя:
+  // ширины строк посчитал Python и сверяет с Chromium с точностью 2 px.
+  const rise = motionPx(a, "word_rise_px", 0) * (1 - revealed);
 
   return (
     <span
@@ -363,7 +391,7 @@ const Word: React.FC<{ word: PlanWord; preset: Preset; neutral: string }> = ({
         fontSize: wordSize(word, preset),
         color,
         opacity,
-        transform: `scale(${scale}) rotate(${rotate}deg)`,
+        transform: `translateY(${rise}px) scale(${scale}) rotate(${rotate}deg)`,
         transformOrigin: "center bottom",
         willChange: "transform, opacity",
         textShadow: softShadow(preset),
@@ -450,10 +478,18 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
   // 0.25 / 0.60 / 1.00 за три кадра, то есть практически прямая.
   const appear = leavesEarly ? rise : easeOut(rise);
   const falloff = animNum(a, "block_leave_falloff", 1.35) * (outFrames / inFrames);
-  const fall = interpolate(frame, [outStart, outStart + outFrames], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  // `outFrames === 0` — блок не уходит вовсе (до конца композиции меньше восьми
+  // кадров). Отрезок [x, x] `interpolate` не принимает и роняет ВЕСЬ рендер:
+  // у Bold (без паузы между блоками) так падал любой ролик, где последний
+  // субтитр кончался у самого конца видео. Проверка на ноль ниже, в
+  // `disappear`, до этого места уже не доживала.
+  const fall =
+    outFrames === 0
+      ? 0
+      : interpolate(frame, [outStart, outStart + outFrames], [0, 1], {
+          extrapolateLeft: "clamp",
+          extrapolateRight: "clamp",
+        });
   const disappear =
     outFrames === 0 ? 1 : leavesEarly ? 1 - fall : Math.pow(1 - easeOut(fall), falloff);
   const presence = Math.min(appear, disappear);

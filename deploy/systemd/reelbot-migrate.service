@@ -1,0 +1,15 @@
+[Unit]
+Description=ReelBot — миграции базы
+After=reelbot-postgres.service
+Requires=reelbot-postgres.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=%h/reelbot
+# Postgres поднимается не мгновенно: ждём, пока примет соединения.
+ExecStartPre=/bin/sh -c 'for i in $(seq 60); do LD_LIBRARY_PATH=%h/reelbot-runtime/sys/usr/lib/x86_64-linux-gnu %h/reelbot-runtime/sys/usr/lib/postgresql/16/bin/pg_isready -h 127.0.0.1 -p 5439 -q && exit 0; sleep 1; done; exit 1'
+ExecStart=%h/reelbot-runtime/venv/bin/alembic upgrade head
+
+[Install]
+WantedBy=default.target

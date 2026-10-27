@@ -114,6 +114,12 @@ class PlanBroll:
     # всегда 0: рендерер не выбирает кадр сам, ему говорят.
     kind: str = "photo"
     asset_start: float = 0.0
+    # Пропорция файла (ширина/высота). Геометрии она нужна была и раньше — по
+    # ней считается `rect`, — но у полнокадровой вставки `rect` всегда кадр
+    # целиком, и по нему уже не понять, что там за источник. Рендереру это
+    # решает один вопрос: класть ли под картинку размытую копию. Сток 2:3 без
+    # неё обрезается, нарисованная вертикаль 9:16 с ней — только портится.
+    aspect: float | None = None
 
 
 @dataclass(slots=True)
@@ -166,6 +172,7 @@ class RenderPlan:
                     kb_dir=int(x.get("kb_dir", 1) or 1),
                     kind=x.get("kind") or "photo",
                     asset_start=float(x.get("asset_start") or 0.0),
+                    aspect=(float(x["aspect"]) if x.get("aspect") else None),
                 )
                 for x in data.get("broll", [])
             ],
@@ -207,6 +214,7 @@ class RenderPlan:
                     "kb_dir": x.kb_dir,
                     "kind": x.kind,
                     "asset_start": round(x.asset_start, 3),
+                    "aspect": (round(x.aspect, 4) if x.aspect else None),
                 }
                 for x in self.broll
             ],
@@ -688,6 +696,7 @@ def build_plan(
                 kb_dir=1 if getattr(b, "kb_dir", 1) >= 0 else -1,
                 kind=getattr(b, "kind", "photo"),
                 asset_start=float(getattr(b, "asset_start", 0.0) or 0.0),
+                aspect=getattr(b, "asset_aspect", None),
             )
         )
 

@@ -1,0 +1,27 @@
+# В контекст сборки идёт только то, что нужно образу. Секреты, данные и
+# локальные окружения не едут никогда: .env подключается на сервере через
+# env_file, а не запекается в образ.
+.git
+.venv
+.env
+.env.*
+!.env.example
+data/
+logs/
+samples/
+tests/
+tools/
+.kilo/
+.claude/
+.playwright-mcp/
+.pytest_cache/
+.ruff_cache/
+.remotion/
+**/__pycache__/
+*.pyc
+render/node_modules/
+render/.cache/
+*.mp4
+*.mov
+*.wav
+*.md

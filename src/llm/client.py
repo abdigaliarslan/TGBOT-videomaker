@@ -1,8 +1,9 @@
 """Абстрактный LLM-клиент (§4).
 
-Вызывающий код знает тир (`cheap`/`smart`/`vision`), а не имя модели. Промпты
-лежат в `prompts/*.md`, а не в питоновских строках. Системная часть промпта
-одинакова между роликами → идёт в prompt cache, иначе переплата вдвое.
+Вызывающий код знает тир (`cheap`/`smart`/`vision`), а не имя модели и не
+провайдера. Промпты лежат в `prompts/*.md`, а не в питоновских строках.
+Системная часть промпта одинакова между роликами → идёт в prompt cache, иначе
+переплата (у DeepSeek кеш-попадание дешевле промаха в 30 раз).
 
 Ретрай ровно один: второй провал → фолбэк, не третья попытка.
 """
@@ -14,11 +15,19 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
-from src.core.config import settings
+from src.core.config import Settings, settings as default_settings
+from src.llm import jsonshape
+from src.llm.providers import (
+    Provider,
+    ProviderError,
+    make_provider,
+    price_for,
+    schema_hint,
+)
 
 log = logging.getLogger(__name__)
 
@@ -27,25 +36,20 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 SYSTEM_MARK = "<!-- system -->"
 USER_MARK = "<!-- user -->"
 
-# $/1M токенов. Кеш-чтение ~0.1x входа, запись в кеш ~1.25x входа.
-PRICES: dict[str, tuple[float, float]] = {
-    "claude-opus-5": (5.00, 25.00),
-    "claude-fable-5": (10.00, 50.00),
-    "claude-sonnet-5": (2.00, 10.00),
-    "claude-haiku-4-5": (1.00, 5.00),
-    "claude-opus-4-8": (5.00, 25.00),
-    "claude-sonnet-4-6": (3.00, 15.00),
-}
-# Модели, которым передаём adaptive thinking. У остальных параметр вызовет 400.
-THINKING_MODELS = ("claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-opus-4-8")
+# Модель иногда оборачивает JSON в markdown, даже когда просили не оборачивать.
+FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.S)
 
 
 class LLMUnavailable(RuntimeError):
-    """Ключа нет или API не отвечает. Вызывающий обязан уйти в детерминированный фолбэк."""
+    """Ключа нет или провайдер не отвечает. Вызывающий обязан уйти в фолбэк."""
 
 
 class LLMBadOutput(ValueError):
-    """Модель вернула JSON, который не прошёл валидацию вызывающего."""
+    """Модель вернула не то: не JSON или не та форма. Лечится ретраем (§4)."""
+
+
+class LLMBudgetExceeded(LLMBadOutput):
+    """Ответ оборван по лимиту токенов. Ретрай с теми же настройками бесполезен."""
 
 
 @dataclass(slots=True)
@@ -53,6 +57,7 @@ class Usage:
     prompt: str
     tier: str
     model: str
+    provider: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
@@ -62,11 +67,11 @@ class Usage:
 
     @property
     def cost_usd(self) -> float:
-        inp, out = PRICES.get(self.model, (5.0, 25.0))
+        miss, hit, out = price_for(self.model)
         return (
-            self.input_tokens * inp
-            + self.cache_read_tokens * inp * 0.1
-            + self.cache_creation_tokens * inp * 1.25
+            self.input_tokens * miss
+            + self.cache_read_tokens * hit
+            + self.cache_creation_tokens * miss * 1.25
             + self.output_tokens * out
         ) / 1_000_000
 
@@ -108,7 +113,7 @@ _VAR_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 
 
 def render(template: str, variables: dict[str, Any]) -> str:
-    """Подстановка {{var}}. Не str.format: в промптах полно фигурных скобок из JSON."""
+    """Подстановка {{var}}. Не str.format: в промптах полно скобок из JSON."""
     missing: list[str] = []
 
     def sub(m: re.Match[str]) -> str:
@@ -125,37 +130,61 @@ def render(template: str, variables: dict[str, Any]) -> str:
     return out
 
 
+def parse_json(text: str) -> Any:
+    """JSON из ответа модели, с поправкой на markdown-обёртку."""
+    stripped = text.strip()
+    fenced = FENCE_RE.match(stripped)
+    if fenced:
+        stripped = fenced.group(1)
+    return json.loads(stripped)
+
+
 UsageSink = Callable[[Usage], Awaitable[None] | None]
 
 
 class LLMClient:
-    """Один вход для всех вызовов модели."""
+    """Один вход для всех вызовов модели, каким бы ни был провайдер."""
 
-    def __init__(self, *, api_key: str | None = None, usage_sink: UsageSink | None = None) -> None:
-        self._api_key = api_key if api_key is not None else settings.anthropic_api_key
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        usage_sink: UsageSink | None = None,
+        cfg: Settings | None = None,
+        provider: Provider | None = None,
+    ) -> None:
+        self.cfg = cfg or default_settings
+        self._api_key = api_key if api_key is not None else self.cfg.llm_api_key
         self._usage_sink = usage_sink
-        self._client: Any = None
+        self._provider = provider
         self.usages: list[Usage] = []
 
     # ------------------------------------------------------------------ доступность
     @property
-    def ready(self) -> bool:
-        return bool(self._api_key) and settings.llm_enabled
+    def provider_name(self) -> str:
+        return self._provider.name if self._provider else self.cfg.llm_provider
 
-    def _ensure_client(self) -> Any:
+    @property
+    def ready(self) -> bool:
+        if self._provider is not None:
+            return self.cfg.llm_enabled
+        return bool(self._api_key) and self.cfg.llm_enabled
+
+    def _ensure_provider(self) -> Provider:
         if not self.ready:
             raise LLMUnavailable(
-                "ANTHROPIC_API_KEY не задан (или LLM_ENABLED=0) — работаем без LLM"
+                f"нет ключа для провайдера {self.cfg.llm_provider!r} "
+                f"(или LLM_ENABLED=0) — работаем без LLM"
             )
-        if self._client is None:
-            import anthropic
-
-            self._client = anthropic.AsyncAnthropic(
-                api_key=self._api_key,
-                timeout=settings.llm_timeout_s,
-                max_retries=0,  # ретраями управляем сами (§4: ровно один)
+        if self._provider is None:
+            self._provider = make_provider(
+                self.cfg.llm_provider,
+                self._api_key,
+                self.cfg.llm_base_url,
+                self.cfg.llm_timeout_s,
+                thinking=self.cfg.llm_thinking,
             )
-        return self._client
+        return self._provider
 
     # ------------------------------------------------------------------ основной вызов
     async def complete(
@@ -170,106 +199,100 @@ class LLMClient:
         max_tokens: int = 16_000,
         effort: str | None = None,
     ) -> LLMResult:
-        """Вызов модели со structured output. Один ретрай при транспортной ошибке.
+        """Вызов модели со структурированным выводом. Ретрай — только транспорт.
 
-        `correction` — текст ошибки валидации для повторного вызова (§3): не новый
-        промпт, а дописка к пользовательской части, чтобы кеш системной уцелел.
+        `correction` — текст ошибки для повторного вызова (§3): дописывается к
+        пользовательской части, чтобы кеш системной уцелел.
         """
-        client = self._ensure_client()
+        provider = self._ensure_provider()
         prompt = load_prompt(prompt_name)
-        model = settings.model_for_tier(model_tier)
+        model = self.cfg.model_for_tier(model_tier)
 
         user_text = render(prompt.user, variables)
+        if not provider.supports_schema:
+            # Провайдер не умеет принуждать к схеме — кладём её в промпт,
+            # а форму ответа проверим сами.
+            user_text += schema_hint(schema)
         if correction:
             user_text += (
-                "\n\n---\nПредыдущий ответ не прошёл валидацию:\n"
+                "\n\n---\nПредыдущий ответ не подошёл:\n"
                 f"{correction}\n"
                 "Исправь ровно эти ошибки. Формат ответа тот же."
             )
 
-        content: list[dict[str, Any]] = []
-        for img in images or ():
-            import base64
+        image_list = list(images or ())
+        if image_list and not provider.supports_images:
+            log.warning("провайдер %s не принимает картинки — вызов без них", provider.name)
+            image_list = []
 
-            content.append(
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": base64.standard_b64encode(img).decode("ascii"),
-                    },
-                }
-            )
-        content.append({"type": "text", "text": user_text})
-
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "max_tokens": max_tokens,
-            # Системная часть идентична между роликами → кешируем её (§4).
-            "system": [
-                {
-                    "type": "text",
-                    "text": prompt.system,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            "messages": [{"role": "user", "content": content}],
-            "output_config": {"format": {"type": "json_schema", "schema": schema}},
-        }
-        if effort:
-            kwargs["output_config"]["effort"] = effort
-        if any(model.startswith(m) for m in THINKING_MODELS):
-            kwargs["thinking"] = {"type": "adaptive"}
-
-        last_error: Exception | None = None
-        for attempt in range(1, settings.llm_max_retries + 2):
+        last: ProviderError | None = None
+        for attempt in range(1, self.cfg.llm_max_retries + 2):
             t0 = time.perf_counter()
             try:
-                message = await self._send(client, kwargs)
-            except Exception as e:  # noqa: BLE001 — классифицируем ниже
-                last_error = e
-                if not _retryable(e) or attempt > settings.llm_max_retries:
-                    raise LLMUnavailable(f"{prompt_name}: {type(e).__name__}: {e}") from e
+                result = await provider.complete(
+                    model=model,
+                    system=prompt.system,
+                    user=user_text,
+                    schema=schema,
+                    images=image_list,
+                    max_tokens=max_tokens,
+                    effort=effort,
+                )
+            except ProviderError as e:
+                last = e
+                if not e.retryable or attempt > self.cfg.llm_max_retries:
+                    raise LLMUnavailable(f"{prompt_name}: {e}") from e
                 delay = 1.5 * attempt
                 log.warning("LLM %s: %s, повтор через %.1fs", prompt_name, e, delay)
                 await asyncio.sleep(delay)
                 continue
 
-            usage = _usage_from(message, prompt_name, model_tier, model, attempt)
-            usage.seconds = round(time.perf_counter() - t0, 2)
+            usage = Usage(
+                prompt=prompt_name,
+                tier=model_tier,
+                model=model,
+                provider=provider.name,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cache_read_tokens=result.cache_read_tokens,
+                cache_creation_tokens=result.cache_creation_tokens,
+                seconds=round(time.perf_counter() - t0, 2),
+                attempt=attempt,
+            )
             await self._record(usage)
+            log.info(
+                "LLM %s [%s/%s/%s] in=%d cached=%d out=%d $%.4f %.1fs",
+                prompt_name, provider.name, model_tier, model,
+                usage.input_tokens, usage.cache_read_tokens, usage.output_tokens,
+                usage.cost_usd, usage.seconds,
+            )
 
-            text = "".join(b.text for b in message.content if getattr(b, "type", "") == "text")
             try:
-                data = json.loads(text)
+                data = parse_json(result.text)
             except json.JSONDecodeError as e:
-                # output_config гарантирует валидный JSON; сюда попадаем только при
-                # обрыве по max_tokens.
+                # Обрыв по лимиту токенов повторять НЕЛЬЗЯ: те же настройки дадут
+                # тот же обрыв, а заплатим дважды. Проверено дорогой ценой —
+                # два таких ретрая сожгли весь остаток баланса.
+                if result.stop_reason in ("length", "max_tokens"):
+                    raise LLMBudgetExceeded(
+                        f"{prompt_name}: ответ оборван по лимиту токенов "
+                        f"({result.output_tokens} шт.), повтор не поможет — "
+                        f"уменьшите размышления модели или поднимите max_tokens"
+                    ) from e
                 raise LLMBadOutput(
                     f"{prompt_name}: ответ не разобрался как JSON "
-                    f"(stop_reason={getattr(message, 'stop_reason', '?')})"
+                    f"(stop={result.stop_reason or '?'}): {e}"
                 ) from e
 
-            log.info(
-                "LLM %s [%s/%s] in=%d cached=%d out=%d $%.4f %.1fs",
-                prompt_name,
-                model_tier,
-                model,
-                usage.input_tokens,
-                usage.cache_read_tokens,
-                usage.output_tokens,
-                usage.cost_usd,
-                usage.seconds,
-            )
-            return LLMResult(data=data, usage=usage, raw=text)
+            shape_errors = jsonshape.check(data, schema)
+            if shape_errors:
+                raise LLMBadOutput(f"{prompt_name}: форма ответа не по схеме: " + "; ".join(shape_errors[:6]))
+            if not isinstance(data, dict):
+                raise LLMBadOutput(f"{prompt_name}: ожидался объект, пришёл {type(data).__name__}")
 
-        raise LLMUnavailable(f"{prompt_name}: {last_error}")
+            return LLMResult(data=data, usage=usage, raw=result.text)
 
-    async def _send(self, client: Any, kwargs: dict[str, Any]) -> Any:
-        """Стримим: у director большой max_tokens, нестримовый запрос упрётся в таймаут."""
-        async with client.messages.stream(**kwargs) as stream:
-            return await stream.get_final_message()
+        raise LLMUnavailable(f"{prompt_name}: {last}")
 
     async def _record(self, usage: Usage) -> None:
         self.usages.append(usage)
@@ -279,38 +302,20 @@ class LLMClient:
         if asyncio.iscoroutine(res):
             await res
 
+    async def aclose(self) -> None:
+        if self._provider is not None:
+            await self._provider.aclose()
+
     # ------------------------------------------------------------------ отчётность
     def total_cost(self) -> float:
         return sum(u.cost_usd for u in self.usages)
 
     def report(self) -> dict[str, Any]:
         return {
+            "provider": self.provider_name,
             "calls": [u.to_dict() for u in self.usages],
             "total_cost_usd": round(self.total_cost(), 6),
             "total_input_tokens": sum(u.input_tokens for u in self.usages),
             "total_output_tokens": sum(u.output_tokens for u in self.usages),
             "total_cache_read_tokens": sum(u.cache_read_tokens for u in self.usages),
         }
-
-
-def _usage_from(message: Any, prompt: str, tier: str, model: str, attempt: int) -> Usage:
-    u = getattr(message, "usage", None)
-    return Usage(
-        prompt=prompt,
-        tier=tier,
-        model=model,
-        input_tokens=int(getattr(u, "input_tokens", 0) or 0),
-        output_tokens=int(getattr(u, "output_tokens", 0) or 0),
-        cache_read_tokens=int(getattr(u, "cache_read_input_tokens", 0) or 0),
-        cache_creation_tokens=int(getattr(u, "cache_creation_input_tokens", 0) or 0),
-        attempt=attempt,
-    )
-
-
-def _retryable(e: Exception) -> bool:
-    """Повторяем только транспорт и перегрузку. 400 повторять бессмысленно."""
-    name = type(e).__name__
-    if name in ("APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError"):
-        return True
-    status = getattr(e, "status_code", None)
-    return isinstance(status, int) and (status == 429 or status >= 500)

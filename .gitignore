@@ -26,3 +26,15 @@ render/.cache/
 # Рабочие папки прогонов `run_pipeline.py --keep-work`: артефакты из них
 # кладутся в samples/ поимённо, сама папка в репозиторий не едет.
 samples/.work-*/
+
+# секреты сервера, собираются deploy.sh
+deploy/.env
+
+# локальное: логи ручных прогонов, метаданные pip install -e, кеши линтера,
+# личные настройки и worktree агентов
+logs/
+*.egg-info/
+.ruff_cache/
+.kilo/
+.claude/settings.local.json
+.claude/worktrees/

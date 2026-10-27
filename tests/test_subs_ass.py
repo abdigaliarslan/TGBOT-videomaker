@@ -152,8 +152,15 @@ def _dialogue_ms(line: str) -> int:
 
 
 def _pop_end_ms(line: str) -> int | None:
-    """Конец последней фазы «пшика» или None, если анимации в реплике нет."""
-    ends = [int(m.group(2)) for m in re.finditer(r"\\t\((\d+),(\d+),", line)]
+    """Конец последней фазы «пшика» или None, если анимации в реплике нет.
+
+    Считаются только МАСШТАБНЫЕ `\\t`: пол в восемь кадров — закон про
+    движение, а проявление слова (`word_in_ms`, тоже `\\t`, но по `\\alpha`)
+    из-под него выведено намеренно — ровно как `fadeFrames` в `render/src/style.ts`.
+    У эталона слово проявляется за 4 кадра, и восьмикадровый пол сделал бы
+    такое проявление невозможным втрое.
+    """
+    ends = [int(m.group(2)) for m in re.finditer(r"\\t\((\d+),(\d+),\\fsc", line)]
     return max(ends) if ends else None
 
 

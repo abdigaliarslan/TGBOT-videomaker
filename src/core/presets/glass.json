@@ -69,7 +69,11 @@
     "block_leave_scale": 1.0,
     "accent_scale": 2.3,
     "shout_scale": 2.6,
-    "shout_rotate": 0.0
+    "shout_rotate": 0.0,
+    "word_in_ms": 130,
+    "word_rise_px": 0,
+    "leak_ms": 600,
+    "leak_hue": 0.0
   },
   "background": "#000000",
   "grade": {

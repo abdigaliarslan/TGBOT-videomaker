@@ -1,0 +1,86 @@
+{
+  "name": "pulse",
+  "title": "Pulse",
+  "font": {
+    "family": "Montserrat ExtraBold",
+    "file": "Montserrat-ExtraBold.ttf",
+    "weight": 800,
+    "size": 88,
+    "uppercase": false,
+    "letter_spacing": -0.015
+  },
+  "colors": {
+    "active": "#FDFAF2",
+    "past": "#FDFAF2",
+    "ghost": "#FDFAF2",
+    "past_opacity": 1.0,
+    "ghost_opacity": 0.0,
+    "accent": "#F3D28F",
+    "shout": "#FF6A3D",
+    "outline": "#05070A",
+    "shadow": "#000000"
+  },
+  "panel": {
+    "enabled": false,
+    "color": "#0B0F14",
+    "opacity": 0.0,
+    "blur": 0,
+    "radius": 30,
+    "padding_x": 34,
+    "padding_y": 22,
+    "border_color": "#FFFFFF",
+    "border_opacity": 0.0,
+    "border_width": 1,
+    "glass_color": "#FFFFFF",
+    "glass_opacity": 0.0
+  },
+  "caption": {
+    "position": "bottom",
+    "margin": 380,
+    "line_height": 1.06,
+    "align": "center",
+    "max_lines": 2,
+    "min_word_scale": 0.4,
+    "fill_max_scale": 2.8,
+    "pinned": true
+  },
+  "contrast": {
+    "enabled": false,
+    "min_ratio": 4.5,
+    "luma_dark": 0.2,
+    "luma_light": 0.8,
+    "panel_opacity_dark": 0.0,
+    "panel_opacity_light": 0.0,
+    "text_dark": "#FDFAF2",
+    "text_light": "#FDFAF2"
+  },
+  "animation": {
+    "pop_scale": 1.05,
+    "pop_ms": 200,
+    "spring_damping": 12.0,
+    "spring_stiffness": 190.0,
+    "spring_mass": 0.7,
+    "block_in_ms": 140,
+    "block_out_ms": 110,
+    "block_gap_ms": 60,
+    "block_in_zoom": 0.03,
+    "block_shift_px": 22,
+    "block_leave_px": 48,
+    "block_leave_scale": 0.94,
+    "accent_scale": 2.3,
+    "shout_scale": 2.6,
+    "shout_rotate": -3.0,
+    "word_in_ms": 150,
+    "word_rise_px": 16,
+    "leak_ms": 600,
+    "leak_hue": 0.0
+  },
+  "background": "#000000",
+  "grade": {
+    "enabled": true,
+    "contrast": 1.08,
+    "saturation": 1.12,
+    "gamma": 0.98,
+    "vignette": 0.22
+  }
+}

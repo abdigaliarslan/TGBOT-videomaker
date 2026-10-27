@@ -60,7 +60,9 @@
     "block_out_ms": 100,
     "accent_scale": 1.22,
     "shout_scale": 1.42,
-    "shout_rotate": -6.0
+    "shout_rotate": -6.0,
+    "word_in_ms": 120,
+    "word_rise_px": 0
   },
   "background": "#000000",
   "grade": {

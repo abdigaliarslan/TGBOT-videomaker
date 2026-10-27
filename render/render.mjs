@@ -162,7 +162,10 @@ const main = async () => {
       x264Preset: req.x264Preset ?? "medium",
       pixelFormat: "yuv420p",
       concurrency: req.concurrency ?? null,
-      chromiumOptions: { gl: "swangle" },
+      // Режим GL — число настройки (RENDER_GL), а не константа: на сервере без
+      // GPU программная эмуляция WebGL стоит времени на каждом кадре, а слоям из
+      // HTML и CSS WebGL не нужен. Не задан — прежний "swangle".
+      chromiumOptions: { gl: req.gl ?? "swangle" },
       // Дефолтные 30 с на кадр — это не «кадр завис», а «машина занята». Замерено
       // на этой: при параллельном прогоне тестов рендер упал на кадре 221 с
       // «Timeout (30000ms) exceeded», не дождавшись куска ОСНОВНОГО видео с
@@ -173,11 +176,14 @@ const main = async () => {
       // здесь порог нужен только чтобы отличить зависший кадр от медленного.
       // Две минуты на кадр — это заведомо зависший.
       timeoutInMilliseconds: req.timeoutMs ?? 120_000,
+      // Строка `[render] progress N` — контракт с Python (`render._PROGRESS`):
+      // по ней двигается полоса прогресса в чате и приложении. Шаг 2 %: рендер
+      // бывает самым долгим этапом, и без этого полоса минутами стоит на месте.
       onProgress: ({ progress }) => {
         const pct = Math.round(progress * 100);
-        if (pct >= lastLogged + 10) {
+        if (pct >= lastLogged + 2) {
           lastLogged = pct;
-          log(`${pct}%`);
+          log(`progress ${pct}`);
         }
       },
     });

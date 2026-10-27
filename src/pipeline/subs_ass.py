@@ -167,7 +167,20 @@ def _render_word(word: PlanWord, state: str, preset: Preset, fps: int, dialogue_
         # `\t` обязан вернуть слову его кегль до её конца, иначе следующая
         # реплика делает это скачком (см. `pop_window_ms`).
         total = pop_window_ms(preset, fps, dialogue_ms)
-        tags = [to_ass_alpha(1.0), f"\\c{_word_colour(word, preset)}", size]
+        # Проявление слова (`word_in_ms`), тот же механизм, что в Remotion:
+        # слово набирает яркость от ghost к полной, а не включается скачком.
+        # Ноль — прежнее мгновенное включение.
+        #
+        # Порог в восемь кадров здесь не действует по той же причине, что и в
+        # TSX: это прозрачность, а не движение. Ограничение одно — реплика:
+        # `\t` отсчитывается от её начала и наружу не выходит.
+        #
+        # Известное расхождение с Remotion: у ПЕРВОГО слова блока реплика
+        # начинается от начала блока, а не от самого слова, поэтому его
+        # проявление стартует чуть раньше. Разводить их нечем — в ASS у слова
+        # нет своей дорожки, — а на глаз это прикрыто появлением самого блока.
+        reveal = min(a.word_in_ms, max(0, dialogue_ms))
+        tags = [to_ass_alpha(c.ghost_opacity if reveal else 1.0), f"\\c{_word_colour(word, preset)}", size]
         if total:
             rise = max(1, round(total * POP_RISE))
             peak = max(1, round(base * a.pop_scale))
@@ -175,6 +188,11 @@ def _render_word(word: PlanWord, state: str, preset: Preset, fps: int, dialogue_
                 f"\\t(0,{rise},\\fscx{peak}\\fscy{peak})",
                 f"\\t({rise},{total},{size})",
             ]
+        # Проявление идёт ПОСЛЕ «пшика»: порядок `\t` для libass безразличен, а
+        # рядом с `\fscx` обязан стоять именно масштабный `\t` — на этом
+        # соседстве держится проверка `test_pop_starts_at_the_word_size`.
+        if reveal:
+            tags.append(f"\\t(0,{reveal},\\alpha{to_ass_alpha(1.0)})")
         if word.emphasis == "shout" and a.shout_rotate:
             tags.append(f"\\frz{a.shout_rotate:g}")
     elif state == "past":

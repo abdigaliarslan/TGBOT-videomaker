@@ -117,6 +117,38 @@ BROLL_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["items"],
     "properties": {
+        # Стилевая памятка на весь ролик: по ней генерируются ВСЕ вставки, и
+        # поэтому две картинки одного ролика выглядят комплектом, а не двумя
+        # случайными находками. Пишется тем же вызовом, который и так смотрит
+        # на кадры, — отдельного запроса и отдельных денег не стоит.
+        #
+        # Необязательна намеренно: модель без принуждения к схеме (DeepSeek)
+        # может её не вернуть, и терять из-за этого весь план вставок нельзя.
+        "style": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["palette", "light", "mood"],
+            "properties": {
+                "palette": {
+                    "type": "string",
+                    "description": "Палитра кадров ролика, НА АНГЛИЙСКОМ: 3-5 слов.",
+                    "maxLength": 120,
+                },
+                "light": {
+                    "type": "string",
+                    "description": "Свет: направление, мягкость, температура. Английский.",
+                    "maxLength": 120,
+                },
+                "mood": {
+                    "type": "string",
+                    "description": (
+                        "Обработка кадра, НЕ место: фактура, зерно, контраст. "
+                        "Английский."
+                    ),
+                    "maxLength": 120,
+                },
+            },
+        },
         "items": {
             "type": "array",
             "items": {
@@ -128,16 +160,20 @@ BROLL_SCHEMA: dict[str, Any] = {
                     "duration": {"type": "number", "minimum": 0.8, "maximum": 3.0},
                     "query": {
                         "type": "string",
-                        "description": "Короткий поисковый запрос НА АНГЛИЙСКОМ для стока.",
+                        "description": (
+                            "Запасной поисковый запрос НА АНГЛИЙСКОМ для стока, 2-4 слова. "
+                            "Нужен, только если генерация не удастся."
+                        ),
                         "maxLength": 60,
                     },
                     "prompt": {
                         "type": ["string", "null"],
                         "description": (
-                            "Промпт для генерации, если стока не найдётся. Без текста и "
-                            "надписей на картинке."
+                            "ГЛАВНОЕ поле: описание кадра НА АНГЛИЙСКОМ, по которому "
+                            "картинка рисуется. Предметно, с композицией под вертикаль "
+                            "9:16. Без текста и надписей на картинке."
                         ),
-                        "maxLength": 300,
+                        "maxLength": 600,
                     },
                     "anim": {
                         "type": "string",
@@ -177,10 +213,35 @@ METADATA_SCHEMA: dict[str, Any] = {
     },
 }
 
+# ------------------------------------------------------------------ check_image (vision)
+
+# Приёмка сгенерированной картинки. Двух полей достаточно: показано ли то, что
+# просили, и нет ли на картинке букв. Второе спрашивается отдельно, потому что
+# именно на нём модели врут чаще всего (кириллица — всегда, латиница — на
+# вывесках и упаковках), а заметить это в готовом ролике уже поздно.
+IMAGE_CHECK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["shows_subject", "has_text", "fix"],
+    "properties": {
+        "shows_subject": {"type": "boolean"},
+        "has_text": {"type": "boolean"},
+        "fix": {
+            "type": ["string", "null"],
+            "description": (
+                "Если что-то не так — одна фраза НА АНГЛИЙСКОМ, что поправить в "
+                "промпте. Иначе null."
+            ),
+            "maxLength": 200,
+        },
+    },
+}
+
 SCHEMAS: dict[str, dict[str, Any]] = {
     "direct": DIRECT_SCHEMA,
     "clean_transcript": CLEAN_SCHEMA,
     "plan_broll": BROLL_SCHEMA,
+    "check_image": IMAGE_CHECK_SCHEMA,
     "metadata": METADATA_SCHEMA,
 }
 
@@ -189,5 +250,6 @@ TIERS: dict[str, str] = {
     "clean_transcript": "cheap",
     "direct": "smart",
     "plan_broll": "vision",
+    "check_image": "vision",
     "metadata": "cheap",
 }
