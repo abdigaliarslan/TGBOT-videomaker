@@ -327,9 +327,26 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
  * кадр ради маленькой картинки читался бы как сбой экспозиции. Из этого же
  * правила исключение — `fullscreen_to_inset`: он входит полным кадром.
  *
- * Шейдер WebGL2, в рендере без GPU — программный (swangle/angle). Стоит он
- * только на кадрах самой вспышки: вне окна компонент ничего не рисует.
+ * Шейдер WebGL2, в рендере без GPU — программный (swangle). Стоит он только
+ * на кадрах самой вспышки: вне окна компонент ничего не рисует.
+ *
+ * ⚠ WebGL2 есть не в каждом режиме: на сервере без GPU `angle` его не даёт, и
+ * эффект ронял ВЕСЬ рендер («Failed to acquire WebGL2 context»). Вспышка —
+ * украшение, поэтому без WebGL2 её просто нет, а ролик собирается.
  */
+let webgl2: boolean | null = null;
+const hasWebGL2 = (): boolean => {
+  if (webgl2 === null) {
+    try {
+      webgl2 = document.createElement("canvas").getContext("webgl2") !== null;
+    } catch {
+      webgl2 = false;
+    }
+    if (!webgl2) console.warn("[broll] WebGL2 недоступен — вспышка на вставках отключена");
+  }
+  return webgl2;
+};
+
 const LightLeak: React.FC<{ item: PlanBroll; preset: Preset; seed: number }> = ({
   item,
   preset,
@@ -348,6 +365,7 @@ const LightLeak: React.FC<{ item: PlanBroll; preset: Preset; seed: number }> = (
   const cut = Math.round(item.start * fps);
   const from = cut - Math.floor(span / 2);
   if (frame < from || frame > from + span) return null;
+  if (!hasWebGL2()) return null;
 
   return (
     <Solid
