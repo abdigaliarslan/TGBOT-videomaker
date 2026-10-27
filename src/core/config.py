@@ -205,6 +205,9 @@ class Settings(BaseSettings):
     # Режим GL в Chromium рендера. Пусто — прежний "swangle" (программная
     # эмуляция WebGL). Замер на сервере без GPU, 3 потока: swangle 92 с,
     # angle 65 с, swiftshader 64 с; картинка та же (PSNR 52 дБ).
+    # ⚠ Но angle без GPU не даёт WebGL2, и вспышка на вставках (leak_ms) молча
+    # пропускается. Повторный замер 2026-10-27 с одним потоком: swangle 63 с,
+    # angle 77 с — сервер переведён на swangle.
     render_gl: str = ""
 
     # Потолок потоков ffmpeg. 0 = отдать решение ffmpeg (все ядра) — так можно
