@@ -1,0 +1,81 @@
+# Push в main → тесты → выкладка на сервер тем же deploy/update.sh, что и руками.
+#
+# Секрет репозитория DEPLOY_SSH_KEY — приватный ключ, открытая часть которого
+# лежит в ~/.ssh/authorized_keys пользователя dev на сервере. Ключ хоста
+# закреплён в deploy/known_hosts. Сломанные тесты до сервера не доезжают.
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Две выкладки одновременно перезапускали бы службы друг другу посреди работы.
+# Новая ждёт старую, а не обрывает её: оборванный rsync оставит код наполовину.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Python-зависимости
+        run: pip install -e ".[dev]"
+
+      - name: pytest
+        run: python -m pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: render/package-lock.json
+
+      - name: Типы рендера
+        working-directory: render
+        run: npm ci --no-audit --no-fund && npx tsc --noEmit -p .
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_SSH_KEY" || { echo "::error::нет секрета DEPLOY_SSH_KEY"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          grep -v '^#' deploy/known_hosts > ~/.ssh/known_hosts
+          # Имя хоста то же, что в локальном ~/.ssh/config: update.sh не меняется.
+          cat > ~/.ssh/config <<'EOF'
+          Host redstar
+            HostName 109.199.115.142
+            User dev
+            IdentityFile ~/.ssh/deploy
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          EOF
+
+      - name: Выкладка
+        run: deploy/update.sh
