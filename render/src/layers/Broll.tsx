@@ -16,21 +16,51 @@
 import React from "react";
 import { lightLeak } from "@remotion/effects/light-leak";
 import {
+  Easing,
   Img,
-  OffthreadVideo,
-  Sequence,
   Solid,
   interpolate,
-  spring,
   staticFile,
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
 import type { PlanBroll, Preset, Rect } from "../types";
-import { MIN_ANIM_FRAMES, animFrames, animNum, easeOut, motionPx, springFrames } from "../style";
+import { MIN_ANIM_FRAMES, animFrames, animNum, easeOut, motionPx } from "../style";
 
-/** Появление и уход карточки. Обе фазы одной природы — тормозят к своему концу. */
+/**
+ * Уход карточки. Длительность знает `src/pipeline/broll.py` (`inset_floor_seconds`),
+ * поэтому число живёт здесь, а не в пресете.
+ */
 const FADE_MS = 220;
+
+/**
+ * Вход вставки. Её длительность и глубина расфокуса — числа пресета
+ * (`broll_in_ms`, `broll_in_blur`); здесь только запасные значения для плана,
+ * собранного пресетом без этих полей.
+ *
+ * Прежний вход был ступенькой: альфа за восемь кадров по `easeOut`, у которого
+ * максимальная скорость приходится на ПЕРВЫЙ кадр (он брал 33 % альфы разом),
+ * плюс вспышка света поверх реза. Полноэкранная картинка, закрывающая
+ * говорящего, так не появляется — она его подменяет. Теперь три параметра
+ * ведутся раздельно и ни один не прыгает:
+ *
+ * - альфа — мягкий старт и мягкая посадка (`SOFT`): картинка проступает, и
+ *   ни один кадр не берёт больше 17 % альфы;
+ * - резкость — из расфокуса в фокус, быстро и тормозя к концу (`SETTLE`);
+ * - масштаб — наезд вдвое дольше альфы, без перелёта и с медленным стартом
+ *   (`PUSH`). Медленный старт здесь главное: на кривой с быстрым стартом 70 %
+ *   хода проходило, пока картинка была ещё полупрозрачной, и наезда не было
+ *   видно. Теперь к альфе 0.9 пройдено около половины — картинка сначала есть,
+ *   потом садится на место (рассинхрон, который проверяет test_motion.py).
+ *
+ * Кривые подобраны перебором на 24 и 30 fps, числа — в `render/card_probe.mjs`.
+ */
+const ENTER_MS = 600;
+const ENTER_BLUR = 0.012;
+const SOFT = Easing.bezier(0.33, 0, 0.25, 1);
+const SETTLE = Easing.bezier(0.16, 1, 0.3, 1);
+const PUSH = Easing.bezier(0.33, 0, 0.2, 1);
+const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
 
 /**
  * Сколько картинка держит полный кадр, прежде чем уехать в угол: не дольше
@@ -49,57 +79,15 @@ const HOLD_RATIO = 0.35;
 const TRAVEL_MS = 520;
 
 /**
- * Пружина входа: ведёт только геометрию карточки, альфу ведёт FADE_MS.
- * Числа — из пресета, как у соседнего слоя (Captions.tsx): характер движения это
- * стиль, а стиль живёт в данных, а не в константах TSX (§0).
- */
-const springOf = (a: Preset["animation"]) => ({
-  damping: a.spring_damping,
-  stiffness: a.spring_stiffness,
-  mass: a.spring_mass,
-});
-
-/**
  * Полный кадр не может «прилетать» из ничего: за краями уменьшенной картинки
  * сразу видно исходное видео, и вставка читается как отклеившаяся наклейка.
- * Поэтому у неё вход — лёгкий наезд, а прыжок с 0.72 остаётся карточке в углу,
- * у которой края и должны быть видны.
+ * Поэтому у неё вход — наезд СВЕРХУ вниз, с 1.08 до 1: края всё время за
+ * кадром. Заодно они прячут и кайму расфокуса — размытый край прозрачен, и
+ * без запаса по краям сквозь него просвечивало бы видео. Подъём с 0.72
+ * остаётся карточке в углу, у которой края и должны быть видны.
  */
-const FULL_PUSH = 1.06;
+const FULL_PUSH = 1.08;
 const INSET_POP = 0.72;
-
-/**
- * Содержимое вставки: кадр или клип (М4). Отличается только элементом — стиль,
- * геометрия и движение у обоих одни.
- *
- * Клип живёт внутри `<Sequence>`, потому что его время обязано отсчитываться от
- * начала ВСТАВКИ, а не от начала композиции: без сдвига на 15-й секунде ролика
- * `OffthreadVideo` показал бы 15-ю секунду клипа, которого столько нет.
- * `layout="none"` — чтобы Sequence не подкладывала свой `AbsoluteFill` и не
- * ломала абсолютное позиционирование слоя Ken Burns.
- *
- * `trimBefore` (вход в клип) считает Python и кладёт в план: выбирать кадр —
- * решение, а рендерер решений не принимает (§0).
- */
-const Media: React.FC<{
-  item: PlanBroll;
-  startFrame: number;
-  style: React.CSSProperties;
-}> = ({ item, startFrame, style }) => {
-  const { fps } = useVideoConfig();
-  const src = staticFile(item.asset as string);
-  if (item.kind !== "video") return <Img src={src} style={style} />;
-  return (
-    <Sequence from={startFrame} layout="none">
-      <OffthreadVideo
-        src={src}
-        muted
-        trimBefore={Math.round((item.asset_start ?? 0) * fps)}
-        style={style}
-      />
-    </Sequence>
-  );
-};
 
 const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) => {
   const frame = useCurrentFrame();
@@ -112,29 +100,30 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
 
   const framesIn = frame - startFrame;
   const fade = animFrames(FADE_MS, fps);
-  const enterSpring = springOf(preset.animation);
-  // Геометрию карточки ведёт пружина натуральной длительности: сжатая в 1.8 раза
-  // обрывалась на максимуме скорости и вставала как вкопанная.
-  const enter = spring({
-    frame: framesIn,
-    fps,
-    durationInFrames: springFrames(fps, enterSpring),
-    config: enterSpring,
+  const a = preset.animation;
+  const enterFrames = animFrames(animNum(a, "broll_in_ms", ENTER_MS), fps);
+  const appear = interpolate(framesIn, [0, enterFrames], [0, 1], { ...clamp, easing: SOFT });
+  // Геометрия карточки в углу: тот же вход, но тормозящий к концу и без
+  // перелёта. Пружина здесь стояла раньше и проскакивала цель на 4-7 %, то есть
+  // картинка подпрыгивала на месте — ровно то, чего при плавном входе быть не
+  // должно.
+  const enter = interpolate(framesIn, [0, enterFrames], [0, 1], { ...clamp, easing: SETTLE });
+  // Расфокус гаснет быстрее, чем доезжает наезд: к моменту, когда края
+  // полноэкранной картинки входят в кадр, кайма размытия уже исчезла.
+  const blur =
+    height *
+    animNum(a, "broll_in_blur", ENTER_BLUR) *
+    interpolate(framesIn, [0, enterFrames], [1, 0], { ...clamp, easing: SETTLE });
+  const push = interpolate(framesIn, [0, enterFrames * 2], [FULL_PUSH, 1], {
+    ...clamp,
+    easing: PUSH,
   });
-  const appear = easeOut(
-    interpolate(framesIn, [0, fade], [0, 1], {
-      extrapolateLeft: "clamp",
-      extrapolateRight: "clamp",
-    }),
-  );
-  const leave =
-    1 -
-    easeOut(
-      interpolate(frame, [endFrame - fade, endFrame], [0, 1], {
-        extrapolateLeft: "clamp",
-        extrapolateRight: "clamp",
-      }),
-    );
+  // Уход той же мягкой кривой, что и вход: `easeOut` стартовал на полной
+  // скорости, и картинка не таяла, а обрывалась.
+  const leave = interpolate(frame, [endFrame - fade, endFrame], [1, 0], {
+    ...clamp,
+    easing: SOFT,
+  });
 
   // План без прямоугольника (собран до Ф4) — вставка полноэкранная: это
   // единственная геометрия, которую можно взять, ничего не решая самому.
@@ -180,19 +169,14 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
     // 9:16 до пропорции карточки, `cover` пересчитывал кроп на каждом кадре и
     // содержимое дышало прямо во время полёта (§8.3).
     const cover = Math.max(width / rest.width, height / rest.height);
-    scale = cover + (1 - cover) * k;
+    // Вход у перелёта тот же, что у полного кадра: картинка проступает с
+    // наездом и только потом летит в угол.
+    scale = (cover + (1 - cover) * k) * push;
     shiftX = (width / 2 - (rest.x + rest.width / 2)) * (1 - k);
     shiftY = (height / 2 - (rest.y + rest.height / 2)) * (1 - k);
     chrome = isFull ? 0 : k;
   } else if (isFull) {
-    // Вход и выход одной природы: оба easeOut, а не пружина против линейки.
-    const push = easeOut(
-      interpolate(framesIn, [0, fade * 2], [0, 1], {
-        extrapolateLeft: "clamp",
-        extrapolateRight: "clamp",
-      }),
-    );
-    scale = interpolate(push, [0, 1], [FULL_PUSH, 1]);
+    scale = push;
   } else if (item.anim === "slide_up") {
     const slide = motionPx(preset.animation, "broll_slide_px", Math.round(height * 0.09));
     shiftY = interpolate(enter, [0, 1], [slide, 0]);
@@ -250,25 +234,23 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
           position: "absolute",
           inset: 0,
           transform: `translateY(${kbShift}px) scale(${kbScale})`,
+          // Ноль — фильтра нет вовсе: размытие стоит отрисовки, и платить за
+          // него после входа незачем.
+          filter: blur > 0.05 ? `blur(${blur.toFixed(2)}px)` : undefined,
           willChange: "transform",
         }}
       >
-        {isFull && item.kind !== "video" && !fitsFrame ? (
-          // Полный кадр ФОТО ЧУЖОЙ ПРОПОРЦИИ: `cover` здесь режет по-крупному и
-          // это не устранить пропорцией карточки — сток отдаёт 2:3, кадр 9:16, и
-          // максимум из (1080/800, 1920/1200) = 1.6 уводит за края по 100 px
-          // исходника с каждой стороны, 15.6 % ширины. Поэтому объект
+        {isFull && !fitsFrame ? (
+          // Полный кадр КАРТИНКИ ЧУЖОЙ ПРОПОРЦИИ (старые листы — фотографии 2:3):
+          // `cover` здесь режет по-крупному, и это не устранить пропорцией
+          // карточки — максимум из (1080/800, 1920/1200) = 1.6 уводит за края по
+          // 100 px исходника с каждой стороны, 15.6 % ширины. Поэтому объект
           // вписывается целиком, а поля закрывает размытая копия того же кадра.
           //
           // Картинку, нарисованную сразу под 9:16, этот приём только портит:
           // резать нечего, а размытая рамка по краям превращает полноэкранную
           // вставку обратно в «фотографию в рамке» — ровно то, от чего уходили.
-          // Отсюда `fitsFrame` ниже.
-          //
-          // Для клипа приём не берём по той же причине: у Pexels
-          // `orientation=portrait` — это 1080x1920, то есть ровно кадр. А
-          // подложка стоила бы ВТОРОГО декодирования того же клипа на каждом
-          // кадре рендера, при том что М4 и так платит лишним видеопотоком.
+          // Отсюда `fitsFrame`.
           <>
             <Img
               src={staticFile(item.asset)}
@@ -298,11 +280,10 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
           // Карточка наследует пропорцию источника, поэтому в покое `cover` не
           // режет ничего. Во время перелёта бокс масштабируется до полного кадра
           // и края уходят за него — это цена движения, а не постоянный кроп.
-          // Если источник всё же другой пропорции, смотрим выше центра: сток
-          // кладёт объект в верхнюю треть кадра.
-          <Media
-            item={item}
-            startFrame={startFrame}
+          // Если источник всё же другой пропорции, смотрим выше центра: объект
+          // в кадре обычно лежит в верхней трети.
+          <Img
+            src={staticFile(item.asset)}
             style={{
               position: "absolute",
               inset: 0,

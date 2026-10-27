@@ -8,7 +8,7 @@
 
 Зачем тест, если Ф-фазы уже привели вход в порядок: числа входа целиком заданы
 ПРЕСЕТОМ, то есть данными, которые правит владелец темы. Без замера правка
-`spring_stiffness` молча возвращает вход в три кадра — ровно тот дефект
+`broll_in_ms` молча возвращает вход вставки в ступеньку — ровно тот дефект
 (AUDIT §8.3), ради которого М5 и написан, а правка `word_in_ms` так же молча
 возвращает слово к включению за один кадр.
 """
@@ -66,26 +66,63 @@ def test_card_enter_is_long_enough_to_be_seen(fps: int):
 
 @pytest.mark.slow
 @pytest.mark.parametrize("fps", [24, 30, 60])
-def test_card_overshoot_exists_and_is_not_clipped(fps: int):
-    """Перелёт обязан быть виден и не срезан клампом.
+def test_card_enters_without_a_bounce(fps: int):
+    """Вставка проступает, а не подпрыгивает.
 
-    Раньше пружина перелетала на 12.4 %, но `durationInFrames` сжимал её в 1.8
-    раза и кламп срезал вершину: движение было, а упругости не было. Верхняя
-    граница здесь широкая (10 %) намеренно — это предохранитель от «пружина
-    снова превратилась в удар», а не вкусовой коридор: 4 % у glass и 6.6 % у
-    bold — сознательно разный характер двух тем.
+    Раньше вход вела пружина, и тест требовал перелёта 2.5-10 %: картинка
+    проскакивала своё место и возвращалась. Для полноэкранной картинки,
+    которая закрывает говорящего, это читается как рывок, поэтому теперь
+    обратное: ни альфа, ни наезд не идут назад и не проскакивают цель.
     """
     for name, r in probe(fps).items():
-        assert 2.5 <= r["overshoot_pct"] <= 10.0, f"{name}: перелёт {r['overshoot_pct']:.2f} %"
-        assert max(r["scale"]) > 1.0, f"{name}: вершина срезана клампом"
+        assert r["overshoot_pct"] == 0, f"{name}: наезд проскочил на {r['overshoot_pct']:.2f} %"
+        assert r["alpha_monotonic"], f"{name}: альфа шла назад"
+        assert r["scale_monotonic"], f"{name}: наезд шёл назад"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("fps", [24, 30, 60])
+def test_card_alpha_never_jumps(fps: int):
+    """Ни один кадр не берёт больше 17 % альфы.
+
+    Прежний `easeOut` за восемь кадров отдавал 33 % альфы ПЕРВЫМ же кадром —
+    картинка не проступала, а включалась.
+    """
+    for name, r in probe(fps).items():
+        assert r["alpha_max_step"] <= 0.17, f"{name}: шаг альфы {r['alpha_max_step']:.3f}"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("fps", [24, 30, 60])
+def test_card_push_is_seen_not_spent_while_transparent(fps: int):
+    """Когда картинка уже видна (альфа 0.9), впереди ещё треть наезда и больше.
+
+    На кривой с быстрым стартом 70 % хода уходило, пока картинка была
+    полупрозрачной: наезд формально был, а глазу доставался хвост в пару
+    процентов.
+    """
+    for name, r in probe(fps).items():
+        assert r["push_left_when_visible"] >= 0.33, (
+            f"{name}: к альфе 0.9 осталось {r['push_left_when_visible']:.0%} наезда"
+        )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("fps", [24, 30, 60])
+def test_card_is_in_focus_by_the_time_it_is_opaque(fps: int):
+    """Расфокус уходит раньше, чем альфа доходит до единицы: смотрят уже на резкое."""
+    for name, r in probe(fps).items():
+        assert 0 < r["blur_gone_frame"] <= r["alpha_full_frame"], (
+            f"{name}: фокус на кадре {r['blur_gone_frame']}, альфа=1 на {r['alpha_full_frame']}"
+        )
 
 
 @pytest.mark.slow
 def test_alpha_arrives_before_the_scale_settles():
     """Рассинхрон альфы и масштаба: карточка сначала «есть», потом встаёт на место.
 
-    Если вести оба параметра одной пружиной, появление читается как механика.
-    Альфа доезжает до единицы за `FADE_MS`, масштаб успокаивается позже —
+    Если вести оба параметра одной кривой, появление читается как механика.
+    Альфа доезжает до единицы за `broll_in_ms`, наезд садится позже —
     проверяем именно порядок, а не конкретные кадры.
     """
     for name, r in probe(30).items():

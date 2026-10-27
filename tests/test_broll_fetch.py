@@ -1,6 +1,7 @@
-"""Подача и добыча картинок для b-roll: что вставляем, как и какой файл берём.
+"""Подача картинок для b-roll: что вставляем, как, и какой файл берём.
 
-Сеть подменяется httpx.MockTransport — проверяется наш выбор, а не чужой сервер.
+Генерация проверяется в test_imagegen.py; здесь — смысл, подача, кеш и то, что
+листы времён стока по-прежнему читаются.
 """
 
 from __future__ import annotations
@@ -18,19 +19,14 @@ from src.pipeline.broll import (
     HOLD_RATIO,
     INSET_SECONDS,
     MIN_ANIM_FRAMES,
-    PEXELS_RENDITION,
     REST_SECONDS,
     TRAVEL_MS,
-    VIDEO_MARGIN_S,
-    VIDEO_MAX_OVERSIZE,
     asset_aspect,
     cache_key,
     fetch_asset,
-    fetch_pexels,
     is_abstract_query,
-    pick_video_file,
+    plan_and_fetch,
     sanitize_items,
-    video_start,
 )
 
 pytestmark = pytest.mark.anyio
@@ -38,35 +34,6 @@ pytestmark = pytest.mark.anyio
 
 def cfg_without_env(**over) -> Settings:
     return Settings(_env_file=None, **over)
-
-
-def photo(**srcs) -> dict:
-    return {"photos": [{"src": srcs}]}
-
-
-def video(duration: float = 10.0, widths: tuple[int, ...] = (1080,)) -> dict:
-    """Ответ Pexels на /videos/search с одним клипом и заданными нарезками.
-
-    Нарезка описывается ШИРИНОЙ: отбор идёт по ней, и подставлять сюда высоту
-    значило бы проверять не то, что решает код (см.
-    `test_video_rendition_is_the_smallest_that_covers_the_frame`).
-    """
-    return {
-        "videos": [
-            {
-                "duration": duration,
-                "video_files": [
-                    {
-                        "link": f"https://vid/{w}.mp4",
-                        "file_type": "video/mp4",
-                        "width": w,
-                        "height": int(w * 16 / 9),
-                    }
-                    for w in widths
-                ],
-            }
-        ]
-    }
 
 
 def client_for(handler) -> httpx.AsyncClient:
@@ -99,7 +66,7 @@ def raw(**kw) -> dict:
     ["success", "motivation and inspiration", "the future of the mind", "ideas", "   "],
 )
 def test_abstract_queries_are_dropped(query):
-    """Сток на «success» отдаёт рукопожатие в офисе — это шум, а не иллюстрация."""
+    """По «success» рисуется рукопожатие в офисе — это шум, а не иллюстрация."""
     assert is_abstract_query(query)
 
 
@@ -201,95 +168,18 @@ def test_asset_aspect_of_garbage_is_none(tmp_path):
     assert asset_aspect(path) is None
 
 
-# ------------------------------------------------------------------ выбор нарезки
-
-
-async def test_prefers_portrait_rendition():
-    """`large` у Pexels зажат по высоте 650 — для кадра 1080 это мыло."""
-    asked: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "api.pexels.com":
-            return httpx.Response(200, json=photo(
-                large="https://img/large.jpg",
-                large2x="https://img/large2x.jpg",
-                portrait="https://img/portrait.jpg",
-                original="https://img/original.jpg",
-            ))
-        asked.append(str(request.url))
-        return httpx.Response(200, content=b"\xff\xd8jpeg")
-
-    async with client_for(handler) as c:
-        data = await fetch_pexels(c, "cat", "key")
-
-    assert data == b"\xff\xd8jpeg"
-    assert asked == ["https://img/portrait.jpg"]
-
-
-async def test_falls_back_when_portrait_missing():
-    asked: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "api.pexels.com":
-            return httpx.Response(200, json=photo(large="https://img/large.jpg",
-                                                  large2x="https://img/large2x.jpg"))
-        asked.append(str(request.url))
-        return httpx.Response(200, content=b"jpeg")
-
-    async with client_for(handler) as c:
-        await fetch_pexels(c, "cat", "key")
-
-    assert asked == ["https://img/large2x.jpg"]
-
-
-async def test_no_renditions_at_all_is_not_a_crash():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"photos": [{"src": {}}]})
-
-    async with client_for(handler) as c:
-        assert await fetch_pexels(c, "cat", "key") is None
-
-
-async def test_search_asks_for_portrait_photos():
-    seen: dict = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.update(dict(request.url.params))
-        assert request.headers["Authorization"] == "key"
-        return httpx.Response(200, json={"photos": []})
-
-    async with client_for(handler) as c:
-        assert await fetch_pexels(c, "vintage camera", "key") is None
-
-    assert seen["orientation"] == "portrait"
-    assert seen["query"] == "vintage camera"
-
-
-async def test_http_error_returns_none_not_raises():
-    """Картинка необязательна: ролик важнее вставки (§5 M7)."""
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"error": "нет"})
-
-    async with client_for(handler) as c:
-        assert await fetch_pexels(c, "cat", "плохой ключ") is None
-
-
 # ------------------------------------------------------------------ кеш
 
 
-def test_cache_key_depends_on_rendition():
-    """Сменили нарезку — старые файлы другого разрешения не должны подойти."""
-    import src.pipeline.broll as broll
+def test_cache_key_is_pinned_so_drawn_pictures_are_not_paid_for_again():
+    """Ключ кеша не сдвинулся, когда сток сняли.
 
-    before = cache_key("cat", None, "768*1024")
-    original = broll.PEXELS_RENDITION
-    try:
-        broll.PEXELS_RENDITION = "large"
-        after = cache_key("cat", None, "768*1024")
-    finally:
-        broll.PEXELS_RENDITION = original
-    assert before != after
-    assert PEXELS_RENDITION in ("portrait", "large2x", "original", "large")
+    В ключ всегда входила соль (бывшая нарезка стока), в том числе у
+    нарисованных картинок. Убрать её — значит сменить ключи всего кеша и
+    заново заплатить за каждую картинку, которая уже лежит на диске.
+    """
+    # Значение снято с кода ДО снятия стока (git show HEAD:src/pipeline/broll.py).
+    assert cache_key("cat", None, "768*1024") == "9ea532bbca6407388bf58507"
 
 
 def test_cache_key_is_stable_and_case_insensitive():
@@ -297,160 +187,58 @@ def test_cache_key_is_stable_and_case_insensitive():
     assert cache_key("a", None, "s") != cache_key("b", None, "s")
 
 
-async def test_second_request_comes_from_cache(tmp_path):
-    """Один и тот же запрос не должен стоить дважды."""
-    calls = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(str(request.url))
-        if request.url.host == "api.pexels.com":
-            return httpx.Response(200, json=photo(portrait="https://img/p.jpg"))
-        return httpx.Response(200, content=b"x" * 4096)
-
-    item = Broll(word_idx=0, duration=1.5, query="cat", anim=BrollAnim.POP_IN, anchor="center")
-    # Видео выключено намеренно: тест про кеш ФОТО, а с включённым М4 каждый
-    # заход начинался бы с поиска клипа и счёт вызовов перестал бы что-то значить.
-    cfg = cfg_without_env(pexels_api_key="key", broll_video=False)
-
-    async with client_for(handler) as c:
-        first = await fetch_asset(c, item, tmp_path, cfg)
-        assert first is not None and first.path.exists()
-        second = await fetch_asset(c, item, tmp_path, cfg)
-
-    assert second == first
-    assert len(calls) == 2  # поиск + скачивание, и ни одного вызова на второй заход
-
-
-# ------------------------------------------------------------------ видео вместо фото (М4)
-
-
-def broll_item(duration: float = 1.5) -> Broll:
-    return Broll(
-        word_idx=0, duration=duration, query="cat", anim=BrollAnim.POP_IN, anchor="center"
-    )
-
-
-# Нарезки, которые Pexels реально отдаёт на вертикальный клип (снято с живого ключа).
-PEXELS_LADDER = [
-    {"link": f"u{w}", "file_type": "video/mp4", "width": w, "height": h}
-    for w, h in ((360, 640), (540, 960), (720, 1280), (1080, 1920), (1440, 2560), (2160, 3840))
-]
-
-
-def test_video_rendition_is_the_smallest_that_covers_the_frame():
-    """Отбор по ШИРИНЕ, а не по высоте — иначе в кадр едет двукратный апскейл.
-
-    Первая версия фильтровала «высота не ниже 720», и на ЖИВОМ стоке выбрала
-    540x960: высота в коридор попала, а ширина 540 в кадре 1080 — мыло. По
-    высоте вертикальные нарезки не различить без пропорции, поэтому здесь
-    настоящая лестница Pexels, а не выдуманные числа.
-    """
-    picked = pick_video_file(PEXELS_LADDER, frame_width=1080)
-    assert picked is not None and picked["width"] == 1080
-
-
-def test_oversized_rendition_is_not_taken():
-    """4K поверх основного видео декодируется на каждом кадре, а видно то же самое."""
-    huge = [f for f in PEXELS_LADDER if f["width"] > 1080 * VIDEO_MAX_OVERSIZE]
-    assert huge, "лестница должна содержать нарезку крупнее потолка"
-    assert pick_video_file(huge, frame_width=1080) is None
-
-
-def test_video_that_cannot_cover_the_frame_is_skipped():
-    """Растянутый вдвое клип хуже резкой фотографии, даже если он «монтажнее»."""
-    small = [f for f in PEXELS_LADDER if f["width"] < 1080]
-    assert pick_video_file(small, frame_width=1080) is None
-    gif = [{"link": "a", "file_type": "image/gif", "width": 1080}]
-    assert pick_video_file(gif, frame_width=1080) is None
-
-
-def test_clip_is_entered_from_the_middle():
-    """У стоковых клипов первые кадры самые статичные — оператор ещё не начал."""
-    assert video_start(10.0, 2.0) == pytest.approx(4.0)
-    assert video_start(2.0, 2.0) == 0.0  # запаса нет — играем с начала
-    assert video_start(1.0, 2.0) == 0.0  # клип короче вставки, но делить нечего
-
-
-async def test_video_wins_over_photo_and_carries_its_entry_point(tmp_path):
-    """М4: сначала видео. Точка входа считается здесь и едет в EDL, не в рендерер."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/videos/search":
-            return httpx.Response(200, json=video(duration=10.0))
-        if request.url.host == "api.pexels.com":
-            raise AssertionError("фото искать не должны: клип нашёлся")
-        return httpx.Response(200, content=b"x" * 4096)
-
-    cfg = cfg_without_env(pexels_api_key="key")
-    async with client_for(handler) as c:
-        asset = await fetch_asset(c, broll_item(1.5), tmp_path, cfg)
-
-    assert asset is not None
-    assert asset.kind == "video"
-    assert asset.path.suffix == ".mp4"
-    assert asset.start == pytest.approx(video_start(10.0, 1.5 + VIDEO_MARGIN_S), abs=0.01)
-
-
-async def test_short_clip_falls_back_to_photo_silently(tmp_path):
-    """Клип короче вставки показал бы чёрное на последних кадрах — берём фото."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/videos/search":
-            return httpx.Response(200, json=video(duration=1.0))
-        if request.url.path == "/v1/search":
-            return httpx.Response(200, json=photo(portrait="https://img/p.jpg"))
-        return httpx.Response(200, content=b"x" * 4096)
-
-    cfg = cfg_without_env(pexels_api_key="key")
-    async with client_for(handler) as c:
-        asset = await fetch_asset(c, broll_item(1.5), tmp_path, cfg)
-
-    assert asset is not None and asset.kind == "photo" and asset.start == 0.0
-
-
-async def test_video_comes_from_cache_with_its_entry_point(tmp_path):
-    """Вход в клип лежит в имени файла: кеш не может разъехаться со своим содержимым."""
-    calls: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(str(request.url))
-        if request.url.path == "/videos/search":
-            return httpx.Response(200, json=video(duration=10.0))
-        return httpx.Response(200, content=b"x" * 4096)
-
-    cfg = cfg_without_env(pexels_api_key="key")
-    async with client_for(handler) as c:
-        first = await fetch_asset(c, broll_item(1.5), tmp_path, cfg)
-        second = await fetch_asset(c, broll_item(1.5), tmp_path, cfg)
-
-    assert first is not None and second is not None
-    assert (second.path, second.start) == (first.path, first.start)
-    assert len(calls) == 2  # поиск + скачивание, второй заход в сеть не ходил
-
-
-async def test_video_can_be_switched_off(tmp_path):
-    """Ручка возвращает поведение до М4: только фото, без единого запроса к клипам."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/videos/search":
-            raise AssertionError("видео искать не должны: broll_video выключен")
-        if request.url.path == "/v1/search":
-            return httpx.Response(200, json=photo(portrait="https://img/p.jpg"))
-        return httpx.Response(200, content=b"x" * 4096)
-
-    cfg = cfg_without_env(pexels_api_key="key", broll_video=False)
-    async with client_for(handler) as c:
-        asset = await fetch_asset(c, broll_item(), tmp_path, cfg)
-
-    assert asset is not None and asset.kind == "photo"
-
-
-async def test_no_pexels_key_and_no_wavespeed_gives_none(tmp_path):
+async def test_without_a_generator_there_is_no_network_at_all(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover — не должен вызваться
         raise AssertionError(f"сети быть не должно: {request.url}")
 
     item = Broll(word_idx=0, duration=1.5, query="cat", anim=BrollAnim.POP_IN, anchor="center")
-    cfg = cfg_without_env(pexels_api_key="", wavespeed_api_key="")
+    cfg = cfg_without_env(
+        image_provider="wavespeed", wavespeed_api_key="", fal_api_key="", gemini_api_key=""
+    )
 
     async with client_for(handler) as c:
         assert await fetch_asset(c, item, tmp_path, cfg) is None
+
+
+async def test_without_a_generator_the_plan_is_not_even_asked(tmp_path):
+    """Рисовать нечем — значит, и vision-вызов плана вставок не нужен: он стоит денег."""
+
+    class NoCalls:
+        ready = True
+
+        async def complete(self, *a, **kw):  # pragma: no cover — не должен вызваться
+            raise AssertionError("план вставок спрашивать не должны")
+
+    edl = edl_for_broll()
+    edl.broll = [Broll(word_idx=0, duration=1.5, query="cat", anim=BrollAnim.POP_IN, anchor="fullscreen")]
+    cfg = cfg_without_env(
+        image_provider="wavespeed", wavespeed_api_key="", fal_api_key="", gemini_api_key=""
+    )
+    got = await plan_and_fetch(edl, tmp_path / "нет.mp4", tmp_path, llm=NoCalls(), cfg=cfg)
+    assert got == 0 and edl.broll == []
+
+
+# ------------------------------------------------------------------ листы времён стока
+
+
+def _legacy_edl(*broll: dict) -> dict:
+    data = edl_for_broll().model_dump(mode="json")
+    data["broll"] = list(broll)
+    return data
+
+
+def test_legacy_photo_insert_still_loads():
+    """Лист, сохранённый со стоком, читается: лишние поля картинки срезаются."""
+    item = {**raw(), "anchor": "fullscreen", "duration": 1.5, "asset": "a.jpg",
+            "kind": "photo", "asset_start": 0.0}
+    edl = EDL.model_validate(_legacy_edl(item))
+    assert [b.asset for b in edl.broll] == ["a.jpg"]
+
+
+def test_legacy_stock_clip_is_dropped_not_crashing_the_rerender():
+    """Клип со стока рендерер больше не играет: вставка выпадает, лист живёт."""
+    clip = {**raw(), "anchor": "fullscreen", "duration": 1.5, "asset": "c@3.15.mp4",
+            "kind": "video", "asset_start": 3.15}
+    pic = {**raw(word_idx=6), "anchor": "fullscreen", "duration": 1.5, "asset": "p.jpg"}
+    edl = EDL.model_validate(_legacy_edl(clip, pic))
+    assert [b.asset for b in edl.broll] == ["p.jpg"]

@@ -49,7 +49,6 @@ def gen_cfg(**over) -> Settings:
     base = {
         "gemini_api_key": "g",
         "image_provider": "gemini",
-        "broll_source": "generate",
         "broll_verify": False,
     }
     base.update(over)
@@ -57,13 +56,10 @@ def gen_cfg(**over) -> Settings:
 
 
 def ws_cfg(**over) -> Settings:
-    """Боевой конфиг: рисует WaveSpeed, стока нет вовсе."""
+    """Боевой конфиг: рисует WaveSpeed."""
     base = {
         "wavespeed_api_key": "w",
         "image_provider": "wavespeed",
-        "broll_source": "generate",
-        "pexels_api_key": "",
-        "broll_video": False,
         "broll_verify": False,
     }
     base.update(over)
@@ -174,7 +170,7 @@ async def test_failure_is_none_and_never_raises():
 
 
 async def test_no_key_means_no_generation():
-    cfg = cfg_without_env(gemini_api_key="", broll_source="generate")
+    cfg = cfg_without_env(gemini_api_key="")
     assert imagegen.ready(cfg) is False
     async with client_for(lambda r: httpx.Response(200, json={})) as c:
         assert await imagegen.generate_gemini(c, "x", cfg=cfg) is None
@@ -308,63 +304,19 @@ def test_cache_key_separates_models_and_styles():
     base = cache_key("cat", None, "1K", model="m1", style="warm")
     assert base != cache_key("cat", None, "1K", model="m2", style="warm")
     assert base != cache_key("cat", None, "1K", model="m1", style="cold")
-    # Ключи стока не съехали: там оба поля пустые.
-    assert cache_key("cat", None, "768*1024") == cache_key("cat", None, "768*1024")
 
 
-# ------------------------------------------------------------------ порядок источников
+# ------------------------------------------------------------------ генерация и кеш
 
 
-async def test_generation_comes_first_and_stock_is_not_touched(tmp_path):
+async def test_the_insert_is_drawn(tmp_path):
     handler, seen = gemini_ok()
-    cfg = gen_cfg(pexels_api_key="p")
     async with client_for(handler) as c:
-        asset = await fetch_asset(c, item_of(), tmp_path, cfg)
+        asset = await fetch_asset(c, item_of(), tmp_path, gen_cfg())
 
-    assert asset is not None and asset.kind == "photo"
+    assert asset is not None
     assert asset.path.read_bytes() == PNG
-    assert all("pexels" not in call["url"] for call in seen)
-
-
-async def test_stock_catches_a_failed_generation(tmp_path):
-    def handler(request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        if "generativelanguage" in url:
-            return httpx.Response(503, text="high demand")
-        if "videos/search" in url:
-            return httpx.Response(200, json={"videos": []})
-        if "pexels" in url:
-            return httpx.Response(200, json={"photos": [{"src": {"portrait": "https://img/p.jpg"}}]})
-        return httpx.Response(200, content=b"stock-bytes" * 200)
-
-    cfg = gen_cfg(pexels_api_key="p")
-    async with client_for(handler) as c:
-        asset = await fetch_asset(c, item_of(), tmp_path, cfg)
-
-    assert asset is not None
-    assert asset.path.read_bytes().startswith(b"stock-bytes")
-
-
-async def test_stock_mode_keeps_the_old_order(tmp_path):
-    """BROLL_SOURCE=stock обязан вернуть поведение до генерации целиком."""
-    seen: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(str(request.url))
-        url = str(request.url)
-        if "videos/search" in url:
-            return httpx.Response(200, json={"videos": []})
-        if "pexels" in url:
-            return httpx.Response(200, json={"photos": [{"src": {"portrait": "https://img/p.jpg"}}]})
-        return httpx.Response(200, content=b"stock-bytes" * 200)
-
-    cfg = gen_cfg(broll_source="stock", pexels_api_key="p")
-    async with client_for(handler) as c:
-        asset = await fetch_asset(c, item_of(), tmp_path, cfg)
-
-    assert asset is not None
-    assert "videos/search" in seen[0]
-    assert all("generativelanguage" not in url for url in seen)
+    assert len(seen) == 1
 
 
 async def test_generated_image_is_cached_and_not_paid_for_twice(tmp_path):
@@ -402,30 +354,24 @@ async def test_a_picture_with_letters_is_redrawn(tmp_path):
     assert "remove all labels" in seen[1]["body"]["input"][0]["text"]
 
 
-async def test_twice_rejected_goes_to_stock_instead_of_looping(tmp_path):
+async def test_twice_rejected_cancels_the_insert_instead_of_looping(tmp_path):
+    """Вторая неудачная приёмка — вставки не будет, третьей попытки тоже."""
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        calls.append(url)
-        if "generativelanguage" in url:
-            return httpx.Response(
-                200, json={"output_image": {"data": base64.standard_b64encode(PNG).decode()}}
-            )
-        if "videos/search" in url:
-            return httpx.Response(200, json={"videos": []})
-        if "pexels" in url:
-            return httpx.Response(200, json={"photos": [{"src": {"portrait": "https://img/p.jpg"}}]})
-        return httpx.Response(200, content=b"stock-bytes" * 200)
+        calls.append(str(request.url))
+        return httpx.Response(
+            200, json={"output_image": {"data": base64.standard_b64encode(PNG).decode()}}
+        )
 
     bad = {"shows_subject": False, "has_text": False, "fix": "show the camera"}
-    cfg = gen_cfg(broll_verify=True, pexels_api_key="p")
+    cfg = gen_cfg(broll_verify=True)
     async with client_for(handler) as c:
         asset = await fetch_asset(c, item_of(), tmp_path, cfg, llm=llm_saying(bad, bad))
 
-    assert asset is not None
-    assert asset.path.read_bytes().startswith(b"stock-bytes")
-    assert sum(1 for u in calls if "generativelanguage" in u) == 2
+    assert asset is None
+    assert len(calls) == 2
+    assert not list(tmp_path.glob("*.jpg")), "отвергнутая картинка не должна лечь в кеш"
 
 
 async def test_a_broken_check_never_cancels_a_good_picture(tmp_path):
@@ -440,22 +386,19 @@ async def test_a_broken_check_never_cancels_a_good_picture(tmp_path):
 
 
 # ------------------------------------------------------------------ боевая настройка
-#
-# Рисует WaveSpeed, сток выключен пустым ключом. Код Pexels при этом остался на
-# месте — именно поэтому проверяется, что он МОЛЧИТ, а не что его нет.
 
 
-async def test_wavespeed_draws_and_pexels_is_never_called(tmp_path):
+async def test_wavespeed_draws_the_insert(tmp_path):
     handler, seen = wavespeed_ok()
     async with client_for(handler) as c:
         asset = await fetch_asset(c, item_of(), tmp_path, ws_cfg())
 
-    assert asset is not None and asset.kind == "photo"
+    assert asset is not None
     assert asset.path.read_bytes() == PNG
-    assert all("pexels" not in call["url"] for call in seen)
+    assert "wavespeed" in seen[0]["url"]
 
 
-async def test_without_stock_a_failed_drawing_cancels_the_insert(tmp_path):
+async def test_a_failed_drawing_cancels_the_insert(tmp_path):
     """Запасного пути больше нет: не нарисовалось — вставки не будет.
 
     Ронять на этом ролик нельзя (§3): вставка необязательна, и `None` здесь —
@@ -470,35 +413,7 @@ async def test_without_stock_a_failed_drawing_cancels_the_insert(tmp_path):
     async with client_for(handler) as c:
         assert await fetch_asset(c, item_of(), tmp_path, ws_cfg()) is None
 
-    assert all("pexels" not in url for url in calls)
-
-
-async def test_video_search_is_not_reached_even_with_a_stock_key(tmp_path):
-    """BROLL_VIDEO=0 — вставка всегда картинка, даже если сток вернули.
-
-    Клип отдаёт только сток, генерация рисует неподвижное. Ручка выключена
-    намеренно, и ключ Pexels, вписанный обратно, не должен её молча включить.
-    """
-    seen: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(str(request.url))
-        url = str(request.url)
-        if url.endswith("/z-image/turbo"):
-            return httpx.Response(500, text="boom")
-        if "pexels" in url:
-            return httpx.Response(200, json={"photos": [{"src": {"portrait": "https://img/p.jpg"}}]})
-        return httpx.Response(200, content=b"stock-bytes" * 200)
-
-    cfg = ws_cfg(pexels_api_key="p", broll_video=False)
-    async with client_for(handler) as c:
-        asset = await fetch_asset(c, item_of(), tmp_path, cfg)
-
-    assert asset is not None and asset.kind == "photo"
-    assert all("videos/search" not in url for url in seen)
-
-
-# ------------------------------------------------------------------ очередь или разом
+    assert calls, "генератор обязан был получить запрос"
 
 
 def test_only_gemini_reads_references():

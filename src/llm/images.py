@@ -69,7 +69,7 @@ def size_tag(cfg: Settings) -> str:
 
 
 def ready(cfg: Settings | None = None) -> bool:
-    """Есть ли чем генерировать. Нет ключа — молча работаем как раньше, стоком."""
+    """Есть ли чем генерировать. Нет ключа выбранного провайдера — вставок не будет."""
     cfg = cfg or default_settings
     return bool(image_key(cfg) and image_model(cfg))
 

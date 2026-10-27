@@ -20,7 +20,7 @@ from src.core.edl import (
     Word,
 )
 from src.core.geometry import (
-    STOCK_ASPECT,
+    FALLBACK_ASPECT,
     Rect,
     caption_text_width,
     line_gap,
@@ -388,7 +388,7 @@ def test_broll_carries_the_rect_of_its_anchor():
     assert rect is not None and rect.width < plan.width
     margin = plan.width * preset.geometry.broll_margin_ratio
     assert plan.width - rect.right == pytest.approx(margin)
-    assert rect.width / rect.height == pytest.approx(STOCK_ASPECT)
+    assert rect.width / rect.height == pytest.approx(FALLBACK_ASPECT)
 
 
 def test_fullscreen_to_inset_rect_is_the_corner_it_ends_in():

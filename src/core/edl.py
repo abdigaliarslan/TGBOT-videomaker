@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import math
 from enum import Enum
-from typing import Iterable, Literal
+from typing import Any, Iterable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Потолок b-roll: не чаще одной картинки на BROLL_WINDOW секунд и не больше
 # BROLL_MAX на ролик. Одна картинка на 8 с — это мельтешение: на 20-секундном
@@ -145,24 +145,18 @@ class Broll(BaseModel):
 
     word_idx: int  # к какому слову привязана
     duration: float = Field(ge=0.8, le=3.0)
-    query: str  # англ. поисковый запрос
-    prompt: str | None = None  # для генерации, если стока нет
+    query: str  # короткое имя предмета по-английски: ключ кеша и проверки картинки
+    prompt: str | None = None  # что рисовать; пусто — рисуется `query`
     anim: BrollAnim
     anchor: Literal[
         "top_left", "top_right", "bottom_left", "bottom_right", "center", "fullscreen"
     ]
-    # Всё ниже заполняет Python после поиска/генерации, не LLM.
+    # Всё ниже заполняет Python после генерации, не LLM.
     asset: str | None = None
-    # Чем оказалась вставка. Решает не режиссёр, а добыча: видео на стоке есть не
-    # на всякий запрос, и молчаливый откат на фото — часть контракта (М4).
-    kind: Literal["photo", "video"] = "photo"
     # Пропорция ФАЙЛА (ширина/высота). Карточка наследует её, иначе `cover`
-    # срезает у стоковой картинки треть высоты (AUDIT §8.3). Меряется файл, а не
-    # источник: сток отдаёт 2:3, генерация — то, что заказано в `wavespeed_size`.
+    # срезает картинку (AUDIT §8.3). Меряется файл, а не заказ: провайдер отдаёт
+    # вертикаль на пиксель мимо заказанной.
     asset_aspect: float | None = Field(default=None, gt=0.0)
-    # С какой секунды играть клип. Сток отдаёт кусок длиннее вставки, и начало у
-    # него обычно самое скучное — заходим ближе к середине (М4).
-    asset_start: float = Field(default=0.0, ge=0.0)
     # Направление медленного наезда (Ken Burns), М3. Неподвижная картинка поверх
     # видео читается как наклейка, поэтому вставке дают еле заметное движение.
     # Знак берётся из ПОЗИЦИИ вставки в списке, а не из `random`: рендерер обязан
@@ -203,6 +197,28 @@ class EDL(BaseModel):
     sfx: list[Sfx] = []
     music: Music | None = None
     preset: str = "glass"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_stock_leftovers(cls, data: Any) -> Any:
+        """Листы, сохранённые до снятия стока, обязаны читаться и сейчас.
+
+        У вставок тех времён были поля `kind` и `asset_start`, а вставка с
+        `kind: "video"` была клипом Pexels. Клипы рендерер больше не играет,
+        поэтому такая вставка выпадает из листа целиком; у картинок лишние поля
+        просто срезаются. Без этого `extra="forbid"` ронял бы перерендер любого
+        старого ролика с вставкой.
+        """
+        if not isinstance(data, dict) or not isinstance(data.get("broll"), list):
+            return data
+        broll = []
+        for item in data["broll"]:
+            if isinstance(item, dict):
+                if item.get("kind") == "video":
+                    continue
+                item = {k: v for k, v in item.items() if k not in ("kind", "asset_start")}
+            broll.append(item)
+        return {**data, "broll": broll}
 
     # ---------------------------------------------------------------- удобные срезы
     @property

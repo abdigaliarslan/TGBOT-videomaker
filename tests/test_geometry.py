@@ -19,7 +19,7 @@ from src.core.geometry import (
     CAPTION_POSITIONS,
     FALLBACK_ADVANCE_EM,
     MIN_BAND_RATIO,
-    STOCK_ASPECT,
+    FALLBACK_ASPECT,
     Rect,
     SizedWord,
     _emoji_cluster,
@@ -585,7 +585,7 @@ def test_broll_inherits_source_aspect_by_default():
     """Квадратная карточка резала стоковые 2:3 на треть — теперь пропорция наследуется."""
     preset = roomy_preset()
     rect = broll_rect("top_right", preset, FRAME)
-    assert rect.width / rect.height == pytest.approx(STOCK_ASPECT)
+    assert rect.width / rect.height == pytest.approx(FALLBACK_ASPECT)
 
 
 def test_broll_aspect_changes_shape_not_area_rule():
@@ -690,7 +690,7 @@ def test_broll_shrinks_when_the_free_band_is_short():
     band_h = broll_free_band(preset, FRAME)[1] - broll_free_band(preset, FRAME)[0]
     rect = broll_rect("top_right", preset, FRAME)
     assert rect.height == pytest.approx(band_h)
-    assert rect.width == pytest.approx(band_h * STOCK_ASPECT)
+    assert rect.width == pytest.approx(band_h * FALLBACK_ASPECT)
 
 
 def test_caption_zone_reserves_the_worst_case_block():

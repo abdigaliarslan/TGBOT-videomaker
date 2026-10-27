@@ -72,7 +72,7 @@
     "shout_rotate": -3.0,
     "word_in_ms": 150,
     "word_rise_px": 16,
-    "leak_ms": 600,
+    "leak_ms": 0,
     "leak_hue": 0.0
   },
   "background": "#000000",
