@@ -368,6 +368,10 @@ async def on_rerender(callback: CallbackQuery, bot: Bot) -> None:
     if job is not None and job.user_id != owner and owner not in settings.admin_ids:
         await callback.answer(t("api.blocked", lang), show_alert=True)
         return
+    clicker = await repo.get_user(owner) if owner is not None else None
+    if clicker is not None and clicker.is_blocked:
+        await callback.answer(t("api.blocked", lang), show_alert=True)
+        return
     if preset not in available():
         await callback.answer(t("rerender.no_edl", lang), show_alert=True)
         return

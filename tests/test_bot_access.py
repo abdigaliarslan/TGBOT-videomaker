@@ -40,7 +40,11 @@ def owned_job(monkeypatch):
     async def lang_for_job(job_id):
         return "ru"
 
+    async def get_user(user_id):
+        return SimpleNamespace(is_blocked=user_id == 9)
+
     monkeypatch.setattr(video.repo, "get_job", get_job)
+    monkeypatch.setattr(video.repo, "get_user", get_user)
     monkeypatch.setattr(video, "_lang_for_job", lang_for_job)
     monkeypatch.setattr(video.settings, "admin_ids", [])
     return job
@@ -48,6 +52,13 @@ def owned_job(monkeypatch):
 
 async def test_foreign_job_is_not_rerendered(owned_job):
     cb = FakeCallback("rr:job-1:glass", user_id=2)
+    await video.on_rerender(cb, Boom())
+    assert cb.answers and cb.answers[0][1] is True
+
+
+async def test_blocked_owner_cannot_rerender(owned_job):
+    owned_job.user_id = 9
+    cb = FakeCallback("rr:job-1:glass", user_id=9)
     await video.on_rerender(cb, Boom())
     assert cb.answers and cb.answers[0][1] is True
 
