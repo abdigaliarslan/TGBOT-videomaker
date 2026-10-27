@@ -15,6 +15,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from src.bot.keyboards import app_keyboard, result_keyboard
 from src.core.config import settings
 from src.core.i18n import error_text, lang_of, stage_title, t
+from src.core.preset import available
 from src.db import repo
 from src.storage.s3 import SOURCES, storage
 from src.worker.tasks import QUEUE_CPU, get_queue, progress_key
@@ -78,6 +79,11 @@ async def on_video(message: Message, bot: Bot) -> None:
         is_admin=user.id in settings.admin_ids,
     )
     lang = lang_of(db_user)
+    # Блокировка проверялась только в Mini App, а прямо боту заблокированный
+    # пользователь по-прежнему слал видео и тратил воркер.
+    if db_user.is_blocked:
+        await message.answer(t("api.blocked", lang))
+        return
 
     mime = getattr(media, "mime_type", None)
     if message.document is not None and mime and not mime.startswith("video/"):
@@ -355,6 +361,16 @@ async def on_rerender(callback: CallbackQuery, bot: Bot) -> None:
     _, job_id, preset = callback.data.split(":", 2)
     lang = await _lang_for_job(job_id)
     job = await repo.get_job(job_id)
+    # Кнопка несёт job_id открытым текстом, а `callback_data` клиент может
+    # подделать: без проверки владельца чужой ролик перерендерился бы и ушёл в
+    # чат того, кто нажал.
+    owner = callback.from_user.id if callback.from_user else None
+    if job is not None and job.user_id != owner and owner not in settings.admin_ids:
+        await callback.answer(t("api.blocked", lang), show_alert=True)
+        return
+    if preset not in available():
+        await callback.answer(t("rerender.no_edl", lang), show_alert=True)
+        return
     if job is None or not job.edl:
         await callback.answer(t("rerender.no_edl", lang), show_alert=True)
         return
