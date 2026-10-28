@@ -68,30 +68,43 @@ NO_TEXT_SUFFIX = (
     "no watermark, no logo, no brand name, no user interface, no typography"
 )
 
+# Запрет людей и то, что его снимает: если человек — сам предмет вставки
+# («a barista pouring latte art»), запрещать его нельзя.
+NO_PEOPLE_SUFFIX = "no people, no person, no figures, empty of humans"
+PEOPLE_RE = re.compile(
+    r"\b(people|person|persons|man|men|woman|women|girl|boy|child|children|kid|kids|"
+    r"crowd|player|athlete|skater|barista|chef|worker|hand|hands|face|portrait|"
+    r"tourist|tourists|family|couple|friends?)\b",
+    re.IGNORECASE,
+)
+
 # Чем дописывается промпт, когда памятки нет: модель не вернула `style` или
 # её вовсе не спрашивали. Нейтрально и коротко — лучше, чем пустота, и
 # заведомо хуже, чем снятое с кадров ролика.
 FALLBACK_STYLE_HINT = "cinematic, restrained colours, soft directional light"
 
 # Композиция кадра. Едет отдельной строкой, а не внутри промпта модели: это
-# наша раскладка, а не её замысел (§0). Вертикаль и запас по краям — потому
-# что сверху и снизу лягут субтитры.
+# наша раскладка, а не её замысел (§0). Портрет 4:5 — пропорция карточки, запас
+# по краям — потому что углы у неё скруглены.
 COMPOSITION_HINT = (
-    "vertical 9:16 composition, single subject centred, "
-    "generous empty margin at the top and bottom of the frame"
+    "portrait 4:5 composition, single subject centred and fully in frame, "
+    "small even margin around it"
 )
 
 # --- подача картинки (Ф7) ---------------------------------------------------
 #
-# По умолчанию вставка полноэкранная. Карточка в углу поверх говорящей головы
-# читается как новостная плашка, а не как иллюстрация, поэтому угловой якорь
-# оставлен ровно одному сценарию — `fullscreen_to_inset`, где угол это конечная
-# точка перелёта, а не способ подачи.
+# По умолчанию вставка — крупная карточка по центру поверх размытого и
+# притемнённого кадра (`card`), как в эталоне `style-showcase.mp4`: говорящий
+# остаётся в кадре, и вставка читается как часть ролика, а не как подмена
+# кадра. Под карточкой лицо не страшно — оно размыто вместе со всем фоном.
+# Карточка в углу поверх НЕразмытой головы читается как новостная плашка,
+# поэтому угловой якорь оставлен ровно одному сценарию — `fullscreen_to_inset`,
+# где угол это конечная точка перелёта, а не способ подачи.
 INSET_ANIM = BrollAnim.FULLSCREEN_TO_INSET
 # Углы, и только они: `center` — это ровно то место, где лицо говорящего, а
 # свободной полосы между лицом и субтитром в кадре нет (`broll_free_band`).
 INSET_ANCHORS = {"top_left", "top_right", "bottom_left", "bottom_right"}
-DEFAULT_ANCHOR = "fullscreen"
+DEFAULT_ANCHOR = "card"
 DEFAULT_INSET_ANCHOR = "top_right"
 
 # Константы перелёта продублированы из render/src/layers/Broll.tsx (HOLD_MS,
@@ -229,7 +242,14 @@ def build_image_prompt(subject: str, style: ReelStyle | None, *, fix: str = "") 
     # продолжение описания сцены и пытается мирить несовместимое — «горный
     # хребет на закате» плюс «уютный вечерний интерьер» из памятки. Пометка
     # переводит её в разряд обработки, а место остаётся за промптом вставки.
-    parts += [f"Colour and light: {hint}", COMPOSITION_HINT, NO_TEXT_SUFFIX]
+    parts += [f"Colour and light: {hint}", COMPOSITION_HINT]
+    # Людей в кадре не бывает, если о них не просили. Памятка снята с кадров
+    # говорящего, и модель охотно рисует по ней его самого: на тестовом ролике
+    # «white t-shirt, beige skin tones» превратились в незнакомца в белой
+    # футболке посреди катка Медеу.
+    if not PEOPLE_RE.search(subject):
+        parts.append(NO_PEOPLE_SUFFIX)
+    parts.append(NO_TEXT_SUFFIX)
     return ". ".join(p for p in parts if p)
 
 

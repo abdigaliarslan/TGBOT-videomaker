@@ -159,6 +159,9 @@ class Geometry(BaseModel):
     broll_margin_ratio: float = 0.05
     broll_top_ratio: float = 0.16
     broll_bottom_ratio: float = 0.58
+    # Карточка по центру поверх размытого кадра (`anchor="card"`): доля ширины.
+    # У эталона вставка занимает около 80 % ширины кадра.
+    broll_card_ratio: float = 0.8
 
 
 class Grade(BaseModel):

@@ -295,5 +295,21 @@ async def test_images_dropped_for_text_only_provider():
     assert p.calls[0]["images"] == []
 
 
+async def test_audio_reaches_a_provider_that_listens():
+    c, p = client([result_of({"fixes": []})])
+    p.supports_audio = True
+    await c.complete("clean_transcript", {"language": "ru", "words_table": "0 раз"},
+                     SCHEMAS["clean_transcript"], "cheap", audio=(b"mp3", "audio/mp3"))
+    assert p.calls[0]["audio"] == (b"mp3", "audio/mp3")
+
+
+async def test_audio_is_not_even_mentioned_to_a_provider_that_cannot_listen():
+    """Провайдеры без звука про аргумент `audio` не знают — передать его значит уронить вызов."""
+    c, p = client([result_of({"fixes": []})])
+    await c.complete("clean_transcript", {"language": "ru", "words_table": "0 раз"},
+                     SCHEMAS["clean_transcript"], "cheap", audio=(b"mp3", "audio/mp3"))
+    assert "audio" not in p.calls[0]
+
+
 async def _noop(*_args, **_kwargs):
     return None

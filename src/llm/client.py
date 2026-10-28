@@ -195,6 +195,7 @@ class LLMClient:
         model_tier: str,
         *,
         images: Iterable[bytes] | None = None,
+        audio: tuple[bytes, str] | None = None,
         correction: str | None = None,
         max_tokens: int = 16_000,
         effort: str | None = None,
@@ -203,6 +204,9 @@ class LLMClient:
 
         `correction` — текст ошибки для повторного вызова (§3): дописывается к
         пользовательской части, чтобы кеш системной уцелел.
+
+        `audio` — (байты, mime). Провайдер, который звук не слушает, получает
+        вызов без него: промпт обязан работать и так.
         """
         provider = self._ensure_provider()
         prompt = load_prompt(prompt_name)
@@ -224,6 +228,13 @@ class LLMClient:
         if image_list and not provider.supports_images:
             log.warning("провайдер %s не принимает картинки — вызов без них", provider.name)
             image_list = []
+        # Ключ передаётся только со звуком: провайдеры без него (и подмены в
+        # тестах) про этот аргумент не знают.
+        extra: dict[str, Any] = {}
+        if audio and provider.supports_audio:
+            extra["audio"] = audio
+        elif audio:
+            log.info("провайдер %s не слушает звук — вызов по одному тексту", provider.name)
 
         last: ProviderError | None = None
         for attempt in range(1, self.cfg.llm_max_retries + 2):
@@ -237,6 +248,7 @@ class LLMClient:
                     images=image_list,
                     max_tokens=max_tokens,
                     effort=effort,
+                    **extra,
                 )
             except ProviderError as e:
                 last = e

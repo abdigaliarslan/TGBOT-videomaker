@@ -581,6 +581,29 @@ def test_broll_center_is_centered_horizontally():
     assert rect.center_y == pytest.approx((band[0] + band[1]) / 2)
 
 
+def test_card_is_large_centred_and_clear_of_the_caption():
+    """Карточка поверх размытого кадра — 80 % ширины, середина свободной полосы.
+
+    На glass с подписью внизу 4:5 в 864 px не влезает в резерв худшего случая и
+    сжимается по высоте, сохраняя пропорцию, а не наезжает на текст.
+    """
+    preset = load_preset("glass")
+    # У glass субтитр пришпилен к низу: уступать надо только ему.
+    rect = broll_rect("card", preset, FRAME, aspect=4 / 5, positions=("bottom",))
+    band = broll_free_band(preset, FRAME, ("bottom",))
+    assert rect.center_x == pytest.approx(FRAME[0] / 2)
+    assert rect.width / rect.height == pytest.approx(4 / 5)
+    assert band[0] - 1e-6 <= rect.y and rect.bottom <= band[1] + 1e-6
+    center = broll_rect("center", preset, FRAME, aspect=4 / 5, positions=("bottom",))
+    assert rect.width > center.width
+
+
+def test_card_takes_its_ratio_when_there_is_room():
+    preset = roomy_preset()
+    rect = broll_rect("card", preset, FRAME, aspect=16 / 9)
+    assert rect.width == pytest.approx(FRAME[0] * preset.geometry.broll_card_ratio)
+
+
 def test_broll_inherits_source_aspect_by_default():
     """Квадратная карточка резала стоковые 2:3 на треть — теперь пропорция наследуется."""
     preset = roomy_preset()

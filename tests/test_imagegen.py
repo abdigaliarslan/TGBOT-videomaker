@@ -21,6 +21,7 @@ from src.pipeline import broll as broll_mod
 from src.pipeline.broll import (
     COMPOSITION_HINT,
     FALLBACK_STYLE_HINT,
+    NO_PEOPLE_SUFFIX,
     NO_TEXT_SUFFIX,
     ReelStyle,
     _ref_frame,
@@ -269,6 +270,24 @@ def test_prompt_puts_subject_first_and_the_text_ban_last():
     assert prompt.endswith(NO_TEXT_SUFFIX)
     assert "warm amber" in prompt and "cosy interior" in prompt
     assert COMPOSITION_HINT in prompt
+
+
+def test_nobody_appears_in_a_picture_that_did_not_ask_for_people():
+    """Памятка снята с говорящего, и без запрета модель рисует его посреди катка."""
+    style = ReelStyle(palette="white, beige", light="window light", mood="vlog")
+    assert NO_PEOPLE_SUFFIX in build_image_prompt("Medeo ice rink in the mountains", style)
+
+
+def test_a_person_who_is_the_subject_is_not_banned():
+    assert NO_PEOPLE_SUFFIX not in build_image_prompt("a barista pouring latte art", None)
+
+
+async def test_the_card_is_ordered_in_its_own_shape():
+    """Карточка 4:5: картинку 9:16 в ней пришлось бы ужать в узкую ленту."""
+    handler, seen = gemini_ok()
+    async with client_for(handler) as c:
+        await imagegen.generate(c, "a camera", cfg=gen_cfg())
+    assert seen[0]["body"]["response_format"]["aspect_ratio"] == "4:5"
 
 
 def test_prompt_without_style_still_says_something():

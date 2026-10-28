@@ -10,7 +10,7 @@ import pytest
 from src.core.config import Settings
 from src.core.edl import Word, validate_edl
 from src.llm.client import LLMClient
-from src.pipeline.director import direct
+from src.pipeline.director import clean_transcript, direct
 from tests.conftest import FakeProvider, result_of
 
 
@@ -208,3 +208,46 @@ async def test_words_table_is_sent_not_raw_text():
     sent = llm.fake.calls[0]["user"]
     assert "   0 сл0" in sent
     assert "   3 сл3" in sent
+
+
+# ------------------------------------------------------------------ правка распознавания
+
+
+def heard(*texts: str) -> list[Word]:
+    return [Word(idx=i, text=t, start=i * 0.4, end=i * 0.4 + 0.3) for i, t in enumerate(texts)]
+
+
+async def fix_with(ws: list[Word], fixes: list[dict], **kw):
+    provider = FakeProvider([result_of({"fixes": fixes})])
+    provider.supports_audio = True
+    llm = LLMClient(cfg=cfg(), provider=provider)
+    out, n = await clean_transcript(ws, llm=llm, language="ru", cfg=cfg(), **kw)
+    return out, n, provider
+
+
+async def test_the_corrector_hears_the_voice():
+    """«Родине» вместо «Зенит» по одному тексту не исправить — только услышав."""
+    _, _, provider = await fix_with(heard("фотоаппарат", "Родине"), [], audio=(b"mp3", "audio/mp3"))
+    assert provider.calls[0]["audio"] == (b"mp3", "audio/mp3")
+
+
+async def test_a_glued_brand_comes_back_as_one_word():
+    """Whisper слепил «Coffee Boom» в одно слово — в субтитре оно и остаётся одним,
+    но с неразрывным пробелом: индексы EDL не сдвигаются, строка не рвётся."""
+    out, n, _ = await fix_with(heard("в", "кофейню", "Coffee-bon"), [{"i": 2, "fix": "Coffee Boom"}])
+    assert n == 1 and out[2].text == "Coffee Boom"
+    assert [w.start for w in out] == [w.start for w in heard("в", "кофейню", "Coffee-bon")]
+
+
+async def test_a_fix_that_adds_ordinary_words_is_refused():
+    """«плёнку, 36» на месте «плёнку» — это вставка слова, а не правка."""
+    out, n, _ = await fix_with(heard("всю", "пленку"), [{"i": 1, "fix": "плёнку и кадры"}])
+    assert n == 0 and out[1].text == "пленку"
+
+
+async def test_a_fix_shifted_onto_the_neighbour_is_refused():
+    """Модель, потерявшая счёт, пишет в слово текст соседнего — субтитр съехал бы."""
+    out, n, _ = await fix_with(
+        heard("на", "всю", "пленку", "36"), [{"i": 1, "fix": "плёнку"}, {"i": 2, "fix": "36"}]
+    )
+    assert n == 0 and [w.text for w in out] == ["на", "всю", "пленку", "36"]

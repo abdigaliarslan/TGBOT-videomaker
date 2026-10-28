@@ -95,6 +95,8 @@ class Provider(ABC):
     supports_schema: bool = False
     #: умеет ли принимать картинки
     supports_images: bool = False
+    #: умеет ли слушать звук (`audio=(байты, mime)` в `complete`)
+    supports_audio: bool = False
 
     def __init__(self, api_key: str, base_url: str, timeout: float = 180.0) -> None:
         self.api_key = api_key
@@ -325,6 +327,7 @@ class GeminiProvider(Provider):
     name = "gemini"
     supports_schema = True
     supports_images = True
+    supports_audio = True
 
     def __init__(
         self, api_key: str, base_url: str, timeout: float = 180.0, *, thinking: bool = False
@@ -364,7 +367,7 @@ class GeminiProvider(Provider):
             raise ProviderError(f"{type(e).__name__}: {e}", retryable=True) from e
 
     async def complete(
-        self, *, model, system, user, schema, images=(), max_tokens=16_000, effort=None
+        self, *, model, system, user, schema, images=(), max_tokens=16_000, effort=None, audio=None
     ) -> ProviderResult:
         parts: list[dict[str, Any]] = [
             {
@@ -375,6 +378,16 @@ class GeminiProvider(Provider):
             }
             for img in images
         ]
+        if audio:
+            data, mime = audio
+            parts.append(
+                {
+                    "inlineData": {
+                        "mimeType": mime,
+                        "data": base64.standard_b64encode(data).decode("ascii"),
+                    }
+                }
+            )
         parts.append({"text": user})
 
         body = {

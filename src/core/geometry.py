@@ -1057,7 +1057,10 @@ def broll_rect(
         )
         return Rect(0.0, 0.0, float(width), float(height))
 
-    w = width * geometry.broll_inset_ratio
+    # Карточка поверх размытого кадра — та же середина свободной полосы, что и
+    # `center`, только крупная: лицо под ней размыто, уступать ему нечего.
+    ratio = geometry.broll_card_ratio if anchor == "card" else geometry.broll_inset_ratio
+    w = width * ratio
     h = w / aspect
     if h > band_h:
         # Не влезает в свободную полосу — уменьшаем карточку целиком, пропорция
@@ -1066,7 +1069,7 @@ def broll_rect(
         w = h * aspect
     margin = width * geometry.broll_margin_ratio
 
-    if anchor == "center":
+    if anchor in ("center", "card"):
         return Rect((width - w) / 2, band_top + (band_h - h) / 2, w, h)
 
     top = anchor.startswith("top")

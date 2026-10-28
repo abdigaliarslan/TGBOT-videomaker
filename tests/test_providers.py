@@ -174,6 +174,24 @@ async def test_gemini_request_shape():
     assert res.text == '{"fixes": []}'
 
 
+async def test_gemini_hears_the_voice_before_reading_the_task():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={
+            "candidates": [{"content": {"parts": [{"text": "{}"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {},
+        })
+
+    p = mock(GeminiProvider("k", "https://x"), handler)
+    await p.complete(model="m", system="s", user="u", schema=SCHEMA, audio=(b"ID3mp3", "audio/mp3"))
+    await p.aclose()
+    parts = seen["contents"][0]["parts"]
+    assert parts[0]["inlineData"]["mimeType"] == "audio/mp3"
+    assert parts[-1] == {"text": "u"}
+
+
 async def test_gemini_thinking_is_off_by_default():
     """Размышления считаются в maxOutputTokens и платятся как выход (§4)."""
     seen: dict = {}

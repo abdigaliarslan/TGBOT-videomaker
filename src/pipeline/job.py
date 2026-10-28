@@ -26,7 +26,7 @@ from src.pipeline.asr import ASRResult, transcribe
 from src.pipeline.audio_post import build_audio
 from src.pipeline.crop import autocrop, framing_spans
 from src.pipeline.cut import apply_cuts
-from src.pipeline.director import clean_transcript, direct, make_metadata
+from src.pipeline.director import clean_transcript, direct, make_metadata, voice_clip
 from src.pipeline.luma import measure_bg_luma
 from src.pipeline.probe import MediaInfo, is_playable, probe
 from src.pipeline.render import arender_remotion, render_ass
@@ -196,8 +196,11 @@ async def process_video(
         if llm is not None and llm.ready:
             await _notify(progress, "clean")
             t = time.perf_counter()
+            # Корректор слушает запись: по одному тексту «Родине» в «Зенит» не
+            # исправить. Звук нужен только ему, поэтому и извлекается здесь.
+            voice = voice_clip(src) if cfg.asr_fix_by_audio else None
             words, fixes = await clean_transcript(
-                asr.words, llm=llm, language=asr.language, cfg=cfg
+                asr.words, llm=llm, language=asr.language, cfg=cfg, audio=voice
             )
             mark("clean", t)
 

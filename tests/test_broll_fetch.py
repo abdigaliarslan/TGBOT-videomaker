@@ -83,10 +83,14 @@ def test_abstract_item_never_reaches_the_edl():
     assert kept == []
 
 
-def test_default_delivery_is_fullscreen():
-    """Карточка в углу поверх говорящей головы читается как новостная плашка."""
+def test_default_delivery_is_a_card_over_the_blurred_frame():
+    """Как в эталоне: карточка по центру, говорящий размыт за ней, а не подменён.
+
+    Карточка в углу поверх НЕразмытой головы читается как новостная плашка,
+    поэтому угол, который просит модель, сюда не доходит.
+    """
     kept = sanitize_items(edl_for_broll(), [raw(anchor="top_right")])
-    assert [i.anchor for i in kept] == ["fullscreen"]
+    assert [i.anchor for i in kept] == ["card"]
 
 
 def test_corner_survives_only_as_the_end_of_a_flight():

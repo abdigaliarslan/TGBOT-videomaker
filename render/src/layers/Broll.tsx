@@ -1,6 +1,7 @@
 /**
- * M7: вставные картинки. Полноэкранная вставка по умолчанию, инсет — только как
- * конечная точка перелёта `fullscreen_to_inset`.
+ * M7: вставные картинки. По умолчанию — карточка по центру поверх размытого
+ * кадра (`card`); полный кадр — когда карточке не нашлось места; инсет — только
+ * как конечная точка перелёта `fullscreen_to_inset`.
  *
  * Геометрию компонент не считает: прямоугольник покоя приходит в плане из
  * `src/core/geometry.py` (§0, Ф4). Раньше здесь жила своя таблица якорей с
@@ -89,6 +90,24 @@ const TRAVEL_MS = 520;
 const FULL_PUSH = 1.08;
 const INSET_POP = 0.72;
 
+/**
+ * Карточка по центру поверх размытого кадра (`anchor="card"`), как в эталоне
+ * `style-showcase.mp4`: говорящий не подменяется картинкой, а уходит в мягкий
+ * тёмный фон и продолжает двигаться за ней.
+ *
+ * Фон — `backdrop-filter` над самим видео, а не копия кадра: размывается то,
+ * что под слоем, и движение говорящего сохраняется. Глубину размытия задаёт
+ * доля высоты кадра, затемнение — яркость: светлую комнату без него карточка не
+ * перекрывает, а тонет в ней.
+ *
+ * Карточка поднимается с 0.9 до 1 и на 2 % высоты снизу той же тормозящей
+ * кривой, что и угловая: подлёт без перелёта, чтобы не подпрыгивала.
+ */
+const CARD_POP = 0.9;
+const CARD_RISE = 0.02;
+const BACKDROP_BLUR = 0.022;
+const BACKDROP_BRIGHTNESS = 0.55;
+
 const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
@@ -129,6 +148,9 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
   // единственная геометрия, которую можно взять, ничего не решая самому.
   const rest: Rect = item.rect ?? { x: 0, y: 0, width, height };
   const isFull = rest.width >= width - 1 && rest.height >= height - 1;
+  // Свободной полосы не нашлось — Python отдал полный кадр, и карточка
+  // становится обычной полноэкранной вставкой.
+  const isCard = item.anchor === "card" && !isFull;
   // Источник уже в пропорции кадра — значит `cover` ничего не срежет и
   // подложка под ним не нужна. Допуск в 1 % берёт и ровные 9:16, и то, что
   // модель отдаёт на пиксель мимо (1080×1920 против 1024×1820).
@@ -177,6 +199,9 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
     chrome = isFull ? 0 : k;
   } else if (isFull) {
     scale = push;
+  } else if (isCard) {
+    scale = interpolate(enter, [0, 1], [CARD_POP, 1]);
+    shiftY = interpolate(enter, [0, 1], [height * CARD_RISE, 0]);
   } else if (item.anim === "slide_up") {
     const slide = motionPx(preset.animation, "broll_slide_px", Math.round(height * 0.09));
     shiftY = interpolate(enter, [0, 1], [slide, 0]);
@@ -209,49 +234,94 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
   const kbRatio = animNum(preset.animation, "kb_shift_ratio", 0.012);
   const kbShift = (item.kb_dir ?? 1) * rest.height * kbRatio * p;
 
+  // Скругление карточки растёт с её размером: радиус пресета подобран под
+  // плашку субтитра, а на карточке в 80 % ширины он читается как прямой угол.
+  const radius = isCard ? Math.max(preset.panel.radius, rest.width * 0.05) : preset.panel.radius;
+
   return (
-    <div
-      style={{
-        position: "absolute",
-        left: rest.x,
-        top: rest.y,
-        width: rest.width,
-        height: rest.height,
-        opacity: appear * leave,
-        transform: `translate(${shiftX}px, ${shiftY}px) scale(${scale})`,
-        borderRadius: preset.panel.radius * chrome,
-        overflow: "hidden",
-        boxShadow: `0 ${height * 0.012}px ${height * 0.03}px rgba(0,0,0,${0.45 * chrome})`,
-        border: `${border}px solid rgba(255,255,255,${0.16 * chrome})`,
-        // Remotion инжектит `box-sizing` только в Player: без этого рамка
-        // прибавлялась к размеру и прямоугольник расходился с посчитанным.
-        boxSizing: "border-box",
-        willChange: "transform, opacity",
-      }}
-    >
+    <>
+      {isCard ? (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            opacity: appear * leave,
+            backdropFilter: `blur(${Math.round(height * BACKDROP_BLUR)}px) brightness(${BACKDROP_BRIGHTNESS})`,
+          }}
+        />
+      ) : null}
       <div
         style={{
           position: "absolute",
-          inset: 0,
-          transform: `translateY(${kbShift}px) scale(${kbScale})`,
-          // Ноль — фильтра нет вовсе: размытие стоит отрисовки, и платить за
-          // него после входа незачем.
-          filter: blur > 0.05 ? `blur(${blur.toFixed(2)}px)` : undefined,
-          willChange: "transform",
+          left: rest.x,
+          top: rest.y,
+          width: rest.width,
+          height: rest.height,
+          opacity: appear * leave,
+          transform: `translate(${shiftX}px, ${shiftY}px) scale(${scale})`,
+          borderRadius: radius * chrome,
+          overflow: "hidden",
+          boxShadow: `0 ${height * 0.012}px ${height * 0.03}px rgba(0,0,0,${0.45 * chrome})`,
+          border: `${border}px solid rgba(255,255,255,${0.16 * chrome})`,
+          // Remotion инжектит `box-sizing` только в Player: без этого рамка
+          // прибавлялась к размеру и прямоугольник расходился с посчитанным.
+          boxSizing: "border-box",
+          willChange: "transform, opacity",
         }}
       >
-        {isFull && !fitsFrame ? (
-          // Полный кадр КАРТИНКИ ЧУЖОЙ ПРОПОРЦИИ (старые листы — фотографии 2:3):
-          // `cover` здесь режет по-крупному, и это не устранить пропорцией
-          // карточки — максимум из (1080/800, 1920/1200) = 1.6 уводит за края по
-          // 100 px исходника с каждой стороны, 15.6 % ширины. Поэтому объект
-          // вписывается целиком, а поля закрывает размытая копия того же кадра.
-          //
-          // Картинку, нарисованную сразу под 9:16, этот приём только портит:
-          // резать нечего, а размытая рамка по краям превращает полноэкранную
-          // вставку обратно в «фотографию в рамке» — ровно то, от чего уходили.
-          // Отсюда `fitsFrame`.
-          <>
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            transform: `translateY(${kbShift}px) scale(${kbScale})`,
+            // Ноль — фильтра нет вовсе: размытие стоит отрисовки, и платить за
+            // него после входа незачем.
+            filter: blur > 0.05 ? `blur(${blur.toFixed(2)}px)` : undefined,
+            willChange: "transform",
+          }}
+        >
+          {isFull && !fitsFrame ? (
+            // Полный кадр КАРТИНКИ ЧУЖОЙ ПРОПОРЦИИ (старые листы — фотографии 2:3):
+            // `cover` здесь режет по-крупному, и это не устранить пропорцией
+            // карточки — максимум из (1080/800, 1920/1200) = 1.6 уводит за края по
+            // 100 px исходника с каждой стороны, 15.6 % ширины. Поэтому объект
+            // вписывается целиком, а поля закрывает размытая копия того же кадра.
+            //
+            // Картинку, нарисованную сразу под 9:16, этот приём только портит:
+            // резать нечего, а размытая рамка по краям превращает полноэкранную
+            // вставку обратно в «фотографию в рамке» — ровно то, от чего уходили.
+            // Отсюда `fitsFrame`.
+            <>
+              <Img
+                src={staticFile(item.asset)}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  filter: `blur(${Math.round(height * 0.025)}px) brightness(0.65)`,
+                  // Блюр размазывает края в прозрачность — подложку берём с запасом.
+                  transform: "scale(1.15)",
+                }}
+              />
+              <Img
+                src={staticFile(item.asset)}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                }}
+              />
+            </>
+          ) : (
+            // Карточка наследует пропорцию источника, поэтому в покое `cover` не
+            // режет ничего. Во время перелёта бокс масштабируется до полного кадра
+            // и края уходят за него — это цена движения, а не постоянный кроп.
+            // Если источник всё же другой пропорции, смотрим выше центра: объект
+            // в кадре обычно лежит в верхней трети.
             <Img
               src={staticFile(item.asset)}
               style={{
@@ -260,42 +330,13 @@ const Item: React.FC<{ item: PlanBroll; preset: Preset }> = ({ item, preset }) =
                 width: "100%",
                 height: "100%",
                 objectFit: "cover",
-                filter: `blur(${Math.round(height * 0.025)}px) brightness(0.65)`,
-                // Блюр размазывает края в прозрачность — подложку берём с запасом.
-                transform: "scale(1.15)",
+                objectPosition: "center 30%",
               }}
             />
-            <Img
-              src={staticFile(item.asset)}
-              style={{
-                position: "absolute",
-                inset: 0,
-                width: "100%",
-                height: "100%",
-                objectFit: "contain",
-              }}
-            />
-          </>
-        ) : (
-          // Карточка наследует пропорцию источника, поэтому в покое `cover` не
-          // режет ничего. Во время перелёта бокс масштабируется до полного кадра
-          // и края уходят за него — это цена движения, а не постоянный кроп.
-          // Если источник всё же другой пропорции, смотрим выше центра: объект
-          // в кадре обычно лежит в верхней трети.
-          <Img
-            src={staticFile(item.asset)}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-              objectPosition: "center 30%",
-            }}
-          />
-        )}
+          )}
+        </div>
       </div>
-    </div>
+    </>
   );
 };
 

@@ -16,7 +16,9 @@ import itertools
 import logging
 import math
 import re
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from src.core.config import Settings, settings as default_settings
@@ -33,6 +35,8 @@ from src.core.edl import (
     Word,
     validate_edl,
 )
+from src.core.proc import ProcError, ffmpeg
+from src.core.text import strip_punctuation
 from src.llm.client import LLMBadOutput, LLMBudgetExceeded, LLMClient, LLMUnavailable
 from src.llm.schemas import DIRECT_SCHEMA
 
@@ -626,17 +630,55 @@ def words_table(words: Sequence[Word], *, gap_threshold: float = 0.35) -> str:
     return "\n".join(lines)
 
 
+# Сколько слов может быть в одной правке. Больше одного — только название
+# («Coffee Boom» на месте «Coffee-bon»): ASR склеивает его в одно слово, и
+# разложить обратно по индексам нечем.
+MAX_FIX_WORDS = 3
+# Неразрывный пробел: название остаётся одним словом субтитра и не рвётся
+# между строками, а в метриках шрифта он той же ширины, что обычный.
+NBSP = " "
+
+
+def _norm(text: str) -> str:
+    # «ё» модель ставит, а Whisper нет: «плёнку» и «пленку» — одно слово.
+    return strip_punctuation(text).lower().replace("ё", "е")
+
+
+def voice_clip(src: Path) -> tuple[bytes, str] | None:
+    """Голос ролика для корректора: моно, 16 кГц, mp3 48 кбит/с.
+
+    Минута речи — около 360 КБ: в запрос это помещается целиком, а модели
+    разборчивой речи больше не нужно. Не вышло — правим по одному тексту.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "voice.mp3"
+        try:
+            ffmpeg(["-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", str(out)])
+            return out.read_bytes(), "audio/mp3"
+        except (ProcError, OSError) as e:
+            log.warning("голос для корректора не извлечён: %s", e)
+            return None
+
+
 async def clean_transcript(
     words: Sequence[Word],
     *,
     llm: LLMClient | None,
     language: str = "",
     cfg: Settings | None = None,
+    audio: tuple[bytes, str] | None = None,
 ) -> tuple[list[Word], int]:
     """Точечные правки распознавания по индексу (§4, тир `cheap`).
 
     Меняется ТОЛЬКО текст слова. Тайминги трогать нельзя: они из ASR, и это
     единственный источник правды о времени.
+
+    `audio` — запись голоса (`voice_clip`). По одному тексту корректор чинит
+    только то, о чём можно догадаться («реакт» → «React»); «Родине» на месте
+    «Зенит» или латиницу, которую Whisper записал кириллицей, исправить можно
+    лишь услышав. Замерено на тестовом ролике (42 с, Whisper small):
+    flash-lite со звуком исправил «Coffee-bon», «Родине», «будет» и
+    «проверяя» одинаково в трёх прогонах из трёх; без звука — ни одно из них.
     """
     cfg = cfg or default_settings
     out = [w.model_copy() for w in words]
@@ -651,6 +693,7 @@ async def clean_transcript(
             {"language": language or cfg.whisper_language or "auto", "words_table": words_table(words)},
             CLEAN_SCHEMA,
             "cheap",
+            audio=audio,
             max_tokens=8000,
         )
     except (LLMUnavailable, LLMBadOutput) as e:
@@ -663,11 +706,25 @@ async def clean_transcript(
         text = (fix.get("fix") or "").strip()
         if not isinstance(i, int) or not (0 <= i < len(out)) or not text:
             continue
-        # Замена одного слова одним словом: пробелы внутри правки сломали бы
-        # соответствие индексов, на котором стоит весь EDL.
-        if " " in text:
+        # Правка заменяет одно слово, а не вставляет новые: лишнее слово
+        # сдвинуло бы субтитр относительно звука. Несколько слов разрешены только
+        # названию, и они склеиваются неразрывным пробелом — для EDL это одно
+        # слово с одним таймингом.
+        parts = text.split()
+        if len(parts) > MAX_FIX_WORDS:
             continue
+        if len(parts) > 1:
+            if not all(p[:1].isupper() or p[:1].isdigit() for p in parts):
+                continue
+            text = NBSP.join(parts)
         if text == out[i].text:
+            continue
+        # Модель, которая потеряла счёт, «правит» слово на соседнее: так
+        # выглядит съехавший на одно место текст. Такую правку не берём.
+        if any(
+            0 <= j < len(out) and _norm(out[j].text) == _norm(text) != _norm(out[i].text)
+            for j in (i - 1, i + 1)
+        ):
             continue
         log.debug("правка %d: %r → %r", i, out[i].text, text)
         out[i] = out[i].model_copy(update={"text": text})

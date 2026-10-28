@@ -149,7 +149,7 @@ class Broll(BaseModel):
     prompt: str | None = None  # что рисовать; пусто — рисуется `query`
     anim: BrollAnim
     anchor: Literal[
-        "top_left", "top_right", "bottom_left", "bottom_right", "center", "fullscreen"
+        "top_left", "top_right", "bottom_left", "bottom_right", "center", "fullscreen", "card"
     ]
     # Всё ниже заполняет Python после генерации, не LLM.
     asset: str | None = None

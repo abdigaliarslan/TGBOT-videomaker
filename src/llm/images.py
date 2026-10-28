@@ -63,7 +63,8 @@ def image_key(cfg: Settings) -> str:
 def size_tag(cfg: Settings) -> str:
     """Размер, под которым картинка лежит в кеше: сменили его — кеш не подходит."""
     return {
-        "gemini": cfg.image_size,
+        # У Gemini размер — это разрешение, а пропорция задаётся отдельно.
+        "gemini": f"{cfg.image_size}@{cfg.image_aspect}",
         "fal": cfg.fal_size,
     }.get(cfg.image_provider, cfg.wavespeed_size)
 
@@ -262,11 +263,12 @@ async def generate(
     prompt: str,
     *,
     refs: Sequence[bytes] = (),
-    aspect: str = "9:16",
+    aspect: str | None = None,
     cfg: Settings | None = None,
 ) -> bytes | None:
     """Единый вход. Провайдер берётся из конфига; референсы понимает не каждый."""
     cfg = cfg or default_settings
+    aspect = aspect or cfg.image_aspect
     if cfg.image_provider in ("wavespeed", "fal"):
         if refs:
             log.debug("%s не принимает референсы — генерирую по одному промпту", cfg.image_provider)

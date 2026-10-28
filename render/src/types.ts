@@ -12,7 +12,8 @@ export type Anchor =
   | "bottom_left"
   | "bottom_right"
   | "center"
-  | "fullscreen";
+  | "fullscreen"
+  | "card";
 
 /**
  * Прямоугольник в пикселях кадра, левый верхний угол — начало координат.
@@ -85,7 +86,6 @@ export type PlanBroll = {
    */
   aspect?: number | null;
 };
-
 
 export type Preset = {
   name: string;
@@ -186,6 +186,8 @@ export type Preset = {
     broll_margin_ratio: number;
     broll_top_ratio: number;
     broll_bottom_ratio: number;
+    /** Рендереру не нужен: прямоугольник карточки приходит в плане готовым. */
+    broll_card_ratio?: number;
   };
   /**
    * Секции, которые исполняет не Remotion, а ffmpeg и Python: цветокор, кроп,
