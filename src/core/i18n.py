@@ -179,6 +179,10 @@ TEXTS: dict[str, dict[str, str]] = {
     },
     "video.accepted": {"ru": "Принял. Ставлю в очередь…", "en": "Got it. Adding to the queue…"},
     "video.accepted_app": {"ru": "Принял видео из приложения. Ставлю в очередь…", "en": "Got your video from the app. Adding to the queue…"},
+    "video.too_big": {
+        "ru": "Файл больше {mb} МБ — такие Telegram боту не отдаёт. Загрузите видео через приложение (кнопка ниже) или пришлите его как обычное видео, со сжатием.",
+        "en": "The file is over {mb} MB, and Telegram won't hand files that big to a bot. Upload it in the app (button below) or send it as a regular, compressed video.",
+    },
     "video.download_failed": {
         "ru": "Не смог скачать файл из Telegram. Попробуйте прислать ещё раз.",
         "en": "Couldn't download the file from Telegram. Please try sending it again.",

@@ -34,6 +34,12 @@ BAR_WIDTH = 12
 DELIVERY_ATTEMPTS = 4
 DELIVERY_BACKOFF = 5.0
 
+# Облачный Bot API не отдаёт боту файлы больше 20 МБ: `get_file` падает с «file
+# is too big», и пользователь видел «попробуйте ещё раз», хотя повтор не
+# поможет. Минута видео в исходном качестве уже больше. Такие файлы идут через
+# Mini App: она принимает их кусками мимо Telegram.
+CLOUD_BOT_API_MAX_MB = 20
+
 
 def bar(share: float) -> str:
     filled = max(0, min(BAR_WIDTH, round(share * BAR_WIDTH)))
@@ -101,6 +107,13 @@ async def on_video(message: Message, bot: Bot) -> None:
     duration = getattr(media, "duration", None)
     if duration and duration > settings.max_video_seconds:
         await message.answer(t("video.too_long", lang, max_m=f"{settings.max_video_minutes:.0f}"))
+        return
+
+    size = getattr(media, "file_size", None)
+    if not settings.bot_api_url and size and size > CLOUD_BOT_API_MAX_MB * 1024 * 1024:
+        await message.answer(
+            t("video.too_big", lang, mb=CLOUD_BOT_API_MAX_MB), reply_markup=app_keyboard(None, lang)
+        )
         return
 
     # Пейволл один на оба входа: иначе оплату в приложении обходили бы простой

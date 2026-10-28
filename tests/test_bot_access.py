@@ -90,3 +90,33 @@ async def test_blocked_user_cannot_send_video(monkeypatch):
     )
     await video.on_video(msg, Boom())
     assert replies
+
+
+async def test_file_over_cloud_limit_goes_to_the_app_without_charging(monkeypatch):
+    """Облачный Bot API не отдаёт файл больше 20 МБ: повтор не поможет, а баланс
+    списывать не за что."""
+    async def upsert_user(*a, **kw):
+        return SimpleNamespace(is_blocked=False, is_admin=False, lang="ru", language_code="ru")
+
+    async def no_jobs(*a, **kw):
+        return 0
+
+    async def never(*a, **kw):
+        raise AssertionError("джоб создан для файла, который не скачать")
+
+    monkeypatch.setattr(video.repo, "upsert_user", upsert_user)
+    monkeypatch.setattr(video.repo, "active_jobs_count", no_jobs)
+    monkeypatch.setattr(video.repo, "create_job", never)
+    monkeypatch.setattr(video.settings, "bot_api_url", "")
+    replies: list[str] = []
+
+    async def answer(text, **kw):
+        replies.append(text)
+
+    msg = SimpleNamespace(
+        from_user=SimpleNamespace(id=5, username=None, first_name=None, language_code="ru"),
+        video=SimpleNamespace(mime_type="video/mp4", duration=61, file_size=48 * 1024 * 1024),
+        video_note=None, document=None, answer=answer,
+    )
+    await video.on_video(msg, Boom())
+    assert replies and "20 МБ" in replies[0]
