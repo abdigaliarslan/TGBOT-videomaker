@@ -69,6 +69,54 @@ async def create_all() -> None:
 # ------------------------------------------------------------------ пользователи
 
 
+def upsert_user_stmt(
+    user_id: int,
+    *,
+    username: str | None,
+    first_name: str | None,
+    language_code: str | None,
+    is_admin: bool,
+    now: datetime,
+    preset: str | None = None,
+):
+    """INSERT … ON CONFLICT для пользователя. Вынесен, чтобы проверяться без БД.
+
+    `preset` стоит в values и НЕ стоит в `set_`, и это два разных требования.
+
+    В values — потому что иначе новый пользователь получал тему из умолчания
+    колонки, а не из `DEFAULT_PRESET` (дефект №5): настройку меняли, а первый
+    ролик человек всё равно видел в glass.
+
+    Не в `set_` — потому что `set_` выполняется на КАЖДОМ сообщении существующего
+    пользователя, и тема из конфига затирала бы тему, выбранную руками.
+    """
+    preset = preset or default_settings.default_preset
+    return (
+        pg_insert(User)
+        .values(
+            id=user_id,
+            username=username,
+            first_name=first_name,
+            language_code=language_code,
+            is_admin=is_admin,
+            preset=preset,
+            created_at=now,
+            last_seen_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[User.id],
+            set_={
+                "username": username,
+                "first_name": first_name,
+                "language_code": language_code,
+                "is_admin": is_admin,
+                "last_seen_at": now,
+            },
+        )
+        .returning(User)
+    )
+
+
 async def upsert_user(
     user_id: int,
     *,
@@ -77,30 +125,14 @@ async def upsert_user(
     language_code: str | None = None,
     is_admin: bool = False,
 ) -> User:
-    now = datetime.now(timezone.utc)
     async with session() as s:
-        stmt = (
-            pg_insert(User)
-            .values(
-                id=user_id,
-                username=username,
-                first_name=first_name,
-                language_code=language_code,
-                is_admin=is_admin,
-                created_at=now,
-                last_seen_at=now,
-            )
-            .on_conflict_do_update(
-                index_elements=[User.id],
-                set_={
-                    "username": username,
-                    "first_name": first_name,
-                    "language_code": language_code,
-                    "is_admin": is_admin,
-                    "last_seen_at": now,
-                },
-            )
-            .returning(User)
+        stmt = upsert_user_stmt(
+            user_id,
+            username=username,
+            first_name=first_name,
+            language_code=language_code,
+            is_admin=is_admin,
+            now=datetime.now(timezone.utc),
         )
         return (await s.execute(stmt)).scalar_one()
 

@@ -26,9 +26,22 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from src.core.config import settings as default_settings
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def default_preset() -> str:
+    """Тема по умолчанию — из конфига, а не зашитая в колонку (дефект №5).
+
+    В колонке стояло `"glass"`, и смена `DEFAULT_PRESET` на `pulse` новых
+    пользователей не касалась: они продолжали получать glass. Python-side
+    default, а не `server_default`: тогда значение берётся на каждую вставку, и
+    настройка действует без миграции.
+    """
+    return default_settings.default_preset
 
 
 class Base(DeclarativeBase):
@@ -59,7 +72,7 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    preset: Mapped[str] = mapped_column(String(32), default="glass", nullable=False)
+    preset: Mapped[str] = mapped_column(String(32), default=default_preset, nullable=False)
     settings: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
 
     videos_done: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -100,7 +113,9 @@ class Job(Base):
     # результат
     result_key: Mapped[str | None] = mapped_column(String(512))
     result_duration: Mapped[float | None] = mapped_column(Float)
-    preset: Mapped[str] = mapped_column(String(32), default="glass", nullable=False)
+    # Задачу всегда создают с темой явно (`create_job`), но зашитое «glass»
+    # здесь — та же ловушка, что у пользователя: умолчание обязано быть одно.
+    preset: Mapped[str] = mapped_column(String(32), default=default_preset, nullable=False)
     # Галочки пользователя (`core.options.JobOptions`). NULL — задача из чата или
     # из времени до Mini App: всё включено, как было.
     options: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

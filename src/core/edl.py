@@ -18,6 +18,8 @@ from typing import Any, Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.core.config import settings as default_settings
+
 # Потолок b-roll: не чаще одной картинки на BROLL_WINDOW секунд и не больше
 # BROLL_MAX на ролик. Одна картинка на 8 с — это мельтешение: на 20-секундном
 # ролике их выходило три, и ролик переставал быть про говорящего.
@@ -196,7 +198,11 @@ class EDL(BaseModel):
     broll: list[Broll] = []
     sfx: list[Sfx] = []
     music: Music | None = None
-    preset: str = "glass"
+    # Умолчание из конфига, а не зашитое «glass» (дефект №5): лист, собранный без
+    # явной темы, обязан получить ту же тему, что и новый пользователь.
+    # `default_factory` — чтобы значение читалось при создании листа, а не при
+    # импорте модуля.
+    preset: str = Field(default_factory=lambda: default_settings.default_preset)
 
     @model_validator(mode="before")
     @classmethod
