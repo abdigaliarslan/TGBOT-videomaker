@@ -72,6 +72,7 @@
     "shout_rotate": -3.0,
     "word_in_ms": 150,
     "word_rise_px": 16,
+    "broll_overshoot": 0.03,
     "leak_ms": 0,
     "leak_hue": 0.0
   },
