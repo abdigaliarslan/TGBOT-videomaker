@@ -1091,7 +1091,7 @@ def test_caption_rect_matches_the_chromium_box():
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", ["glass", "bold"])
+@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
 def test_the_production_block_rect_matches_chromium(name: str):
     """Тот же DoD, но на ПРОИЗВОДСТВЕННОМ пути: `wrap_block` + `_rect_of_lines`.
 

@@ -5,7 +5,7 @@
     "family": "Montserrat ExtraBold",
     "file": "Montserrat-ExtraBold.ttf",
     "weight": 800,
-    "size": 88,
+    "size": 76,
     "uppercase": false,
     "letter_spacing": -0.015
   },
@@ -41,8 +41,11 @@
     "align": "center",
     "max_lines": 2,
     "min_word_scale": 0.4,
-    "fill_max_scale": 2.8,
+    "fill_max_scale": 2.0,
     "pinned": true
+  },
+  "geometry": {
+    "max_line_width_ratio": 0.74
   },
   "contrast": {
     "enabled": false,

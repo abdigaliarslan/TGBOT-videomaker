@@ -427,7 +427,7 @@ def test_missing_font_metrics_do_not_break_the_plan():
     assert all(w.size is None for b in plan.blocks for w in b.words)
 
 
-@pytest.mark.parametrize("name", ["glass", "bold"])
+@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
 def test_fallback_line_limit_follows_the_preset(name: str):
     """Запасной лимит по символам считается от кегля и регистра, а не константой.
 
@@ -546,7 +546,7 @@ def ruler_of(preset: Preset) -> _Ruler:
     )
 
 
-@pytest.mark.parametrize("name", ["glass", "bold"])
+@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
 def test_wrapped_text_never_leaves_the_caption_rect(name: str):
     """DoD Ф5: тридцать блоков, ни один не вылезает за отведённую ширину.
 
@@ -582,7 +582,7 @@ def test_wrapped_text_never_leaves_the_caption_rect(name: str):
             assert width <= ruler.budget + 0.5, (name, [w.text for w in line], width)
 
 
-@pytest.mark.parametrize("name", ["glass", "bold"])
+@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
 def test_words_in_a_line_never_overlap(name: str):
     """DoD Ф5: слова разъезжаются на настоящий пробел, а не наезжают друг на друга.
 
@@ -648,7 +648,7 @@ def test_words_in_a_line_never_overlap(name: str):
     assert seen >= 30, "проверять надо хотя бы тридцать строк"
 
 
-@pytest.mark.parametrize("name", ["glass", "bold"])
+@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
 def test_block_rect_holds_every_line(name: str):
     """Прямоугольник блока накрывает текст целиком — и по ширине, и по ВЫСОТЕ.
 
@@ -945,7 +945,7 @@ def test_glass_has_no_background_under_the_caption_at_all():
         assert _panel_opacity(preset, step / 100) == 0.0
 
 
-@pytest.mark.parametrize("name", ["glass", "bold"])
+@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
 def test_contrast_rule_has_a_lever_on_every_background(name: str):
     """У правила Ф9 обязан быть рычаг на ЛЮБОЙ яркости фона, а не только на краях.
 
@@ -1090,7 +1090,7 @@ def _measure_in_chromium(request: dict) -> dict:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", ["glass", "bold"])
+@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
 def test_chromium_draws_the_block_the_plan_promised(name: str):
     """DoD Ф5 целиком: тот же Chromium и тот же шрифт, что в рендере, — допуск 2 px.
 
