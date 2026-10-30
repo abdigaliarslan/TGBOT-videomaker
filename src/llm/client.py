@@ -64,9 +64,18 @@ class Usage:
     cache_creation_tokens: int = 0
     seconds: float = 0.0
     attempt: int = 1
+    billed_usd: float | None = None
 
     @property
     def cost_usd(self) -> float:
+        # Счёт шлюза точнее таблицы цен (в таблице нет наценки посредника),
+        # поэтому он в приоритете. Но только ПОЛОЖИТЕЛЬНЫЙ: ноль значит «шлюз
+        # не сказал», а не «вызов бесплатный» (дефект №4) — записанный нуль
+        # молча обнулял бы себестоимость ролика в отчёте §7 без всякого сигнала.
+        # `_billed_usd` в providers.py нули уже отсекает; здесь — чтобы и Usage,
+        # собранный мимо провайдера, нельзя было обнулить.
+        if self.billed_usd is not None and self.billed_usd > 0:
+            return self.billed_usd
         miss, hit, out = price_for(self.model)
         return (
             self.input_tokens * miss
@@ -270,6 +279,7 @@ class LLMClient:
                 cache_creation_tokens=result.cache_creation_tokens,
                 seconds=round(time.perf_counter() - t0, 2),
                 attempt=attempt,
+                billed_usd=result.billed_usd,
             )
             await self._record(usage)
             log.info(

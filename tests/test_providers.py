@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from src.llm.providers import (
+    FalProvider,
     GeminiProvider,
     OpenAICompatProvider,
     ProviderError,
@@ -37,7 +38,7 @@ def mock(provider, handler):
 
 
 def test_factory_knows_providers():
-    for name in ("anthropic", "deepseek", "gemini", "openai"):
+    for name in ("anthropic", "deepseek", "gemini", "openai", "fal"):
         p = make_provider(name, "k", "http://x")
         assert p.name == name
 
@@ -145,6 +146,73 @@ async def test_openai_compat_error_classification(status, retryable):
     await p.aclose()
     assert e.value.retryable is retryable
     assert e.value.status == status
+
+
+# ------------------------------------------------- 2xx с телом не от модели (дефект №3)
+#
+# fal → OpenRouter → Google — две прокси, а прокси отдают HTML-страницу ошибки
+# с кодом 200. `resp.json()` кидает на ней json.JSONDecodeError, то есть
+# ValueError: не ProviderError, а значит ни ретрая (§4), ни фолбэка в
+# `director`/`broll` — задача падает целиком вместо деградации.
+
+HTML_ERROR_PAGE = "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
+
+
+def html_200(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, text=HTML_ERROR_PAGE, headers={"content-type": "text/html"})
+
+
+async def test_openai_compat_html_body_on_200_is_a_retryable_provider_error():
+    p = mock(OpenAICompatProvider("k", "https://api.deepseek.com"), html_200)
+    with pytest.raises(ProviderError) as e:
+        await p.complete(model="m", system="s", user="u", schema=SCHEMA)
+    await p.aclose()
+    assert e.value.retryable is True
+    assert "502 Bad Gateway" in str(e.value)  # оператору видно, кто именно ответил
+
+
+async def test_fal_html_body_on_200_is_a_retryable_provider_error():
+    """Ровно тот путь, который сейчас в проде: шлюз поверх шлюза."""
+    p = mock(FalProvider("k", "https://fal.run/openrouter/router/openai/v1"), html_200)
+    with pytest.raises(ProviderError) as e:
+        await p.complete(model="google/gemini-3.5-flash", system="s", user="u", schema=SCHEMA)
+    await p.aclose()
+    assert e.value.retryable is True
+
+
+async def test_gemini_html_body_on_200_is_a_retryable_provider_error():
+    p = mock(GeminiProvider("k", "https://x"), html_200)
+    with pytest.raises(ProviderError) as e:
+        await p.complete(model="m", system="s", user="u", schema=SCHEMA)
+    await p.aclose()
+    assert e.value.retryable is True
+
+
+@pytest.mark.parametrize("payload", ['["не", "объект"]', '"строка"', "42", "null"])
+async def test_valid_json_that_is_not_an_object_is_also_a_provider_error(payload):
+    """`data.get(...)` на списке даёт AttributeError — то же необработанное падение."""
+    def handler(request):
+        return httpx.Response(200, text=payload, headers={"content-type": "application/json"})
+
+    p = mock(OpenAICompatProvider("k", "https://x"), handler)
+    with pytest.raises(ProviderError) as e:
+        await p.complete(model="m", system="s", user="u", schema=SCHEMA)
+    await p.aclose()
+    assert e.value.retryable is True
+
+
+def test_anthropic_sdk_json_failure_is_retryable_too():
+    """Три провайдера — одно поведение: чужой разовый сбой повторяем."""
+    from src.llm.providers import _sdk_retryable
+
+    assert _sdk_retryable(json.JSONDecodeError("Expecting value", "<html>", 0)) is True
+
+    class APIResponseValidationError(Exception):
+        pass
+
+    assert _sdk_retryable(APIResponseValidationError("ответ не той формы")) is True
+    # А вот плохой запрос повторять по-прежнему нельзя.
+    assert _sdk_retryable(ValueError("просто ошибка")) is False
 
 
 # ------------------------------------------------------------------ gemini
@@ -298,3 +366,95 @@ def test_cache_price_is_cheaper_than_miss_for_every_model():
 def test_deepseek_cache_is_dramatically_cheaper():
     miss, hit, _ = price_for("deepseek-v4-flash")
     assert miss / hit > 20  # ради этого системный промпт и держим неизменным
+
+
+# ------------------------------------------------------------------ fal
+
+
+def fal_ok(seen: list, *, cost: float = 0.0012):
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append({"auth": request.headers.get("authorization"), "body": json.loads(request.content)})
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"fixes": []}'}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 500, "completion_tokens": 20, "cost": cost},
+        })
+    return handler
+
+
+async def test_fal_speaks_openai_with_its_own_key_and_a_real_schema():
+    seen: list = []
+    p = mock(FalProvider("fal-key", "https://fal.run/openrouter/router/openai/v1"), fal_ok(seen))
+    res = await p.complete(model="google/gemini-3.1-flash-lite", system="s", user="u", schema=SCHEMA)
+    await p.aclose()
+    body = seen[0]["body"]
+    assert body["response_format"]["json_schema"]["schema"] == SCHEMA
+    assert body["reasoning"] == {"enabled": False}
+    assert res.billed_usd == pytest.approx(0.0012)
+
+
+async def test_fal_authorizes_with_its_key_scheme():
+    p = FalProvider("fal-key", "https://x")
+    assert p._ensure().headers["authorization"] == "Key fal-key"
+    await p.aclose()
+
+
+async def test_fal_hands_the_voice_to_the_model():
+    seen: list = []
+    p = mock(FalProvider("k", "https://x"), fal_ok(seen))
+    await p.complete(model="m", system="s", user="u", schema=SCHEMA, audio=(b"ID3", "audio/mp3"))
+    await p.aclose()
+    parts = seen[0]["body"]["messages"][1]["content"]
+    assert parts[0]["type"] == "input_audio" and parts[0]["input_audio"]["format"] == "mp3"
+    assert parts[-1] == {"type": "text", "text": "u"}
+
+
+async def test_fal_falls_back_to_minimal_reasoning_once_and_remembers():
+    """У flash размышления не отключаются: 400 «Reasoning is mandatory»."""
+    seen: list = []
+    ok = fal_ok(seen)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["reasoning"] == {"enabled": False}:
+            seen.append({"auth": None, "body": body})
+            return httpx.Response(400, json={"error": {"message": "Reasoning is mandatory for this endpoint and cannot be disabled."}})
+        return ok(request)
+
+    p = mock(FalProvider("k", "https://x"), handler)
+    await p.complete(model="google/gemini-3.5-flash", system="s", user="u", schema=SCHEMA)
+    await p.complete(model="google/gemini-3.5-flash", system="s", user="u", schema=SCHEMA)
+    await p.aclose()
+    assert [c["body"]["reasoning"] for c in seen] == [
+        {"enabled": False}, {"effort": "minimal"}, {"effort": "minimal"},
+    ]
+
+
+async def test_deepseek_is_not_handed_audio_it_cannot_hear():
+    assert OpenAICompatProvider.supports_audio is False
+
+
+# ------------------------------------------------- стоимость от шлюза (дефект №4)
+
+
+@pytest.mark.parametrize("cost", [0, 0.0, -1.0, None, "0.01", True, False])
+async def test_a_cost_the_gateway_did_not_really_report_falls_back_to_the_price_table(cost):
+    """Ноль — это «шлюз не посчитал», а не «вызов бесплатный».
+
+    Записанный нуль молча обнулял бы себестоимость ролика в отчёте §7 навсегда
+    и без сигнала. А `isinstance(True, int)` — истина, и `cost: true` раньше
+    превращался в $1.00.
+    """
+    seen: list = []
+    p = mock(FalProvider("k", "https://x"), fal_ok(seen, cost=cost))
+    res = await p.complete(model="google/gemini-3.5-flash", system="s", user="u", schema=SCHEMA)
+    await p.aclose()
+    assert res.billed_usd is None
+
+
+async def test_a_real_cost_from_the_gateway_wins_over_the_table():
+    """Счёт шлюза точнее таблицы: в таблице нет наценки посредника."""
+    seen: list = []
+    p = mock(FalProvider("k", "https://x"), fal_ok(seen, cost=0.00875))
+    res = await p.complete(model="google/gemini-3.5-flash", system="s", user="u", schema=SCHEMA)
+    await p.aclose()
+    assert res.billed_usd == pytest.approx(0.00875)

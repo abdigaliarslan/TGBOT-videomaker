@@ -154,6 +154,29 @@ def test_cost_uses_cache_price_for_cached_tokens():
     assert warm.cost_usd < cold.cost_usd / 10
 
 
+def test_a_zero_bill_from_the_gateway_does_not_make_the_reel_free():
+    """Дефект №4: `billed_usd is not None` записывал нуль как себестоимость.
+
+    Вызов модели бесплатным не бывает: ноль значит «шлюз не сказал», и считать
+    надо по таблице цен — иначе отчёт §7 молча показывает нулевую экономику.
+    """
+    by_table = Usage(prompt="direct", tier="smart", model="google/gemini-3.5-flash",
+                     input_tokens=100_000, output_tokens=10_000)
+    assert by_table.cost_usd > 0
+
+    zero = Usage(prompt="direct", tier="smart", model="google/gemini-3.5-flash",
+                 input_tokens=100_000, output_tokens=10_000, billed_usd=0.0)
+    assert zero.cost_usd == pytest.approx(by_table.cost_usd)
+    assert zero.to_dict()["cost_usd"] > 0
+
+
+def test_a_real_bill_from_the_gateway_is_preferred():
+    """С наценкой посредника, которой в таблице цен нет."""
+    u = Usage(prompt="direct", tier="smart", model="google/gemini-3.5-flash",
+              input_tokens=100, output_tokens=10, billed_usd=0.00875)
+    assert u.cost_usd == pytest.approx(0.00875)
+
+
 def test_price_matches_prefix_for_dated_model():
     assert price_for("claude-opus-5-20260101") == price_for("claude-opus-5")
 

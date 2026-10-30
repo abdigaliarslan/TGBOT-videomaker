@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -56,7 +56,36 @@ PROVIDER_MODELS: dict[str, dict[str, str]] = {
         "smart": "gemini-3.1-pro-preview",
         "vision": "gemini-3.7-flash",
     },
+    # Те же Gemini через fal (его OpenRouter-шлюз): ключ тот же, что у картинок,
+    # бесплатного тарифа с его 20 запросами в сутки нет. Модели принимают звук и
+    # картинки.
+    #
+    # ⚠ `smart` здесь ОСОЗНАННО flash, а не сильнейшая модель линейки — в отличие
+    # от блока `gemini` выше, где flash был обходным путём вокруг бесплатного
+    # ключа. Это выбор по цене и задержке. Замерено на живом шлюзе 2026-10-29,
+    # один и тот же вызов `direct` с настоящей DIRECT_SCHEMA:
+    #   google/gemini-3.1-flash-lite   200,  2 с  $0.00029
+    #   google/gemini-3.5-flash        200,  7 с  $0.00875  ← наш smart
+    #   google/gemini-3.1-pro-preview  200, 16 с  $0.01458
+    #   google/gemini-2.5-pro          200,  7 с  $0.00571
+    #   google/gemini-3-pro            400 «is not a valid model ID»
+    # Pro на шлюзе доступен и включается одной строкой:
+    #   LLM_TIER_SMART=google/gemini-3.1-pro-preview
+    # но это 1.7× цены и 2.3× времени, а доказательства, что он даёт ЛУЧШИЙ EDL,
+    # нет ни одного. Прецедент в блоке `deepseek` выше прямо об этом: v4-pro и
+    # v4-flash выдали один и тот же план при 21-кратной разнице в цене. Пока
+    # эвал-сет (§7) не скажет обратного — flash.
+    "fal": {
+        "cheap": "google/gemini-3.1-flash-lite",
+        "smart": "google/gemini-3.5-flash",
+        "vision": "google/gemini-3.5-flash",
+    },
 }
+
+# Провайдеры-шлюзы: модели они не хостят, а проксируют чужие, поэтому имя
+# модели у них обязано нести вендора — «google/gemini-3.5-flash». Имя без
+# вендора шлюз не узнаёт и отвечает 400. Список нужен валидатору ниже.
+GATEWAY_PROVIDERS = frozenset({"fal"})
 
 
 class Settings(BaseSettings):
@@ -112,7 +141,20 @@ class Settings(BaseSettings):
     #
     # §4 требует ОДИН абстрактный клиент и тиры вместо имён моделей в логике.
     # Провайдер — такая же деталь реализации, как имя модели: меняется здесь.
-    llm_provider: Literal["anthropic", "deepseek", "gemini"] = "anthropic"
+    #
+    # `fal`, а не `anthropic`: из четырёх провайдеров таблицы только у fal нет
+    # бесплатного тарифа — и поэтому он единственный, кто ОТВЕЧАЕТ. Прямой ключ
+    # Gemini на бесплатном тире ронял примерно половину вызовов в 503 (замеры по
+    # моделям — в комментарии к PROVIDER_MODELS), а ролику их нужно 3-5 подряд.
+    # Замерено на живом ключе fal: 6 успехов из 6, включая vision; полный прогон
+    # пайплайна стоит $0.019 за ролик и даёт акценты в каждом блоке субтитров.
+    # Это не «бесплатно», но это цена работающего продукта.
+    #
+    # ⚠ Умолчание обязано стоять ЗДЕСЬ, а не в .env: .env не в git и исключён из
+    # rsync выкладки (deploy/update.sh), то есть на сервер не попадает вовсе.
+    # Провайдер, прописанный только в .env, меняет провайдера на машине
+    # разработчика и ничего не меняет в проде (дефект №1).
+    llm_provider: Literal["anthropic", "deepseek", "gemini", "fal"] = "fal"
 
     anthropic_api_key: str = ""
     deepseek_api_key: str = ""
@@ -121,8 +163,12 @@ class Settings(BaseSettings):
     anthropic_base_url: str = "https://api.anthropic.com"
     deepseek_base_url: str = "https://api.deepseek.com"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    # Ключ у fal общий с картинками (`fal_api_key`), здесь только адрес шлюза.
+    fal_llm_base_url: str = "https://fal.run/openrouter/router/openai/v1"
 
     # Пусто → модель по умолчанию для выбранного провайдера (см. PROVIDER_MODELS).
+    # У провайдера-шлюза имя обязано нести вендора — проверяет
+    # `_gateway_tiers_need_vendor_prefix`.
     llm_tier_cheap: str = ""
     llm_tier_smart: str = ""
     llm_tier_vision: str = ""
@@ -349,6 +395,51 @@ class Settings(BaseSettings):
             return ""
         return v
 
+    @model_validator(mode="after")
+    def _gateway_tiers_need_vendor_prefix(self) -> Settings:
+        """Шлюзу нельзя подсунуть имя модели без вендора (дефект №2).
+
+        Что происходит без этой проверки. Остаётся `LLM_TIER_SMART=gemini-3.5-flash`
+        со времён прямого ключа Gemini, провайдер уже fal — шлюз такого имени не
+        знает и отвечает 400. 400 не ретраится (§4), `direct` молча уходит в
+        детерминированный EDL, `plan_broll` возвращает пустой список. Ролик
+        выходит без акцентов и без вставок, а бот докладывает «готово»: продукт
+        испорчен целиком и никем не замечен.
+
+        Почему ОТКАЗ на старте, а не громкое предупреждение. Это выбор между двумя
+        отказами, и считается он по тому, который оператор заметит раньше. Молча
+        испорченный ролик не замечает НИКТО: в логе «готово», в чате видео, и
+        разница видна только тому, кто сравнит с эталоном. Бот, который не
+        поднялся, виден в первую минуту — служба в рестарт-цикле, и в журнале
+        лежит этот текст с именем переменной и готовой правкой. Платим мы
+        простоем, но в этой конфигурации КАЖДЫЙ вызов модели всё равно 400:
+        отказ не отнимает ничего работающего. Предупреждение в лог здесь не
+        работает по той же причине, по которой дефект дожил до ревью: в журнал
+        успешной выкладки не смотрят.
+        """
+        if self.llm_provider not in GATEWAY_PROVIDERS:
+            return self
+        bad = {
+            f"LLM_TIER_{tier.upper()}": name.strip()
+            for tier, name in (
+                ("cheap", self.llm_tier_cheap),
+                ("smart", self.llm_tier_smart),
+                ("vision", self.llm_tier_vision),
+            )
+            if name.strip() and "/" not in name
+        }
+        if bad:
+            raise ValueError(
+                f"провайдер {self.llm_provider!r} — шлюз: он принимает только имена "
+                "моделей с вендором («google/gemini-3.5-flash»). Без префикса шлюз "
+                "отвечает 400, а 400 не повторяется — ролик молча теряет акценты и "
+                "вставки. Поправьте в .env: "
+                + "; ".join(f"{var}={name} → {var}=google/{name}" for var, name in bad.items())
+                + " — либо оставьте переменную пустой, тогда возьмётся модель по "
+                "умолчанию из PROVIDER_MODELS"
+            )
+        return self
+
     # -------------------------------------------------------------- производные
     @property
     def max_video_seconds(self) -> float:
@@ -360,6 +451,7 @@ class Settings(BaseSettings):
             "anthropic": self.anthropic_api_key,
             "deepseek": self.deepseek_api_key,
             "gemini": self.gemini_api_key,
+            "fal": self.fal_api_key,
         }.get(self.llm_provider, "")
 
     @property
@@ -368,6 +460,7 @@ class Settings(BaseSettings):
             "anthropic": self.anthropic_base_url,
             "deepseek": self.deepseek_base_url,
             "gemini": self.gemini_base_url,
+            "fal": self.fal_llm_base_url,
         }[self.llm_provider]
 
     @property
@@ -384,8 +477,10 @@ class Settings(BaseSettings):
             "smart": self.llm_tier_smart,
             "vision": self.llm_tier_vision,
         }[tier]
-        if override:
-            return override
+        # `strip` — чтобы «пусто» здесь и в валидаторе значило одно и то же:
+        # пробел в .env иначе уехал бы в API именем модели.
+        if override.strip():
+            return override.strip()
         return PROVIDER_MODELS[self.llm_provider][tier]
 
     def bot_api_path_to_local(self, path: str) -> Path:

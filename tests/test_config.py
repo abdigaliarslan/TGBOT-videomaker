@@ -69,6 +69,54 @@ def test_max_video_seconds_derived():
     assert Settings(max_video_minutes=2.5).max_video_seconds == 150.0
 
 
+def test_the_shipped_provider_is_the_one_that_answers():
+    """Дефект №1: LLM_PROVIDER=fal жил только в .env.
+
+    .env не в git и исключён из rsync выкладки (deploy/update.sh) — провайдер,
+    прописанный там, в прод не попадает вовсе. Умолчание обязано быть в коде.
+    """
+    assert Settings(_env_file=None).llm_provider == "fal"
+
+
+def test_gateway_refuses_a_tier_override_without_a_vendor_prefix():
+    """Дефект №2: `gemini-3.5-flash` вместо `google/gemini-3.5-flash`.
+
+    Шлюз отвечает на такое имя 400, 400 не ретраится — и ролик молча выходит
+    без акцентов и без вставок, а бот докладывает «готово».
+    """
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError) as e:
+        Settings(_env_file=None, llm_provider="fal", llm_tier_smart="gemini-3.5-flash")
+    # Отказ обязан называть переменную и готовую правку: его читает оператор.
+    assert "LLM_TIER_SMART" in str(e.value)
+    assert "google/gemini-3.5-flash" in str(e.value)
+
+
+@pytest.mark.parametrize("tier", ["llm_tier_cheap", "llm_tier_smart", "llm_tier_vision"])
+def test_every_tier_override_is_checked_not_just_smart(tier):
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        Settings(_env_file=None, llm_provider="fal", **{tier: "gemini-3.5-flash"})
+    ok = Settings(_env_file=None, llm_provider="fal", **{tier: "google/gemini-3.5-flash"})
+    assert ok.model_for_tier(tier.removeprefix("llm_tier_")) == "google/gemini-3.5-flash"
+
+
+def test_empty_override_is_fine_for_a_gateway():
+    """Пусто — это не «без префикса»: берётся модель по умолчанию, она с вендором."""
+    s = Settings(_env_file=None, llm_provider="fal", llm_tier_smart="", llm_tier_vision="  ")
+    assert s.model_for_tier("smart").startswith("google/")
+    assert s.model_for_tier("vision").startswith("google/")
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "deepseek", "gemini"])
+def test_direct_providers_still_take_bare_model_names(provider):
+    """У прямых провайдеров вендора в имени нет и быть не должно."""
+    s = Settings(_env_file=None, llm_provider=provider, llm_tier_smart="какая-то-модель")
+    assert s.model_for_tier("smart") == "какая-то-модель"
+
+
 def test_llm_ready_requires_key_of_the_selected_provider():
     def s(**kw):
         return Settings(_env_file=None, llm_provider="anthropic", **kw)
@@ -143,3 +191,69 @@ def test_ass_alpha_inverted():
 
 def test_css_rgba():
     assert to_css_rgba("#FF8000", 0.5) == "rgba(255, 128, 0, 0.5)"
+
+
+# ------------------------------------------------------------------ тема по умолчанию
+#
+# Дефект №5: умолчание темы было зашито в трёх местах («glass»), и смена
+# DEFAULT_PRESET до нового пользователя не доходила.
+
+
+def test_shipped_default_theme_is_pulse():
+    assert Settings(_env_file=None).default_preset == "pulse"
+    assert Settings(_env_file=None).default_preset in available()
+
+
+def test_new_user_is_created_with_the_configured_theme(monkeypatch):
+    """`upsert_user` обязан сам положить тему: умолчания колонки ему не хватало."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy.dialects import postgresql
+
+    from src.db import repo
+
+    monkeypatch.setattr(repo, "default_settings", Settings(_env_file=None, default_preset="bold"))
+    stmt = repo.upsert_user_stmt(
+        1, username=None, first_name=None, language_code=None, is_admin=False,
+        now=datetime.now(timezone.utc),
+    )
+    compiled = stmt.compile(dialect=postgresql.dialect())
+    assert compiled.params["preset"] == "bold"
+
+
+def test_upsert_does_not_overwrite_the_theme_of_an_existing_user():
+    """`set_` выполняется на каждом сообщении — тема из конфига затёрла бы выбор."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy.dialects import postgresql
+
+    from src.db.repo import upsert_user_stmt
+
+    stmt = upsert_user_stmt(
+        1, username="u", first_name="f", language_code="ru", is_admin=False,
+        now=datetime.now(timezone.utc), preset="bold",
+    )
+    sql = str(stmt.compile(dialect=postgresql.dialect()))
+    insert_part, rest = sql.split("ON CONFLICT", 1)
+    # RETURNING отрезаем: там перечислены все колонки, в том числе preset.
+    update_part = rest.split("RETURNING", 1)[0]
+    assert "preset" in insert_part
+    assert "preset" not in update_part
+
+
+def test_user_table_default_follows_config(monkeypatch):
+    """Вставка мимо `upsert_user` (тесты, скрипты) тоже не должна давать glass."""
+    from src.db import models
+
+    monkeypatch.setattr(models, "default_settings", Settings(_env_file=None, default_preset="bold"))
+    column_default = models.User.__table__.c.preset.default
+    assert column_default.is_callable  # значение берётся на вставку, а не при импорте
+    assert models.default_preset() == "bold"
+
+
+def test_edl_without_an_explicit_theme_takes_it_from_config(monkeypatch):
+    from src.core import edl as edl_mod
+
+    monkeypatch.setattr(edl_mod, "default_settings", Settings(_env_file=None, default_preset="bold"))
+    edl = edl_mod.EDL(source_duration=1.0, words=[], cuts=[], captions=[])
+    assert edl.preset == "bold"

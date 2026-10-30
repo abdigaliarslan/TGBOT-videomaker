@@ -36,6 +36,10 @@ class ProviderResult:
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
     stop_reason: str = ""
+    #: сколько вызов стоил по счёту провайдера, если он это сообщает (fal) —
+    #: точнее нашей таблицы цен: в ней нет наценки посредника.
+    #: None — не сообщил; нуля здесь не бывает по смыслу, см. `_billed_usd`
+    billed_usd: float | None = None
 
 
 class ProviderError(RuntimeError):
@@ -78,6 +82,9 @@ FALLBACK_PRICE = (1.00, 0.10, 5.00)
 
 
 def price_for(model: str) -> tuple[float, float, float]:
+    # У посредников (fal → OpenRouter) модель приходит с вендором:
+    # «google/gemini-3.5-flash».
+    model = model.rsplit("/", 1)[-1]
     if model in PRICES:
         return PRICES[model]
     for known, price in PRICES.items():  # «claude-opus-5-20260101» → «claude-opus-5»
@@ -125,6 +132,55 @@ def _http_error(e: httpx.HTTPStatusError) -> ProviderError:
     body = e.response.text[:400]
     # 429 и 5xx — временные. 400/401/403 повторять бессмысленно.
     return ProviderError(f"HTTP {status}: {body}", status=status, retryable=status == 429 or status >= 500)
+
+
+def _bad_body(resp: httpx.Response, why: Exception) -> ProviderError:
+    """2xx, но тело не похоже на ответ модели (дефект №3).
+
+    Так отвечает не модель, а посредник на пути к ней: fal → OpenRouter →
+    Google — это две прокси, а прокси отдают HTML-страницу ошибки с кодом 200.
+    `resp.json()` кидает на ней `json.JSONDecodeError`, то есть ValueError, а не
+    ProviderError. Без перевода он проходит мимо ретрая (§4) И мимо фолбэков
+    `director`/`broll` — те ловят LLMUnavailable и LLMBadOutput, — и роняет
+    задачу целиком вместо того, чтобы деградировать до детерминированного EDL.
+
+    Ретраить можно и нужно: сбой чужой и, как правило, разовый.
+    """
+    return ProviderError(
+        f"HTTP {resp.status_code}, но тело не разбирается как ответ модели "
+        f"({why}): {resp.text[:200]!r}",
+        status=resp.status_code,
+        retryable=True,
+    )
+
+
+def _json_object(resp: httpx.Response) -> dict[str, Any]:
+    """Тело ответа объектом JSON или retryable ProviderError. См. `_bad_body`."""
+    try:
+        data = resp.json()
+    except ValueError as e:  # json.JSONDecodeError — его подвид
+        raise _bad_body(resp, e) from e
+    if not isinstance(data, dict):
+        # Валидный JSON, но не объект: `data.get(...)` ниже упал бы
+        # AttributeError — тем же необработанным исключением, что и выше.
+        raise _bad_body(resp, TypeError(f"ожидался объект, пришёл {type(data).__name__}"))
+    return data
+
+
+def _billed_usd(cost: Any) -> float | None:
+    """Стоимость, названная шлюзом. None — «шлюз её не назвал» (дефект №4).
+
+    Два капкана. Первый: `isinstance(True, int)` — истина, и `cost: true`
+    посчитался бы как $1.00. Второй: ноль. Вызов модели не бывает бесплатным, и
+    `cost: 0` значит «шлюз не посчитал», а не «даром»; записанный нуль молча
+    обнулял бы себестоимость ролика в отчёте §7 навсегда и без сигнала. В обоих
+    случаях честнее вернуться к таблице цен: она хотя бы завышает (в ней нет
+    наценки посредника), а не обнуляет.
+    """
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    value = float(cost)
+    return value if value > 0 else None
 
 
 # --------------------------------------------------------------------------- anthropic
@@ -208,6 +264,13 @@ def _sdk_retryable(e: Exception) -> bool:
         "APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError"
     ):
         return True
+    # 2xx с телом не-JSON у SDK выглядит так: сам JSONDecodeError или
+    # APIResponseValidationError («ответ не той формы»). Через `except Exception`
+    # в `complete` это УЖЕ становится ProviderError, но неретраябельной — а сбой
+    # тут чужой и разовый, ровно как у httpx-провайдеров (дефект №3). Держим три
+    # провайдера в одном поведении.
+    if isinstance(e, json.JSONDecodeError) or type(e).__name__ == "APIResponseValidationError":
+        return True
     status = getattr(e, "status_code", None)
     return isinstance(status, int) and (status == 429 or status >= 500)
 
@@ -227,6 +290,8 @@ class OpenAICompatProvider(Provider):
     name = "openai-compat"
     supports_schema = False
     supports_images = True
+    #: схема авторизации в заголовке: `Bearer <ключ>` у DeepSeek, `Key <ключ>` у fal
+    auth_scheme = "Bearer"
 
     def __init__(
         self, api_key: str, base_url: str, timeout: float = 180.0, *, thinking: bool = False
@@ -241,18 +306,43 @@ class OpenAICompatProvider(Provider):
                 base_url=self.base_url,
                 timeout=self.timeout,
                 headers={
-                    "Authorization": f"Bearer {self.api_key}",
+                    "Authorization": f"{self.auth_scheme} {self.api_key}",
                     "Content-Type": "application/json",
                 },
             )
         return self._http
 
-    async def complete(
-        self, *, model, system, user, schema, images=(), max_tokens=16_000, effort=None
-    ) -> ProviderResult:
-        http = self._ensure()
+    def _tune(
+        self, body: dict[str, Any], *, model: str, schema: dict[str, Any], effort: str | None
+    ) -> None:
+        """Диалект провайдера: формат ответа и размышления. Здесь — DeepSeek."""
+        # Размышления считаются в max_tokens И оплачиваются по цене выхода.
+        # Наши задачи структурные (разложить слова по блокам), глубокого
+        # рассуждения не требуют. Замерено на реальном ролике: с включёнными
+        # размышлениями `direct` съел все 16000 токенов, не выдал ни байта
+        # ответа (stop=length) и стоил $0.022 впустую. Выключаем по умолчанию.
+        if not self.thinking:
+            body["thinking"] = {"type": "disabled"}
+        elif effort in ("low", "medium", "high"):
+            body["reasoning_effort"] = effort
 
-        if images:
+    async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
+        http = self._ensure()
+        try:
+            resp = await http.post("/chat/completions", json=body)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise _http_error(e) from e
+        except httpx.HTTPError as e:
+            raise ProviderError(f"{type(e).__name__}: {e}", retryable=True) from e
+        # Разбор тела — ОТДЕЛЬНО от запроса: на 2xx с HTML-страницей прокси он
+        # кидает ValueError, который не ProviderError (дефект №3).
+        return _json_object(resp)
+
+    async def complete(
+        self, *, model, system, user, schema, images=(), max_tokens=16_000, effort=None, audio=None
+    ) -> ProviderResult:
+        if images or audio:
             parts: list[dict[str, Any]] = [
                 {
                     "type": "image_url",
@@ -263,6 +353,17 @@ class OpenAICompatProvider(Provider):
                 }
                 for img in images
             ]
+            if audio:
+                data, mime = audio
+                parts.append(
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": base64.standard_b64encode(data).decode("ascii"),
+                            "format": mime.rsplit("/", 1)[-1],
+                        },
+                    }
+                )
             parts.append({"type": "text", "text": user})
             user_content: Any = parts
         else:
@@ -279,23 +380,8 @@ class OpenAICompatProvider(Provider):
             "max_tokens": max_tokens,
             "temperature": 0.4,
         }
-        # Размышления считаются в max_tokens И оплачиваются по цене выхода.
-        # Наши задачи структурные (разложить слова по блокам), глубокого
-        # рассуждения не требуют. Замерено на реальном ролике: с включёнными
-        # размышлениями `direct` съел все 16000 токенов, не выдал ни байта
-        # ответа (stop=length) и стоил $0.022 впустую. Выключаем по умолчанию.
-        if not self.thinking:
-            body["thinking"] = {"type": "disabled"}
-        elif effort in ("low", "medium", "high"):
-            body["reasoning_effort"] = effort
-        try:
-            resp = await http.post("/chat/completions", json=body)
-            resp.raise_for_status()
-            data = resp.json()
-        except httpx.HTTPStatusError as e:
-            raise _http_error(e) from e
-        except httpx.HTTPError as e:
-            raise ProviderError(f"{type(e).__name__}: {e}", retryable=True) from e
+        self._tune(body, model=model, schema=schema, effort=effort)
+        data = await self._send(body, model=model)
 
         choice = (data.get("choices") or [{}])[0]
         usage = data.get("usage") or {}
@@ -312,12 +398,74 @@ class OpenAICompatProvider(Provider):
             output_tokens=int(usage.get("completion_tokens") or 0),
             cache_read_tokens=cached,
             stop_reason=str(choice.get("finish_reason") or ""),
+            billed_usd=_billed_usd(usage.get("cost")),
         )
+
+    async def _send(self, body: dict[str, Any], *, model: str) -> dict[str, Any]:
+        return await self._post(body)
 
     async def aclose(self) -> None:
         if self._http is not None:
             await self._http.aclose()
             self._http = None
+
+
+class FalProvider(OpenAICompatProvider):
+    """Модели через fal: его OpenRouter-шлюз, тот же диалект /chat/completions.
+
+    Ключ один на всё — картинки бот рисует через fal же. Модели — те же Gemini,
+    что и напрямую, но без бесплатного тарифа: прямой ключ Gemini на сервере
+    упирался в 20 запросов в сутки на flash, а ролик тратит 3-5 таких вызовов.
+
+    Отличия от DeepSeek, замеренные на живом ключе:
+
+    - схема принуждается (`json_schema`), так что в промпт её не кладём;
+    - звук принимается (`input_audio`), корректор транскрипта его слушает;
+    - стоимость приходит в ответе (`usage.cost`) — с наценкой шлюза, которой
+      нет в нашей таблице цен;
+    - размышления у flash-lite отключаются, а у flash — нет: «Reasoning is
+      mandatory for this endpoint and cannot be disabled». Таким моделям шлём
+      минимальное усилие и запоминаем их на время жизни провайдера.
+    """
+
+    supports_schema = True
+    supports_audio = True
+    auth_scheme = "Key"
+
+    def __init__(
+        self, api_key: str, base_url: str, timeout: float = 180.0, *, thinking: bool = False
+    ) -> None:
+        super().__init__(api_key, base_url, timeout, thinking=thinking)
+        #: модели, которым нельзя отключить размышления
+        self._must_reason: set[str] = set()
+
+    def _tune(
+        self, body: dict[str, Any], *, model: str, schema: dict[str, Any], effort: str | None
+    ) -> None:
+        # `strict` выключен: строгий режим требует от схемы того, чего в наших
+        # схемах нет (все поля обязательные, `additionalProperties: false`
+        # повсюду). Форму всё равно проверяет `jsonshape.check`.
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "strict": False, "schema": schema},
+        }
+        if self.thinking and effort in ("low", "medium", "high"):
+            body["reasoning"] = {"effort": effort}
+        elif model in self._must_reason:
+            body["reasoning"] = {"effort": "minimal"}
+        else:
+            body["reasoning"] = {"enabled": False}
+
+    async def _send(self, body: dict[str, Any], *, model: str) -> dict[str, Any]:
+        try:
+            return await self._post(body)
+        except ProviderError as e:
+            if e.status != 400 or "reasoning is mandatory" not in str(e).lower():
+                raise
+        log.info("%s: размышления не отключаются — шлю минимальное усилие", model)
+        self._must_reason.add(model)
+        body["reasoning"] = {"effort": "minimal"}
+        return await self._post(body)
 
 
 # --------------------------------------------------------------------------- gemini
@@ -360,11 +508,12 @@ class GeminiProvider(Provider):
         try:
             resp = await http.post(f"/models/{model}:generateContent", json=body)
             resp.raise_for_status()
-            return resp.json()
         except httpx.HTTPStatusError as e:
             raise _http_error(e) from e
         except httpx.HTTPError as e:
             raise ProviderError(f"{type(e).__name__}: {e}", retryable=True) from e
+        # Та же дыра, что у openai-совместимых: 2xx с телом не-JSON (дефект №3).
+        return _json_object(resp)
 
     async def complete(
         self, *, model, system, user, schema, images=(), max_tokens=16_000, effort=None, audio=None
@@ -466,6 +615,7 @@ PROVIDERS: dict[str, type[Provider]] = {
     "deepseek": OpenAICompatProvider,
     "openai": OpenAICompatProvider,
     "gemini": GeminiProvider,
+    "fal": FalProvider,
 }
 
 
@@ -478,7 +628,7 @@ def make_provider(
         raise ValueError(
             f"неизвестный провайдер {name!r}; доступны: {', '.join(sorted(PROVIDERS))}"
         ) from None
-    if cls in (OpenAICompatProvider, GeminiProvider):
+    if cls in (OpenAICompatProvider, FalProvider, GeminiProvider):
         provider: Provider = cls(api_key, base_url, timeout, thinking=thinking)  # type: ignore[call-arg]
     else:
         provider = cls(api_key, base_url, timeout)
