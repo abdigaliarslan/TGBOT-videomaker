@@ -16,12 +16,16 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
-from src.core.edl import EDL, Cut, Word
-from src.core.preset import Crop, Grade, load_preset
+from src.core.config import Settings
+from src.core.edl import EDL, CaptionBlock, CaptionWord, Cut, Word, kept_word_indices
+from src.core.preset import Crop, Grade, Preset, load_preset
 from src.pipeline.crop import (
     ANALYZE_HEIGHT,
     _log_framing,
@@ -1149,8 +1153,9 @@ def test_autocrop_warns_when_preset_and_framing_are_missing(caplog):
     Оба входа `autocrop` необязательные, и подстановка по умолчанию отменяет по
     целой фазе: без пресета цветокор берётся из конфига (а пресеты различаются
     именно им — glass с виньеткой, bold без), без крупности весь ролик снимается
-    одним окном. Ровно так сегодня зовут `autocrop` в `pipeline/job.py` и
-    `worker/tasks.py`, поэтому дефект обязан быть виден в логе.
+    одним окном. Так `autocrop` зовут вручную и так его звали из пайплайна, пока
+    проводку не починили (см. тесты ниже), — то есть деградация возможна и обязана
+    быть слышна в логе, а не только в кадре.
     """
     from src.core.config import settings
 
@@ -1164,6 +1169,175 @@ def test_autocrop_warns_when_preset_and_framing_are_missing(caplog):
     with caplog.at_level(logging.WARNING, logger="src.pipeline.crop"):
         warn_missing_inputs(load_preset("bold"), [(0.0, 5.0, "wide")], settings)
     assert not caplog.records
+
+
+# ------------------------------------------------- проводка: пресет и крупность в кроп
+
+
+class _CropReached(Exception):
+    """Шпион дошёл до кропа. Дальше в прогоне только рендер, и тесту он не нужен."""
+
+
+def valid_edl_of(cuts: list[tuple[float, float, str, str]], duration: float) -> EDL:
+    """`edl_of`, доведённый до валидатора: каждое оставшееся слово лежит в блоке.
+
+    Пайплайн зовёт `validate_edl` и на нём останавливается, а `edl_of` писался под
+    чистые функции крупности, где субтитров нет вовсе.
+    """
+    edl = edl_of(cuts, duration)
+    edl.captions = [
+        CaptionBlock(words=[CaptionWord(word_idx=i)]) for i in kept_word_indices(edl)
+    ]
+    return edl
+
+
+def spy_on_autocrop(monkeypatch, target: str) -> dict[str, Any]:
+    """Подменяет `autocrop` В ТОЧКЕ ВЫЗОВА и возвращает словарь его kwargs.
+
+    Уровень выбран не от лени: настоящий `autocrop` гоняет по кадрам детектор лиц
+    и поверх него ffmpeg — минуты на вызов, место таким прогонам в slow-тестах
+    ниже. Здесь проверяется ровно то, что ломалось, — проводка: вызывающий обязан
+    отдать кропу пресет задачи и крупность из EDL. Что кроп делает с ними дальше,
+    держат `test_grade_filter_from_preset` и тесты графа фильтров.
+
+    Цель задаётся строкой, потому что точки разные: `job.py` берёт `autocrop` в
+    своё пространство имён при импорте модуля, а `tasks.py` импортирует его внутри
+    функции — там подменять нужно сам `src.pipeline.crop`.
+    """
+    seen: dict[str, Any] = {}
+
+    def spy(src, dst, **kwargs):
+        seen.update(kwargs)
+        raise _CropReached
+
+    monkeypatch.setattr(target, spy)
+    return seen
+
+
+def assert_crop_got(seen: dict[str, Any], *, preset: str, instead_of: str, framing) -> None:
+    """До кропа доехали пресет задачи и крупность, а не подстановки по умолчанию.
+
+    Сверка идёт по строке цветокора, а не по имени: в кадре видно её, а не имя.
+    `instead_of` — пресет из конфига, тот самый, который кроп подставит, если
+    вызов снова уронит свой. Он проверяется отдельно: подстановка обязана давать
+    ДРУГУЮ строку, иначе сравнение ничего не стоит (сегодня различие в виньетке —
+    0.22 у glass и pulse против нуля у bold). Числа из JSON здесь не повторяются
+    намеренно: такой тест падает на правке данных, а не на поломке кода.
+
+    Имя пресета строкой — тоже «доехал»: `autocrop` принимает `Preset | str |
+    None` и сам резолвит строку. Проверяется потеря пресета, а не стиль вызова,
+    поэтому строка разворачивается здесь, а не объявляется ошибкой.
+    """
+    got = seen.get("preset")
+    if isinstance(got, str):
+        got = load_preset(got)
+    assert isinstance(got, Preset), f"пресет до кропа не доехал: {seen.get('preset')!r}"
+    assert got.name == preset
+    assert grade_filter(got.grade) == grade_filter(load_preset(preset).grade)
+    assert grade_filter(got.grade) != grade_filter(load_preset(instead_of).grade), (
+        f"цветокор {preset} и {instead_of} совпал — тест перестал что-либо различать"
+    )
+    assert seen.get("framing") == framing
+
+
+async def test_process_from_edl_sends_job_preset_to_crop(tmp_path, monkeypatch):
+    """§0.4 «сохранённый EDL + другой пресет = новое видео» — вместе с цветокором.
+
+    Пресет задачи `glass` против `bold` в конфиге: виньетка 0.22 против нуля, то
+    есть разница видна прямо в строке фильтра. Если вызов снова перестанет
+    передавать пресет, кроп молча возьмёт `cfg.default_preset` — и тест упадёт.
+    """
+    from src.pipeline.job import process_from_edl
+
+    edl = valid_edl_of([(0.0, 5.0, "hook", "tight"), (5.0, 12.0, "keep", "wide")], 12.0)
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"")  # до ffmpeg дело не доходит: нарезка и кроп подменены
+    cfg = Settings(_env_file=None, default_preset="bold", audio_post_enabled=False)
+    monkeypatch.setattr("src.pipeline.job.probe", lambda *a, **k: info_of(1920, 1080, 12.0))
+    monkeypatch.setattr("src.pipeline.job.is_playable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "src.pipeline.job.apply_cuts", lambda edl, src, dst, **k: shutil.copy2(src, dst)
+    )
+    seen = spy_on_autocrop(monkeypatch, "src.pipeline.job.autocrop")
+
+    with pytest.raises(_CropReached):
+        await process_from_edl(src, tmp_path / "work", edl, preset="glass", cfg=cfg)
+
+    assert_crop_got(seen, preset="glass", instead_of="bold", framing=framing_spans(edl))
+
+
+async def test_process_video_sends_job_preset_to_crop(tmp_path, monkeypatch):
+    """Основной прогон: цветокор задачи (Ф3) и крупность с резов (Ф6) доезжают.
+
+    ASR и режиссёр подменены — они стоят минуты и к проводке кропа отношения не
+    имеют, зато подменённый режиссёр отдаёт известный EDL, и крупность можно
+    сверить точно. Пресет задачи `pulse` против `bold` в конфиге.
+    """
+    from src.pipeline.asr import ASRResult
+    from src.pipeline.job import process_video
+
+    edl = valid_edl_of([(0.0, 4.0, "hook", "tight"), (4.0, 12.0, "keep", "wide")], 12.0)
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"")
+    cfg = Settings(_env_file=None, default_preset="bold", audio_post_enabled=False)
+
+    async def fake_direct(*a, **k):
+        return edl
+
+    monkeypatch.setattr("src.pipeline.job.probe", lambda *a, **k: info_of(1920, 1080, 12.0))
+    monkeypatch.setattr("src.pipeline.job.is_playable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "src.pipeline.job.apply_cuts", lambda edl, src, dst, **k: shutil.copy2(src, dst)
+    )
+    monkeypatch.setattr(
+        "src.pipeline.job.transcribe",
+        lambda *a, **k: ASRResult(words=list(edl.words), language="ru", backend="test", model="—"),
+    )
+    monkeypatch.setattr("src.pipeline.job.direct", fake_direct)
+    seen = spy_on_autocrop(monkeypatch, "src.pipeline.job.autocrop")
+
+    with pytest.raises(_CropReached):
+        await process_video(src, tmp_path / "work", preset="pulse", cfg=cfg)
+
+    assert_crop_got(seen, preset="pulse", instead_of="bold", framing=framing_spans(edl))
+
+
+async def test_rerender_job_sends_job_preset_to_crop(tmp_path, monkeypatch):
+    """Перерендер — тот самый сценарий §0.4: тот же монтажный лист, другая тема.
+
+    Вокруг кропа подменён весь воркер (БД, исходник, нарезка): смысл теста — одна
+    строка вызова, остальное к ней отношения не имеет. Без пресета перерендер
+    менял бы только субтитры, а картинка оставалась бы в цветокоре из конфига.
+    """
+    from src.worker import tasks
+
+    edl = valid_edl_of([(0.0, 6.0, "hook", "tight"), (6.0, 12.0, "keep", "wide")], 12.0)
+    job = SimpleNamespace(id="job-1", edl=edl.model_dump(), options={"cut": True})
+
+    async def fake_get_job(job_id):
+        return job
+
+    async def fake_fetch(job, dst):
+        Path(dst).write_bytes(b"")
+        return Path(dst)
+
+    monkeypatch.setattr(
+        tasks,
+        "settings",
+        Settings(_env_file=None, work_dir=tmp_path, default_preset="bold", debug=True),
+    )
+    monkeypatch.setattr("src.db.repo.get_job", fake_get_job)
+    monkeypatch.setattr(tasks, "fetch_source", fake_fetch)
+    monkeypatch.setattr("src.pipeline.probe.probe", lambda *a, **k: info_of(1920, 1080, 12.0))
+    monkeypatch.setattr(
+        "src.pipeline.cut.apply_cuts", lambda edl, src, dst, **k: shutil.copy2(src, dst)
+    )
+    seen = spy_on_autocrop(monkeypatch, "src.pipeline.crop.autocrop")
+
+    with pytest.raises(_CropReached):
+        await tasks.rerender_job({"redis": None}, "job-1", "glass")
+
+    assert_crop_got(seen, preset="glass", instead_of="bold", framing=framing_spans(edl))
 
 
 # ------------------------------------------------------------------ sendcmd
