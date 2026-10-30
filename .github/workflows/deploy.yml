@@ -36,18 +36,55 @@ jobs:
       - name: Python-зависимости
         run: pip install -e ".[dev]"
 
-      - name: pytest
-        run: python -m pytest -q
-
+      # Node стоит ДО pytest, а не после: самые сильные тесты в наборе —
+      # пробники движения (`render/card_probe.mjs`) и линейка геометрии
+      # (`render/measure.mjs`), и без `render/node_modules` они не падают, а
+      # ПРОПУСКАЮТСЯ. Гейт из пропусков ничего не сторожит.
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: render/package-lock.json
 
+      - name: Зависимости рендера
+        working-directory: render
+        run: npm ci --no-audit --no-fund
+
+      # Линейка геометрии меряет блок в НАСТОЯЩЕМ Chromium и тоже пропускается,
+      # если браузера нет (`_looks_like_a_missing_browser`). На раннере Chrome
+      # предустановлен, и `ensureBrowser` ничего не скачивает — но проверить это
+      # дешевле, чем узнать по зелёной галочке на непройденном тесте.
+      - name: Chromium для линейки
+        working-directory: render
+        run: npm run browser
+
       - name: Типы рендера
         working-directory: render
-        run: npm ci --no-audit --no-fund && npx tsc --noEmit -p .
+        run: npx tsc --noEmit -p .
+
+      - name: pytest
+        run: python -m pytest -q
+
+      # Кэш модели faster-whisper (464 МБ): её тянет единственный slow-тест,
+      # `test_asr_output_feeds_director`. Без кэша это скачивание на КАЖДОЙ
+      # выкладке плюс отказ деплоя, если HuggingFace недоступен.
+      - name: Кэш модели ASR
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-faster-whisper-small-${{ runner.os }}
+
+      # Отдельным шагом, а не одним прогоном: в логе видно, сколько стоят
+      # медленные тесты, и падение не путается с быстрыми. `-m 'not slow'` стоит
+      # в addopts pyproject.toml, поэтому без этого шага сюда не доезжали ни
+      # пробники движения, ни сверка с Chromium, ни автокроп — то есть всё, что
+      # проверяет рендер.
+      #
+      # `-rs` печатает причины пропусков: один slow-тест ASR пропускается
+      # сознательно (нужен whisperx, он не в dev-зависимостях), и пропуск — это
+      # зелёный прогон. Выкладку валит только провал.
+      - name: pytest (slow)
+        run: python -m pytest -q -m slow -rs
 
   deploy:
     needs: test
