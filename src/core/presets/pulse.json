@@ -21,18 +21,18 @@
     "shadow": "#000000"
   },
   "panel": {
-    "enabled": false,
+    "enabled": true,
     "color": "#0B0F14",
     "opacity": 0.0,
-    "blur": 0,
+    "blur": 12,
     "radius": 30,
     "padding_x": 34,
     "padding_y": 22,
     "border_color": "#FFFFFF",
-    "border_opacity": 0.0,
-    "border_width": 1,
+    "border_opacity": 0.55,
+    "border_width": 2,
     "glass_color": "#FFFFFF",
-    "glass_opacity": 0.0
+    "glass_opacity": 0.14
   },
   "caption": {
     "position": "bottom",
@@ -42,7 +42,20 @@
     "max_lines": 2,
     "min_word_scale": 0.4,
     "fill_max_scale": 2.0,
-    "pinned": true
+    "pinned": true,
+    "quiet": {
+      "enabled": true,
+      "position": "top",
+      "font_size": 41,
+      "margin": 140,
+      "line_height": 1.2,
+      "align": "left",
+      "edge": "left",
+      "edge_ratio": 0.18,
+      "max_lines": 4,
+      "max_line_width_ratio": 0.3,
+      "panel": false
+    }
   },
   "geometry": {
     "max_line_width_ratio": 0.74
@@ -64,7 +77,7 @@
     "spring_stiffness": 190.0,
     "spring_mass": 0.7,
     "block_in_ms": 140,
-    "block_out_ms": 110,
+    "block_out_ms": 70,
     "block_gap_ms": 60,
     "block_in_zoom": 0.03,
     "block_shift_px": 22,

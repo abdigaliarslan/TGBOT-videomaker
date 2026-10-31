@@ -221,6 +221,12 @@ class LLMClient:
         prompt = load_prompt(prompt_name)
         model = self.cfg.model_for_tier(model_tier)
 
+        # Подстановка идёт и в системную часть. Кеш от этого не страдает: в
+        # системной части стоят только значения из конфига (лимиты регистров), а
+        # они между роликами одинаковы — меняется транскрипт, и он в
+        # пользовательской части. Без этого лимит приходилось дублировать
+        # числом в тексте правил, и правило спорило бы с конфигом.
+        system_text = render(prompt.system, variables)
         user_text = render(prompt.user, variables)
         if not provider.supports_schema:
             # Провайдер не умеет принуждать к схеме — кладём её в промпт,
@@ -251,7 +257,7 @@ class LLMClient:
             try:
                 result = await provider.complete(
                     model=model,
-                    system=prompt.system,
+                    system=system_text,
                     user=user_text,
                     schema=schema,
                     images=image_list,

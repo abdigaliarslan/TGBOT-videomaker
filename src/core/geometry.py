@@ -718,14 +718,27 @@ def line_box_height(sizes: Iterable[float], preset: Any) -> float:
 
 
 def block_rect(
-    position: str, text_w: float, text_h: float, preset: Any, frame_size: tuple[int, int]
+    position: str,
+    text_w: float,
+    text_h: float,
+    preset: Any,
+    frame_size: tuple[int, int],
+    *,
+    left: float | None = None,
 ) -> Rect:
     """Коробка блока вокруг текста: паддинги, рамка и привязка к краю кадра.
 
     Одно место на оба пути расчёта субтитра. Числа обязаны совпадать с
     Captions.tsx: паддинг и рамка панели, отступ от края с нижней границей по
-    безопасной зоне, центрирование по горизонтали (блок центрирован всегда,
-    `caption.align` управляет выключкой ВНУТРИ панели).
+    безопасной зоне, центрирование по горизонтали (`caption.align` управляет
+    выключкой ВНУТРИ панели, а не местом панели в кадре).
+
+    `left` — левый край блока в пикселях, когда он прижат к краю кадра, а не
+    центрирован: так стоит тихий регистр субтитра (STYLE_PLAN §1.4.1, «влево, у
+    левого края»). `None` — центр, то есть единственное поведение, какое было до
+    второго регистра. Число приходит готовым (`Quiet.left_x`), и тем же числом
+    Captions.tsx ставит `paddingLeft`: иначе прямоугольник плана обещал бы одно
+    место, а Chromium рисовал другое.
     """
     width, height = frame_size
     panel = preset.panel
@@ -741,7 +754,7 @@ def block_rect(
         y = (height - box_h) / 2
     else:
         y = height - margin - box_h
-    return Rect((width - box_w) / 2, y, box_w, box_h)
+    return Rect((width - box_w) / 2 if left is None else left, y, box_w, box_h)
 
 
 class _HasLines(Protocol):

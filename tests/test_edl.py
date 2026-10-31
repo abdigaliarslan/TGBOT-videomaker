@@ -157,8 +157,113 @@ def test_one_accent_per_block_is_fine():
 
 
 def test_block_word_count_limit():
-    edl = base_edl(words=words(6), captions=blocks([[0, 1, 2, 3, 4, 5]]))
+    edl = base_edl(words=words(9), captions=blocks([list(range(9))]))
     assert any("допустимо" in e for e in validate_edl(edl))
+
+
+# ------------------------------------------------- два регистра субтитра (§1.4.1)
+
+
+def test_a_quiet_block_is_long_top_and_without_gold():
+    """Тихий регистр: 6-8 слов, наверху, без выделенного слова.
+
+    Это второй стиль субтитра из эталона («Я лишь отправляю ему сырое видео»,
+    3.6-5.2 с): четыре строки мелким кеглем у левого края, золота нет ни одного
+    слова. Валидатор обязан такой блок ПРОПУСКАТЬ — до этого потолок в пять слов
+    делал его невозможным в принципе.
+    """
+    edl = base_edl(words=words(7), captions=blocks([list(range(7))]))
+    edl.captions[0].position = "top"
+    assert validate_edl(edl) == []
+
+
+def test_a_long_block_outside_the_top_is_refused():
+    """Шесть слов кеглем плаката — это строка, уехавшая за кадр.
+
+    Длинный блок существует ровно под тихий регистр, а тихий висит наверху.
+    Ошибка приезжает модели текстом на ретрае: это не перебор с приёмом, а
+    непонятый регистр, и выбирать регистр за неё мы не будем.
+    """
+    edl = base_edl(words=words(7), captions=blocks([list(range(7))]))
+    errors = validate_edl(edl)
+    assert any("тихого блока" in e and "top" in e for e in errors), errors
+
+
+def test_gold_in_a_long_block_is_refused():
+    """В тихом блоке выделенного слова нет: мелкое золото — пятно, не иерархия."""
+    edl = base_edl(
+        words=words(7), captions=blocks([list(range(7))], accents={3: Emphasis.ACCENT})
+    )
+    edl.captions[0].position = "top"
+    errors = validate_edl(edl)
+    assert any("выделенного слова нет" in e for e in errors), errors
+
+
+def test_a_poster_at_the_top_keeps_its_gold():
+    """Наверху стоят ОБА регистра, и плакат там остаётся плакатом.
+
+    Это замер, а не допущение: верх эталона занят трижды, и один из трёх блоков
+    — крупный ЗОЛОТОЙ плакат на 9.2-12.0 с, поднятый туда потому, что центр
+    отдан вставке (§1.4.1, §1.5). Пока регистр выводился из позиции, такой блок
+    был невыразим: любой верхний блок терял золото.
+    """
+    edl = base_edl(
+        words=words(4), captions=blocks([list(range(4))], accents={2: Emphasis.ACCENT})
+    )
+    edl.captions[0].position = "top"
+    edl.captions[0].quiet = False
+    assert validate_edl(edl) == []
+
+
+def test_a_declared_quiet_block_refuses_gold():
+    """Заявка «тихий» с золотом — противоречие, и длина тут ни при чём.
+
+    Прежнее правило смотрело на длину, и короткий тихий блок с золотом
+    проскакивал. Теперь спрашивается объявленный регистр.
+    """
+    edl = base_edl(
+        words=words(4), captions=blocks([list(range(4))], accents={1: Emphasis.ACCENT})
+    )
+    edl.captions[0].position = "top"
+    edl.captions[0].quiet = True
+    assert any("выделенного слова нет" in e for e in validate_edl(edl))
+
+
+def test_a_declared_quiet_block_must_stand_at_the_top():
+    """Тихий регистр измерен ровно в одном месте кадра — наверху (§1.4.1)."""
+    edl = base_edl(words=words(4), captions=blocks([list(range(4))]))
+    edl.captions[0].quiet = True
+    assert any("объявлен тихим" in e and "top" in e for e in validate_edl(edl))
+
+
+def test_a_quiet_block_carries_no_panel():
+    """Плашка — примета плаката: у тихого регистра её нет ни на одном кадре."""
+    edl = base_edl(words=words(7), captions=blocks([list(range(7))]))
+    edl.captions[0].position = "top"
+    edl.captions[0].quiet = True
+    edl.captions[0].panel = True
+    assert any("матовое стекло носит" in e for e in validate_edl(edl))
+
+
+def test_a_list_without_the_register_field_validates_as_before():
+    """Лист, сохранённый до появления поля, проходит валидацию как проходил.
+
+    Регистра в нём нет, и разрешается он ДЛИНОЙ: длинный блок наверху — тихий
+    (и золота ему нельзя), короткий наверху — плакат (и золото ему можно, у
+    glass с bold верхний блок именно плакат). Позицией тут разрешать нельзя:
+    темы валидатор не знает вовсе.
+    """
+    long_top = base_edl(words=words(7), captions=blocks([list(range(7))]))
+    long_top.captions[0].position = "top"
+    assert long_top.captions[0].quiet is None
+    assert validate_edl(long_top) == []
+
+    short_top = base_edl(
+        words=words(4), captions=blocks([list(range(4))], accents={2: Emphasis.ACCENT})
+    )
+    short_top.captions[0].position = "top"
+    assert short_top.captions[0].quiet is None
+    assert validate_edl(short_top) == []
 
 
 # ------------------------------------------------------------------ b-roll

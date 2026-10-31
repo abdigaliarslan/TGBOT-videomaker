@@ -26,6 +26,8 @@ from src.core.edl import (
     ANCHOR_TRACK_MAX,
     PANEL_MAX,
     BLOCK_MAX_WORDS,
+    BLOCK_POSTER_MAX_WORDS,
+    BLOCK_QUIET_MIN_WORDS,
     EDL,
     AnchorTrack,
     CaptionBlock,
@@ -308,10 +310,11 @@ def split_blocks(
     *,
     cfg: Settings | None = None,
 ) -> list[list[int]]:
-    """Детерминированная разбивка на блоки субтитров.
+    """Детерминированная разбивка на ПЛАКАТЫ — нижний регистр субтитра.
 
     Рвём по: концу предложения, заметной паузе, лимиту слов, лимиту символов.
-    Это же используется как фолбэк, если LLM недоступна.
+    Тихий регистр здесь не появляется: он не следствие лимитов, а решение, и
+    принимает его `compose_blocks`.
     """
     cfg = cfg or default_settings
     by_idx = {w.idx: w for w in words}
@@ -352,11 +355,101 @@ def split_blocks(
     # блоку, но только если разрыв был счётным и склейка не ломает лимиты.
     if len(blocks) >= 2 and len(blocks[-1]) == 1 and not hard_break[-2]:
         prev_block, tail = blocks[-2], blocks[-1]
-        limit = min(cfg.sub_max_words + 1, BLOCK_MAX_WORDS)
+        limit = min(cfg.sub_max_words + 1, BLOCK_POSTER_MAX_WORDS)
         joined_chars = sum(len(by_idx[i].text) + 1 for i in (*prev_block, *tail))
         if len(prev_block) + 1 <= limit and joined_chars <= cfg.sub_max_chars * 1.35:
             blocks[-2].extend(blocks.pop())
     return blocks
+
+
+# Сколько секунд речи приходится на один тихий блок. В эталоне тихий блок один
+# на 23.6 с (§1.4.1), и 12 с — это та же плотность, записанная так, чтобы на
+# ролике эталонной длины выходил ровно один (`int(23.6/12) == 1`), а на минуте —
+# пять. Приём редкий: когда субтитры уезжают наверх часто, это читается не как
+# смена регистра, а как то, что они там и живут.
+QUIET_EVERY_SECONDS = 12.0
+# Сколько слов обязано остаться прогону после тихого блока. Точка стоит в конце
+# прогона, и этот конец — пик: набрать его мелким кеглем значит выбросить
+# единственный кадр, ради которого блок был коротким.
+QUIET_POSTER_TAIL = 2
+
+
+def _breath_runs(
+    words: Sequence[Word], kept_idx: Sequence[int], cfg: Settings
+) -> list[list[int]]:
+    """Речь, разрезанная там, где говорящий дышит: конец предложения и пауза.
+
+    Это те же два «жёстких» разрыва, что и в `split_blocks`. Всё, что внутри
+    прогона, — связный ход мысли: разрывы по счёту слов и по длине строки
+    расставлены версткой, а не речью, и выбирать по ним регистр нельзя.
+    """
+    by_idx = {w.idx: w for w in words}
+    runs: list[list[int]] = []
+    current: list[int] = []
+    for idx in kept_idx:
+        w = by_idx[idx]
+        if current and (w.start - by_idx[current[-1]].end) > cfg.sub_gap_split:
+            runs.append(current)
+            current = []
+        current.append(idx)
+        if SENTENCE_END.search(w.text):
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    return runs
+
+
+def compose_blocks(
+    words: Sequence[Word],
+    kept_idx: Sequence[int],
+    *,
+    cfg: Settings | None = None,
+) -> list[tuple[list[int], str, bool]]:
+    """Раскадровка субтитров в ДВА регистра: (слова, позиция, тихий ли) на блок.
+
+    Регистр возвращается ТРЕТЬИМ значением, а не выводится потом из позиции:
+    регистр и позиция независимы (§1.4.1 — наверху стоят оба регистра), и
+    фолбэк-режиссёр объявляет свой выбор так же явно, как LLM-режиссёр.
+
+    Фолбэк обязан держать не только текст, но и облик. Замер золотой маски: у
+    эталона размер главного слова гуляет 2.7-7.5 % высоты кадра (медиана 4.5 %),
+    у нас 4.0-6.2 % (медиана 6.0 %) — потому что все блоки выходили одной длины
+    и после подгонки строки под ширину получались одного кегля. Разброс даёт
+    разная ДЛИНА блока, и в фолбэке её тоже надо выбирать, а не получать.
+
+    Тихий блок (§1.4.1) забирает ГОЛОВУ прогона, который открывает новое
+    предложение, а плакаты достаются хвосту. Это дешёвый заменитель смысла —
+    тот же приём, что у `lead_word`: начало фразы ставит условие и объясняет
+    («то есть если ты думаешь о том, что»), а точка стоит в конце, и конец
+    поэтому и есть пик, который мелким кеглем набирать нельзя. Первый прогон
+    ролика в кандидаты не входит: это хук, единственный блок, обязанный
+    удержать зрителя, и он плакат по определению.
+
+    Бюджет считается по длительности речи (QUIET_EVERY_SECONDS) и тратится на
+    самые ранние кандидаты — так же, как потолки привязки и плашки оставляют
+    ПЕРВЫЕ блоки.
+    """
+    cfg = cfg or default_settings
+    by_idx = {w.idx: w for w in words}
+    runs = _breath_runs(words, kept_idx, cfg)
+    span = (
+        by_idx[kept_idx[-1]].end - by_idx[kept_idx[0]].start if kept_idx else 0.0
+    )
+    budget = max(1, int(span / QUIET_EVERY_SECONDS))
+
+    out: list[tuple[list[int], str, bool]] = []
+    for n, run in enumerate(runs):
+        rest = run
+        take = min(BLOCK_MAX_WORDS, len(rest) - QUIET_POSTER_TAIL)
+        opens_sentence = n > 0 and bool(SENTENCE_END.search(by_idx[runs[n - 1][-1]].text))
+        if budget > 0 and opens_sentence and take >= BLOCK_QUIET_MIN_WORDS:
+            out.append((list(rest[:take]), "top", True))
+            rest = rest[take:]
+            budget -= 1
+        for group in split_blocks(words, rest, cfg=cfg):
+            out.append((group, "auto", False))
+    return out
 
 
 # --------------------------------------------------------------------------- сборка EDL
@@ -376,6 +469,10 @@ def deterministic_edl(
     не разбор смысла, а защита от стены ровного крупного текста: после С1 кегль
     внутри блока стал иерархией, и блок без выделенного слова читается хуже,
     чем блок с приблизительно выбранным.
+
+    Регистров два, как и у LLM-пути (`compose_blocks`): иначе ролик, упавший в
+    фолбэк, терял не b-roll, а сам облик — все блоки одной длины и одного кегля.
+    В тихом блоке выделения нет по определению, и `lead_word` в него не лезет.
     """
     cfg = cfg or default_settings
     drop = hesitation_indices(words, cfg) if cut_pauses else set()
@@ -394,10 +491,13 @@ def deterministic_edl(
     kept = [w.idx for w in words if _is_kept(w, cuts)]
     by_idx = {w.idx: w for w in words}
     blocks: list[CaptionBlock] = []
-    for group in split_blocks(words, kept, cfg=cfg):
+    for group, position, quiet in compose_blocks(words, kept, cfg=cfg):
         # Иерархию кегля держим и здесь: без неё запасной режиссёр отдаёт стену
         # ровного крупного текста, а это заметнее, чем отсутствие b-roll.
-        lead = lead_word(group, by_idx)
+        # Исключение — тихий блок: в эталоне у него нет ни одного золотого
+        # слова (§1.4.1), и выделение в мелком кегле наверху это не иерархия, а
+        # пятно.
+        lead = None if quiet else lead_word(group, by_idx)
         blocks.append(
             CaptionBlock(
                 words=[
@@ -406,7 +506,11 @@ def deterministic_edl(
                         emphasis=Emphasis.ACCENT if i == lead else Emphasis.NONE,
                     )
                     for i in group
-                ]
+                ],
+                position=position,  # type: ignore[arg-type]
+                # Регистр объявляем, а не оставляем на догадку: иначе плакат,
+                # который уклонение подняло наверх, потерял бы золото у pulse.
+                quiet=quiet,
             )
         )
     edl.captions = blocks
@@ -448,20 +552,30 @@ def cover_missing(
 
     out: list[CaptionBlock] = []
     for b in blocks:
-        if len(b.words) <= BLOCK_MAX_WORDS:
+        # Потолок у регистров разный: плакату больше BLOCK_POSTER_MAX_WORDS
+        # слов нельзя (строка уедет за кадр), тихий блок держит BLOCK_MAX_WORDS.
+        # Резать тихий блок по плакатному потолку значило бы разменять его на
+        # два плаката и потерять регистр из-за одного досыпанного слова.
+        # Спрашиваем РЕГИСТР, а не позицию: наверху стоят оба (§1.4.1).
+        limit = BLOCK_MAX_WORDS if b.quiet_register() else BLOCK_POSTER_MAX_WORDS
+        if len(b.words) <= limit:
             out.append(b)
             continue
-        for k in range(0, len(b.words), BLOCK_MAX_WORDS):
+        for k in range(0, len(b.words), limit):
             out.append(
                 CaptionBlock(
-                    words=b.words[k : k + BLOCK_MAX_WORDS],
+                    words=b.words[k : k + limit],
                     position=b.position,
+                    quiet=b.quiet,
                     anchor_track=b.anchor_track,
                     panel=b.panel,
                 )
             )
     for b in out:
-        if any(cw.emphasis != Emphasis.NONE for cw in b.words):
+        # Золото досыпаем только плакату: у тихого регистра выделенного слова
+        # нет вовсе. Регистр спрашиваем у блока — у куска, отрезанного от
+        # длинного тихого блока, длина уже плакатная, а регистр остался тихим.
+        if any(cw.emphasis != Emphasis.NONE for cw in b.words) or b.quiet_register():
             continue
         lead = lead_word([cw.word_idx for cw in b.words], by_idx)
         for cw in b.words:
@@ -544,8 +658,33 @@ def edl_from_plan(
             continue
         accent_word = raw.get("accent_word")
         accent_kind = raw.get("accent")
+        position = raw.get("position") or "auto"
+        # Регистр — заявка режиссёра (§1.4.1), а не догадка по длине или позиции:
+        # наверху стоят ОБА регистра, и плакат, поднятый наверх поверх вставки,
+        # обязан сохранить золото (эталон, 9.2-12.0 с). Схема `direct` поле
+        # требует, но план может приехать и мимо неё (ручная правка, чужой
+        # инструмент) — тогда заявки нет и регистр остаётся неразрешённым, как у
+        # листа, сохранённого до появления поля.
+        declared = raw.get("register")
+        quiet = declared == "quiet" if declared in ("poster", "quiet") else None
+        if len(idxs) > BLOCK_POSTER_MAX_WORDS and quiet is not True:
+            # Длиннее плаката — тихий регистр по построению: столько слов кеглем
+            # плаката дают строку за краем кадра. Заявку правим молча — это
+            # перебор с длиной, а не непонятый регистр, и ретрай тут ничего не
+            # добавит.
+            if quiet is False:
+                log.info("плакат из %d слов: регистр поправлен на тихий", len(idxs))
+            quiet = True
         emphasis_map: dict[int, Emphasis] = {}
-        if isinstance(accent_word, int) and accent_word in idxs and accent_kind in ("accent", "shout"):
+        if quiet:
+            # У тихого регистра золота нет ни одного слова. Акцент, если модель
+            # его всё же назвала, снимаем молча — это перебор с приёмом, а не
+            # ошибка формы, и он дешевле ретрая (так же устроены `anchor_track`
+            # и `panel`). `lead_word` сюда тем более не лезет: С3 защищает плакат
+            # от стены ровного крупного текста, а в мелком кегле выделять нечего.
+            if accent_kind:
+                log.info("тихий блок из %d слов: акцент снят (§1.4.1)", len(idxs))
+        elif isinstance(accent_word, int) and accent_word in idxs and accent_kind in ("accent", "shout"):
             emphasis_map[accent_word] = Emphasis(accent_kind)
         else:
             # Режиссёр не назвал слово — поднимаем сами (С3, см. `lead_word`).
@@ -558,14 +697,24 @@ def edl_from_plan(
                     CaptionWord(word_idx=i, emphasis=emphasis_map.get(i, Emphasis.NONE))
                     for i in idxs
                 ],
-                position=raw.get("position") or "auto",
+                position=position,
+                quiet=quiet,
                 # Модель отвечает булевым флагом, а не структурой: НУЖЕН ли приём
                 # здесь — вопрос смысла и её работа, а насколько выше головы
                 # висит текст — ремесло, и оно живёт в значениях по умолчанию
                 # (§0). Заодно модели нечего сломать: диапазонов, которые она
                 # может нарушить, у неё просто нет.
-                anchor_track=AnchorTrack() if raw.get("follow_face") else None,
-                panel=bool(raw.get("panel")),
+                #
+                # На тихом блоке привязки не бывает: он стоит у левого края
+                # кадра (§1.4.1), а привязка водит блок за головой — две
+                # раскладки на один блок, и побеждает та, что приехала позже.
+                anchor_track=(
+                    AnchorTrack() if raw.get("follow_face") and not quiet else None
+                ),
+                # Плашку у тихого блока снимаем по тому же праву, что и акцент:
+                # в эталоне тихий регистр её не носит ни разу (§1.4.1), а
+                # противоречивая заявка дешевле в правке, чем в ретрае.
+                panel=bool(raw.get("panel")) and not quiet,
             )
         )
 
@@ -795,7 +944,13 @@ async def direct(
         "language": language or cfg.whisper_language or "auto",
         "duration": f"{source_duration:.1f}",
         "word_count": str(len(words)),
-        "max_words_per_block": str(cfg.sub_max_words + 1),
+        # Потолок плаката — из конфига, но не выше жёсткого: валидатор режет по
+        # BLOCK_POSTER_MAX_WORDS, и обещать модели больше значит заказывать себе
+        # ретрай. Границы тихого регистра — константы: они не настройка, а форма
+        # четырёх строк мелким кеглем (§1.4.1).
+        "max_words_per_block": str(min(cfg.sub_max_words + 1, BLOCK_POSTER_MAX_WORDS)),
+        "quiet_min_words": str(BLOCK_QUIET_MIN_WORDS),
+        "quiet_max_words": str(BLOCK_MAX_WORDS),
         "words_table": words_table(words),
     }
 

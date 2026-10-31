@@ -100,7 +100,9 @@ def test_valid_direct_plan_passes():
     plan = {
         "hook_end_word": 3,
         "drop_words": [0, 7],
-        "blocks": [{"words": [1, 2, 3], "accent_word": 2, "accent": "accent", "position": "auto", "follow_face": False}],
+        "blocks": [{"words": [1, 2, 3], "register": "poster",
+                    "accent_word": 2, "accent": "accent",
+                    "position": "auto", "follow_face": False}],
     }
     assert ok(plan, DIRECT_SCHEMA)
 
@@ -109,7 +111,8 @@ def test_direct_plan_with_null_accent_passes():
     plan = {
         "hook_end_word": None,
         "drop_words": [],
-        "blocks": [{"words": [0], "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
+        "blocks": [{"words": [0], "register": "poster",
+                    "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
     }
     assert ok(plan, DIRECT_SCHEMA)
 
@@ -122,17 +125,38 @@ def test_blocks_as_string_is_caught():
 def test_invented_effect_is_caught():
     plan = {
         "hook_end_word": None, "drop_words": [],
-        "blocks": [{"words": [0], "accent_word": 0, "accent": "радуга", "position": "auto", "follow_face": False}],
+        "blocks": [{"words": [0], "register": "poster",
+                    "accent_word": 0, "accent": "радуга",
+                    "position": "auto", "follow_face": False}],
     }
     assert any("не из набора" in e for e in jsonshape.check(plan, DIRECT_SCHEMA))
 
 
 def test_too_many_words_in_block_is_caught():
+    """Потолок схемы — потолок ТИХОГО регистра (8 слов, §1.4.1).
+
+    Плакату больше пяти нельзя, но это связь между полями (длина × позиция ×
+    акцент), а не форма одного поля: её держит `validate_edl`. Схема ловит
+    только блок, который не бывает ни тем, ни другим.
+    """
     plan = {
         "hook_end_word": None, "drop_words": [],
-        "blocks": [{"words": [0, 1, 2, 3, 4, 5, 6], "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
+        "blocks": [{"words": list(range(9)), "register": "quiet",
+                    "accent_word": None, "accent": None,
+                    "position": "top", "follow_face": False}],
     }
     assert any("максимум" in e for e in jsonshape.check(plan, DIRECT_SCHEMA))
+
+
+def test_a_quiet_length_block_fits_the_schema():
+    """Восемь слов схему не нарушают: это тихий блок, а не перебор."""
+    plan = {
+        "hook_end_word": None, "drop_words": [],
+        "blocks": [{"words": list(range(8)), "register": "quiet",
+                    "accent_word": None, "accent": None,
+                    "position": "top", "follow_face": False}],
+    }
+    assert jsonshape.check(plan, DIRECT_SCHEMA) == []
 
 
 def test_clean_schema_accepts_empty_fixes():

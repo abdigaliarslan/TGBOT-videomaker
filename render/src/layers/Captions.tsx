@@ -70,6 +70,62 @@ const blockOutFrames = (preset: Preset, fps: number): number => {
   return animFrames(Math.max(a.block_out_ms, animNum(a, "block_overlap_min_ms", 220)), fps);
 };
 
+// ------------------------------------------------------------------ регистр блока
+
+/**
+ * Тихий регистр субтитра (STYLE_PLAN §1.4.1).
+ *
+ * Регистров в эталоне ДВА, и верхний — не уменьшённый плакат: кегль 1.5 %
+ * высоты кадра против 6.2 %, золота нет ни одного слова, выключка влево у
+ * левого края, строк до четырёх. Пока стиль от позиции не зависел, верхний блок
+ * выезжал тем же огромным кеглем с золотым словом.
+ */
+type QuietRegister = NonNullable<Preset["caption"]["quiet"]>;
+
+const quietRegister = (preset: Preset, block: PlanBlock): QuietRegister | null => {
+  // Решает Python и присылает флагом (§0): регистр зависит от позиции, а
+  // позиция — от того, куда встала картинка. Выводить это здесь заново значило
+  // бы считать раскладку вторым кодом, который с Python разойдётся молча.
+  if (block.quiet !== true) return null;
+  const quiet = preset.caption.quiet;
+  return quiet && quiet.enabled ? quiet : null;
+};
+
+/**
+ * Пресет, которым нарисован ЭТОТ блок: тема или её тихий регистр.
+ *
+ * Подмена чисел, а не вторая ветка рисования: ниже всё считается от
+ * `font.size`, `caption.align` и панели, и регистр, выраженный пресетом,
+ * проходит через это как обычная тема. Ровно так же его считает Python
+ * (`preset.Quiet.preset`) — одна подмена на оба рендерера, поэтому сверка
+ * коробки блока с Chromium остаётся верной в обоих регистрах.
+ *
+ * `accent_scale`/`shout_scale` обнуляются вслед за Python: у тихого блока
+ * выделения нет вовсе, и в плане его слова приходят уже без него — числа
+ * остались бы висеть только на запасном пути, где кегля в плане нет.
+ */
+const registerPreset = (preset: Preset, block: PlanBlock): Preset => {
+  const quiet = quietRegister(preset, block);
+  if (!quiet) return preset;
+  return {
+    ...preset,
+    font: { ...preset.font, size: quiet.font_size },
+    caption: {
+      ...preset.caption,
+      margin: quiet.margin,
+      line_height: quiet.line_height,
+      align: quiet.align,
+    },
+    panel: { ...preset.panel, enabled: quiet.panel && preset.panel.enabled },
+    geometry: {
+      ...preset.geometry,
+      max_line_width_ratio:
+        quiet.max_line_width_ratio ?? preset.geometry.max_line_width_ratio,
+    },
+    animation: { ...preset.animation, accent_scale: 1, shout_scale: 1 },
+  };
+};
+
 const emphasisScale = (word: PlanWord, preset: Preset): number => {
   if (word.emphasis === "accent") return preset.animation.accent_scale;
   if (word.emphasis === "shout") return preset.animation.shout_scale;
@@ -610,16 +666,20 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
 
 export const Captions: React.FC<{ blocks: PlanBlock[]; preset: Preset }> = ({ blocks, preset }) => {
   const frame = useCurrentFrame();
-  const { fps, height } = useVideoConfig();
+  const { fps, width, height } = useVideoConfig();
   // Безопасная зона у края кадра: пресет может попросить margin 0, но прижатый
   // к краю текст обрезается плеером и интерфейсом ленты. Доля приезжает из
   // пресета — тем же числом её знает `geometry.safe_margin_y`.
-  const margin = Math.max(
-    preset.caption.margin,
-    Math.round(height * preset.geometry.safe_area_ratio),
-  );
+  //
+  // Считается по пресету БЛОКА, а не темы: у тихого регистра свой отступ от
+  // верхнего края (140 px против 380 у плаката), и этим же числом Python
+  // посчитал его прямоугольник.
+  const marginOf = (ps: Preset) =>
+    Math.max(ps.caption.margin, Math.round(height * ps.geometry.safe_area_ratio));
   // Хвост ровно тот же, что у Block: блок живёт на outFrames дольше своего
-  // конца и обязан пережить фильтр, иначе нахлёст срежется здесь.
+  // конца и обязан пережить фильтр, иначе нахлёст срежется здесь. Регистр на
+  // него не влияет: про вход и уход верхнего блока эталон ничего отдельного не
+  // говорит, и числа анимации у регистров общие.
   const tail = blockOutFrames(preset, fps);
 
   const visible = blocks.filter(
@@ -653,38 +713,51 @@ export const Captions: React.FC<{ blocks: PlanBlock[]; preset: Preset }> = ({ bl
   return (
     <>
       {/* Порядок сохраняем: во время нахлёста уходящий блок лежит под приходящим. */}
-      {visible.map((block) => (
-        <div
-          // Ключ — начало блока, а не его номер в ОТФИЛЬТРОВАННОМ списке: номер
-          // сдвигается, как только уходящий блок выпадает из фильтра, и React
-          // пересоздаёт узел приходящего прямо посреди его появления.
-          key={block.start}
-          style={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            alignItems: justify(block.position),
-            justifyContent: "center",
-            paddingTop: block.position === "top" ? margin : 0,
-            paddingBottom: block.position === "bottom" ? margin : 0,
-            fontFamily: `"ReelbotCaption", "${preset.font.family}", sans-serif`,
-            fontWeight: preset.font.weight,
-            fontSize: preset.font.size,
-            lineHeight: preset.caption.line_height,
-            letterSpacing: `${preset.font.letter_spacing}em`,
-            textAlign: preset.caption.align,
-            pointerEvents: "none",
-            // Смещение живёт на контейнере, а не на самом блоке: у блока свой
-            // transform под появление и уход, и складывать два движения в одну
-            // строку значило бы, что правка одного молча ломает другое.
-            transform: (([dx, dy]) =>
-              dx || dy ? `translate(${dx}px, ${dy}px)` : undefined)(anchorShift(block)),
-            willChange: block.anchor_path ? "transform" : undefined,
-          }}
-        >
-          <Block block={block} preset={preset} />
-        </div>
-      ))}
+      {visible.map((block) => {
+        // Пресет РЕГИСТРА этого блока: тема или её тихий верхний регистр.
+        // Кегль контейнера здесь не украшение — им рисуется пробел между
+        // словами и струт строки, и теми же числами Python мерил строку.
+        const ps = registerPreset(preset, block);
+        const quiet = quietRegister(preset, block);
+        // Тихий блок стоит у ЛЕВОГО края кадра, а не по центру (§1.4.1).
+        // Отступ считается той же формулой, что `Quiet.left_x` в Python, — без
+        // округления, иначе прямоугольник плана и бокс в кадре разойдутся.
+        const left = quiet && quiet.edge === "left" ? width * quiet.edge_ratio : null;
+        const margin = marginOf(ps);
+        return (
+          <div
+            // Ключ — начало блока, а не его номер в ОТФИЛЬТРОВАННОМ списке: номер
+            // сдвигается, как только уходящий блок выпадает из фильтра, и React
+            // пересоздаёт узел приходящего прямо посреди его появления.
+            key={block.start}
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: justify(block.position),
+              justifyContent: left === null ? "center" : "flex-start",
+              paddingTop: block.position === "top" ? margin : 0,
+              paddingBottom: block.position === "bottom" ? margin : 0,
+              paddingLeft: left === null ? 0 : left,
+              fontFamily: `"ReelbotCaption", "${ps.font.family}", sans-serif`,
+              fontWeight: ps.font.weight,
+              fontSize: ps.font.size,
+              lineHeight: ps.caption.line_height,
+              letterSpacing: `${ps.font.letter_spacing}em`,
+              textAlign: ps.caption.align,
+              pointerEvents: "none",
+              // Смещение живёт на контейнере, а не на самом блоке: у блока свой
+              // transform под появление и уход, и складывать два движения в одну
+              // строку значило бы, что правка одного молча ломает другое.
+              transform: (([dx, dy]) =>
+                dx || dy ? `translate(${dx}px, ${dy}px)` : undefined)(anchorShift(block)),
+              willChange: block.anchor_path ? "transform" : undefined,
+            }}
+          >
+            <Block block={block} preset={ps} />
+          </div>
+        );
+      })}
     </>
   );
 };

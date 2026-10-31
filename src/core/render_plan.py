@@ -15,12 +15,24 @@
 кегль: акцент — это РАЗМЕР, а не `transform: scale`, иначе увеличенное слово
 не участвует в раскладке и накрывает соседа (AUDIT §8.1). Рендерер получает
 готовые строки и готовые кегли и не выводит из выделения ничего.
+
+Регистров субтитра ДВА (STYLE_PLAN §1.4.1): «плакат» и «тихий», и отличаются они
+не оттенком, а кеглем вчетверо, отсутствием золота, выключкой влево у левого края
+и четырьмя строками вместо двух. Регистр ОБЪЯВЛЯЕТ режиссёр
+(`CaptionBlock.quiet`) — рендерер его не выводит (§0). Выводится он только у
+листов, сохранённых до появления поля (`quiet=None`): там его по-прежнему решает
+позиция (`caption.quiet.position`).
+
+Регистр задаёт всю раскладку, а у блока с `position="auto"` и необъявленным
+регистром раскладка поэтому зависит от того, какую позицию блок займёт. Значит
+мерить его приходится под каждую возможную позицию (`_Place`, `lay_places`), а не
+один раз на все.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Literal, Sequence
 
 from src.core.anchor import fallbacks, follow_offsets
@@ -90,6 +102,17 @@ class PlanBlock:
     # предохранителями и плавным откатом, потому что рендерер решений не
     # принимает (§0). `None` — блок статичен, то есть поведение до М2.
     anchor_path: list[list[float]] | None = None
+    # В каком РЕГИСТРЕ нарисован блок: `True` — тихий (STYLE_PLAN §1.4.1),
+    # `False` — плакат. Регистров два, и это не оттенок одного стиля: кегль
+    # отличается вчетверо, золота у тихого нет вовсе, выключка влево у левого
+    # края, строк до четырёх.
+    #
+    # Решение приезжает готовым, как `position` и `panel`: регистр объявляет
+    # режиссёр (`CaptionBlock.quiet`), а рендереру выводить его заново
+    # запрещено (§0). Он только подменяет числа темы на числа регистра
+    # (`caption.quiet`), которые уже лежат в плане. `False` у всего плана — тема
+    # без второго регистра (glass, bold) или план, собранный до его появления.
+    quiet: bool = False
 
     @property
     def words(self) -> list[PlanWord]:
@@ -154,6 +177,7 @@ class RenderPlan:
                     bg_luma=b.get("bg_luma"),
                     panel=bool(b.get("panel", False)),
                     anchor_path=b.get("anchor_path"),
+                    quiet=bool(b.get("quiet", False)),
                 )
                 for b in data.get("blocks", [])
             ],
@@ -194,6 +218,7 @@ class RenderPlan:
                     "bg_luma": b.bg_luma,
                     "panel": b.panel,
                     "anchor_path": b.anchor_path,
+                    "quiet": b.quiet,
                 }
                 for b in self.blocks
             ],
@@ -434,6 +459,8 @@ def _rect_of_lines(
     widths: list[float],
     preset: Preset,
     frame: tuple[int, int],
+    *,
+    left: float | None = None,
 ) -> Rect:
     """Прямоугольник блока по уже измеренным строкам.
 
@@ -448,6 +475,9 @@ def _rect_of_lines(
     а правда о кадре: панель действительно вылезет, и зажимать её здесь нельзя.
     Прямоугольник обязан НАКРЫВАТЬ текст (по нему меряется яркость фона и
     разводится картинка); зажатый бюджетом, он бы врал про место текста.
+
+    `left` уезжает в `block_rect` как есть: тихий регистр стоит у левого края
+    кадра, а не по центру (§1.4.1). `None` — центр.
     """
     text_w = max(widths, default=0.0)
     gap = line_gap(preset)
@@ -458,7 +488,7 @@ def _rect_of_lines(
     text_h = sum(
         line_box_height((w.size for w in line if w.size), preset) for line in lines
     ) + gap * max(0, len(lines) - 1)
-    return block_rect(position, text_w, text_h, preset, frame)
+    return block_rect(position, text_w, text_h, preset, frame, left=left)
 
 
 # --------------------------------------------------------------------------- сборка
@@ -500,21 +530,36 @@ def _resolve_position(
 
 
 @dataclass(slots=True)
+class _Place:
+    """Блок, разложенный под ОДНУ позицию — вместе с регистром, в котором он там играет.
+
+    Регистров у субтитра два (STYLE_PLAN §1.4.1). Регистр задаёт кегль, бюджет
+    колонки, число строк, выключку и наличие выделения — то есть ВСЮ раскладку,
+    поэтому «одно измерение на все позиции» больше не держится: у каждой позиции
+    своя раскладка и свой прямоугольник. У блока с объявленным регистром они
+    совпадут, у листа без поля (`quiet=None`) — нет, там регистр решает
+    позиция.
+    """
+
+    quiet: bool
+    lines: list[list[PlanWord]]
+    rect: Rect | None
+
+
+@dataclass(slots=True)
 class _Laid:
     """Блок, уже разложенный в строки, но ещё не выбравший позицию.
 
     Между раскладкой и позицией стоит картинка: «auto» уклоняется от неё, а сама
     она уступает тексту. Разорвать этот круг можно только так — сначала измерить
-    блок во ВСЕХ позициях, какие он может занять (`rects`), потом развести
+    блок во ВСЕХ позициях, какие он может занять (`places`), потом развести
     картинку со всеми ними, потом выбрать одну.
     """
 
     block: Any
     start: float
     end: float
-    places: tuple[str, ...]
-    lines: list[list[PlanWord]]
-    rects: dict[str, Rect]
+    places: dict[str, _Place]
 
 
 def build_plan(
@@ -552,13 +597,41 @@ def build_plan(
     by_idx = {w.idx: w for w in edl.words}
     frame = (width, height)
 
-    def layout(
-        places: Sequence[str], words: list[PlanWord]
-    ) -> tuple[list[list[PlanWord]], dict[str, Rect]]:
-        """Перенос строк и прямоугольники блока во всех возможных позициях.
+    # Пресет тихого регистра считается один раз на весь план: это та же тема с
+    # подменёнными числами (`Quiet.preset`), и дальше весь общий код — перенос,
+    # бюджет строки, высота строчного бокса, коробка блока, резерв под картинку —
+    # работает с ним без единой ветки «а если тихий».
+    quiet = ps.caption.quiet
+    quiet_ps = quiet.preset(ps) if quiet.enabled else ps
 
-        Одно измерение на все позиции: `wrap_block` позицию не видит, от неё
-        зависит только вертикальная привязка готовой коробки.
+    def register_preset(silent: bool) -> Preset:
+        """Пресет регистра: та же тема с подменёнными числами (`Quiet.preset`)."""
+        return quiet_ps if silent else ps
+
+    def plays_quiet(block: Any, place: str) -> bool:
+        """Играет ли блок тихо, встав в эту позицию.
+
+        Регистр объявляет режиссёр (`CaptionBlock.quiet`) — читаем заявку, а не
+        выводим её заново (§0). Выводить приходится только у листов, сохранённых
+        до появления поля (`quiet=None`): там регистр решала позиция, и такой
+        лист обязан рендериться как рендерился.
+
+        Гейт темы остаётся на месте и стоит ПЕРЕД заявкой: второй регистр — это
+        данные темы, у glass и bold его нет, и `quiet=true` там не меняет ничего
+        — верх играет плакатом, как играл. `plays_at` проверяет тот же
+        выключатель, поэтому ветка необъявленного регистра его не дублирует.
+        """
+        if not quiet.enabled:
+            return False
+        declared = getattr(block, "quiet", None)
+        if declared is not None:
+            return bool(declared)
+        return quiet.plays_at(place)
+
+    def layout(
+        words: list[PlanWord], preset_of: Preset
+    ) -> tuple[list[list[PlanWord]], list[float]]:
+        """Перенос строк блока в одном регистре. Ширины пустые — мерить было нечем.
 
         Метрик шрифта может не быть (свой TTF без выгрузки, пресет без
         `font.file`). Это не повод не отрендерить ролик: переносим по символам
@@ -568,12 +641,64 @@ def build_plan(
         резерв `caption_zone`, как раньше.
         """
         try:
-            lines, widths = wrap_block(words, ps, width)
+            return wrap_block(words, preset_of, width)
         except (FileNotFoundError, ValueError) as err:
             log.warning("геометрия субтитра не посчитана (%s), рендерер разложит сам", err)
-            chars = fallback_line_chars(ps, width)
-            return wrap_words(words, chars, ps.caption.max_lines), {}
-        return lines, {p: _rect_of_lines(p, lines, widths, ps, frame) for p in places}
+            chars = fallback_line_chars(preset_of, width)
+            return wrap_words(words, chars, preset_of.caption.max_lines), []
+
+    def lay_places(
+        places: Sequence[str], words: list[PlanWord], block: Any
+    ) -> dict[str, _Place]:
+        """Раскладка и прямоугольник блока в каждой позиции, какую он может занять.
+
+        Раньше здесь стояло одно измерение на все позиции: `wrap_block` позицию
+        не видел, и от неё зависела только вертикальная привязка готовой коробки.
+        Со вторым регистром (§1.4.1) это неверно — регистр решает кегль, бюджет
+        колонки, число строк и выделение, то есть тот же блок в двух регистрах
+        разложен РАЗНЫМ текстом. У блока с объявленным регистром он один на все
+        позиции, у листа без поля зависит от позиции (`plays_quiet`), поэтому
+        раскладка считается по регистрам (их два, а позиций три, и общий регистр
+        считается один раз), а прямоугольник — по каждой позиции отдельно, своим
+        регистром.
+
+        Инвариант, который обязан пережить правку: картинка разводится со ВСЕМИ
+        этими прямоугольниками (DoD Ф7), и в какой бы позиции блок ни оказался,
+        это настоящий прямоугольник именно его регистра, а не оценка.
+        """
+        by_register: dict[bool, tuple[Preset, list[list[PlanWord]], list[float]]] = {}
+        out: dict[str, _Place] = {}
+        for place in places:
+            silent = plays_quiet(block, place)
+            if silent not in by_register:
+                pr = register_preset(silent)
+                # Свои слова на каждый регистр, а не общие. Два повода: кегль
+                # `wrap_block` проставляет словам НА МЕСТЕ (он же им мерил
+                # строку), и у тихого блока выделения нет вовсе — ни золота, ни
+                # крика, ни увеличенного слова. Гасится оно здесь, в самих
+                # словах, а не подменой цвета в рендерере: тогда и кегль, и
+                # поворот крика, и цвет отпадают разом и у обоих рендереров.
+                own = [replace(w, emphasis="none") if silent else replace(w) for w in words]
+                lines, widths = layout(own, pr)
+                by_register[silent] = (pr, lines, widths)
+            pr, lines, widths = by_register[silent]
+            out[place] = _Place(
+                quiet=silent,
+                lines=lines,
+                rect=(
+                    _rect_of_lines(
+                        place,
+                        lines,
+                        widths,
+                        pr,
+                        frame,
+                        left=quiet.left_x(width) if silent else None,
+                    )
+                    if widths
+                    else None
+                ),
+            )
+        return out
 
     # Раскладка субтитров идёт ПЕРВОЙ, картинки — после неё. Раньше было
     # наоборот, и картинка разводилась не с блоком, а с ЗАРЕЗЕРВИРОВАННОЙ под
@@ -587,8 +712,9 @@ def build_plan(
     #
     # Позиция при этом ещё не выбрана: «auto» уклоняется от картинки, а картинка
     # считается позже. Поэтому у блока их несколько — все, какие он может
-    # получить, — и картинка уступает КАЖДОЙ. Раскладка от позиции не зависит,
-    # поэтому меряется один раз на все.
+    # получить, — и картинка уступает КАЖДОЙ. Раскладка считается под каждую из
+    # них (§1.4.1: позиция решает регистр, а регистр — всю раскладку), см.
+    # `lay_places`.
     laid: list[_Laid] = []
     for block in edl.captions:
         pwords: list[PlanWord] = []
@@ -622,15 +748,12 @@ def build_plan(
             if block.position in CAPTION_POSITIONS
             else caption_positions(ps)
         )
-        lines, rects = layout(places, pwords)
         laid.append(
             _Laid(
                 block=block,
                 start=pwords[0].start,
                 end=pwords[-1].end + cfg.sub_tail,
-                places=places,
-                lines=lines,
-                rects=rects,
+                places=lay_places(places, pwords, block),
             )
         )
 
@@ -644,16 +767,21 @@ def build_plan(
 
         Блок, который посчитать не удалось (нет метрик шрифта), отдаёт резерв
         `caption_zone` в каждой своей позиции: без измерения это единственное,
-        что можно уступить.
+        что можно уступить. Резерв считается ПРЕСЕТОМ РЕГИСТРА, в котором блок
+        там играет, — иначе тихому блоку уступалась бы полоса под плакатный
+        кегль, вчетверо выше настоящей, и карточка уезжала бы в полный кадр без
+        причины.
         """
         out: list[Rect] = []
         for item in laid:
             if item.end <= start or item.start >= end:
                 continue
-            if item.rects:
-                out.extend(item.rects.values())
-            else:
-                out.extend(caption_zone(ps, frame, p) for p in item.places)
+            for place, laid_place in item.places.items():
+                out.append(
+                    laid_place.rect
+                    if laid_place.rect is not None
+                    else caption_zone(register_preset(laid_place.quiet), frame, place)
+                )
         return out
 
     broll: list[PlanBroll] = []
@@ -690,25 +818,33 @@ def build_plan(
             )
         )
 
-    def occupied(start: float, end: float, rects: dict[str, Rect]) -> dict[str, bool]:
-        """Какие позиции блока картинка перекрывает в этом промежутке.
+    def occupied(item_laid: _Laid) -> dict[str, bool]:
+        """Какие позиции блока картинка перекрывает за время его жизни.
 
         Настоящее пересечение прямоугольников вместо «той же половины кадра»:
         половинами `center` и `fullscreen` описывались как «занято всё», из-за
         чего уклонение выключалось именно там, где было нужнее всего
         (AUDIT §8.3). Прямоугольник блока здесь уже измерен — в каждой позиции,
-        какую он может занять; без метрик остаётся резерв `caption_zone`.
+        какую он может занять; без метрик остаётся резерв `caption_zone`, и он
+        считается регистром ЭТОГО блока, а не угаданным по позиции.
         """
+        start, end, places = item_laid.start, item_laid.end, item_laid.places
         hits = dict.fromkeys(CAPTION_POSITIONS, False)
         for item in broll:
             if item.end <= start or item.start >= end or item.rect is None:
                 continue
             for place in CAPTION_POSITIONS:
-                rect = rects.get(place)
+                laid_place = places.get(place)
+                rect = laid_place.rect if laid_place is not None else None
                 hits[place] = hits[place] or (
                     item.rect.overlaps(rect)
                     if rect is not None
-                    else blocks_caption(item.rect, ps, frame, place)
+                    else blocks_caption(
+                        item.rect,
+                        register_preset(plays_quiet(item_laid.block, place)),
+                        frame,
+                        place,
+                    )
                 )
         return hits
 
@@ -765,7 +901,7 @@ def build_plan(
 
     blocks: list[PlanBlock] = []
     for item in laid:
-        hits = occupied(item.start, item.end, item.rects)
+        hits = occupied(item)
         position = _resolve_position(
             item.block.position,
             ps.caption.position,
@@ -773,17 +909,33 @@ def build_plan(
             collides_top=hits["top"],
             collides_center=hits["center"],
         )
-        rect = item.rects.get(position)
+        chosen = item.places.get(position)
+        if chosen is None:
+            # Уклонение увело блок в позицию, которой у него в наборе не было.
+            # Так выходит только у пришпиленного пресета (`caption.pinned`:
+            # набор из одной позиции) под полнокадровой вставкой, то есть когда
+            # занято и так всё. Прямоугольника у такой позиции нет — значит нет
+            # и гарантии Ф7, — поэтому отдаём раскладку, которую посчитали, без
+            # прямоугольника: ровно так этот угол вёл себя и до второго регистра.
+            log.warning(
+                "блок %.2f-%.2f с ушёл в позицию %r, не измеренную в наборе %s",
+                item.start, item.end, position, tuple(item.places),
+            )
+            chosen = next(iter(item.places.values()))
+            rect = None
+        else:
+            rect = chosen.rect
         blocks.append(
             PlanBlock(
                 start=item.start,
                 end=item.end,
                 position=position,
-                lines=item.lines,
+                lines=chosen.lines,
                 rect=rect,
                 bg_luma=getattr(item.block, "bg_luma", None),
                 panel=bool(getattr(item.block, "panel", False)),
                 anchor_path=anchor_path_of(item, rect),
+                quiet=chosen.quiet,
             )
         )
 

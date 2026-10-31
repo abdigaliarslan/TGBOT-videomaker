@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -945,6 +946,63 @@ def test_glass_has_no_background_under_the_caption_at_all():
         assert _panel_opacity(preset, step / 100) == 0.0
 
 
+def test_pulse_wears_frosted_glass_without_any_fill():
+    """У pulse стекло есть, а заливки нет — и это два разных слоя (§1.4).
+
+    Владелец просил убрать фон под субтитром, и про ЗАЛИВКУ он был прав: в
+    эталоне её нет ни у одного блока. Но вместе с заливкой был обнулён и сам
+    стеклянный слой — размытие с рамкой, — а он в эталоне есть у 2 блоков из 13
+    (3.5 с из 23.6): внутри плашки видимо смягчаются принт на футболке и пальцы,
+    снаружи они резкие. Числа сняты с кадров 483 и 848, а не выбраны: подъём
+    яркости над чёрной футболкой с 5.6 до 41.5 из 255 — это белая заливка 0.14,
+    рамка 1 px при ширине 464 — это 2 px при базе 1920.
+
+    Тест сторожит обе половины решения: стекло взведено, заливка остаётся нулём
+    при ЛЮБОЙ яркости фона.
+    """
+    preset = load_preset("pulse")
+    panel = preset.panel
+    assert panel.enabled, "стекло носят помеченные блоки — выключать тему нельзя"
+    assert (panel.blur, panel.radius) == (12, 30)
+    assert (panel.border_color, panel.border_opacity, panel.border_width) == ("#FFFFFF", 0.55, 2)
+    assert (panel.glass_color, panel.glass_opacity) == ("#FFFFFF", 0.14)
+
+    # Заливка — другой слой: тёмная заслонка правила Ф9. У pulse она нулевая, и
+    # правило выключено, поэтому фон не приходит ни при какой яркости кадра.
+    assert panel.opacity == 0.0
+    assert not preset.contrast.enabled
+    for step in range(101):
+        assert _panel_opacity(preset, step / 100) == 0.0
+
+    # Тихий регистр стекла не носит: §1.4.1 — «плашка: иногда» у плаката и
+    # «нет» у тихого. Гасится оно вместе с хромом, иначе Python и Chromium
+    # разошлись бы на паддинги.
+    assert preset.caption.quiet.panel is False
+    assert preset.caption.quiet.preset(preset.scaled(FRAME[1])).panel.enabled is False
+
+
+def test_the_panel_flag_reaches_the_plan_and_only_the_marked_block():
+    """Флаг плашки доезжает до рендерера поблочно, а место под неё — у всех.
+
+    Рендерер рисует стекло по `block.panel` (`Captions.tsx`), а прямоугольник
+    считает Python по хрому ТЕМЫ — одинаково у всех блоков. Иначе текст прыгал
+    бы на высоту плашки между соседними блоками.
+    """
+    marked = build_plan(
+        register_edl("bottom", "Я думаю что каждый".split(), accent=1, quiet=False, panel=True),
+        "v.mp4",
+        cfg=cfg(),
+    )
+    plain = build_plan(
+        register_edl("bottom", "Я думаю что каждый".split(), accent=1, quiet=False),
+        "v.mp4",
+        cfg=cfg(),
+    )
+    assert marked.to_dict()["blocks"][0]["panel"] is True
+    assert plain.to_dict()["blocks"][0]["panel"] is False
+    assert marked.blocks[0].rect == plain.blocks[0].rect
+
+
 @pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
 def test_contrast_rule_has_a_lever_on_every_background(name: str):
     """У правила Ф9 обязан быть рычаг на ЛЮБОЙ яркости фона, а не только на краях.
@@ -997,6 +1055,292 @@ def test_word_wider_than_the_floor_overflows_knowingly():
     assert beyond[0] <= FRAME[0]
 
 
+# ------------------------------------------------------------- два регистра (§1.4.1)
+
+# Эталонный тихий блок: «Я лишь отправляю ему сырое видео», 3.6-5.2 с. Шесть
+# слов в ЧЕТЫРЕ строки — по нему и подобраны кегль с бюджетом колонки.
+QUIET_LINE = "Я лишь отправляю ему сырое видео".split()
+# Высота глифов Montserrat ExtraBold: cap_height 700 / upem 1000. Замеры
+# STYLE_PLAN даны в высоте глифов, а не в кегле, и сравнивать надо с ними.
+CAP_HEIGHT_EM = 0.7
+
+
+def glyph_share(block, frame_height: int = FRAME[1]) -> float:
+    """Самое крупное слово блока как доля высоты кадра — единица замеров §1.1."""
+    return max(w.size or 0.0 for w in block.words) * CAP_HEIGHT_EM / frame_height
+
+
+def register_edl(
+    position: str,
+    words: list[str] = QUIET_LINE,
+    *,
+    accent: int | None = None,
+    anchor: str | None = None,
+    quiet: bool | None = None,
+    panel: bool = False,
+) -> EDL:
+    """Один блок в заданной позиции; `accent` — индекс золотого слова.
+
+    `quiet` — объявленный регистр; `None` — лист без поля, то есть регистр
+    решает позиция, как решала до его появления.
+    """
+    spoken = [Word(idx=i, text=t, start=i * 0.4, end=i * 0.4 + 0.3) for i, t in enumerate(words)]
+    return EDL(
+        source_duration=10.0,
+        words=spoken,
+        cuts=[Cut(src_in=0.0, src_out=10.0, reason="keep")],
+        captions=[
+            CaptionBlock(
+                position=position,
+                quiet=quiet,
+                panel=panel,
+                words=[
+                    CaptionWord(
+                        word_idx=i,
+                        emphasis=Emphasis.ACCENT if i == accent else Emphasis.NONE,
+                    )
+                    for i in range(len(words))
+                ],
+            )
+        ],
+        broll=(
+            [Broll(word_idx=0, duration=2.0, query="q", anim=BrollAnim.POP_IN, anchor=anchor)]
+            if anchor
+            else []
+        ),
+        preset="pulse",
+    )
+
+
+def test_a_top_block_renders_quiet():
+    """Верхний блок — другой КЛАСС субтитра, а не уменьшённый плакат (§1.4.1).
+
+    Замеры эталона, которые тут и сторожатся: кегль ~1.5 % высоты кадра против
+    6.2 % у плаката, строк четыре, выключка влево у левого края. Пока стиль от
+    позиции не зависел, тот же блок выезжал наверх плакатным кеглем 174.8 px
+    (6.37 % высоты) с золотым словом — ровно то, чего в верхнем кластере
+    эталона нет ни на одном кадре.
+    """
+    preset = load_preset("pulse").scaled(FRAME[1])
+    quiet = preset.caption.quiet
+    block = build_plan(register_edl("top"), "v.mp4", cfg=cfg()).blocks[0]
+
+    assert block.position == "top" and block.quiet is True
+    assert len(block.lines) == 4, [[w.text for w in line] for line in block.lines]
+    assert len(block.lines) <= quiet.max_lines
+    assert all(w.size == float(quiet.font_size) for w in block.words), "кегль один на весь блок"
+    assert glyph_share(block) == pytest.approx(0.015, abs=0.002), "эталонные ~1.5 % высоты кадра"
+    assert quiet.align == "left"
+    assert block.rect is not None
+    # Блок стоит у ЛЕВОГО края кадра (18 % ширины — единственный измеренный в
+    # эталоне левый край, §1.3), а не по центру.
+    assert block.rect.x == pytest.approx(FRAME[0] * quiet.edge_ratio)
+    assert block.rect.x < (FRAME[0] - block.rect.width) / 2
+    assert block.rect.right <= FRAME[0] + 1e-6
+
+
+def test_a_bottom_block_still_renders_as_a_poster():
+    """Нижний блок остаётся плакатом: крупно, по центру, 1-2 строки, с золотом.
+
+    Текст здесь четырёхсловный, а не эталонный шестисловный: плакат длиннее пяти
+    слов контракт не допускает вовсе (`edl.BLOCK_POSTER_MAX_WORDS`) — шесть слов
+    бывают только у тихого блока, и набранные кеглем плаката они ужимаются
+    переносом до 3.7 % высоты, то есть замер про регистр перестал бы быть
+    замером про регистр.
+    """
+    preset = load_preset("pulse").scaled(FRAME[1])
+    plan = build_plan(register_edl("bottom", "Я думаю что каждый".split(), accent=1), "v.mp4", cfg=cfg())
+    block = plan.blocks[0]
+
+    assert block.position == "bottom" and block.quiet is False
+    assert len(block.lines) <= preset.caption.max_lines == 2
+    assert [w.emphasis for w in block.words].count("accent") == 1, "золото плаката на месте"
+    # Эталонный плакат — до 6.2 % высоты кадра (§1.1); у нас 6.37 %.
+    assert glyph_share(block) > 0.05, "плакат набран кеглем плаката"
+    assert max(w.size or 0 for w in block.words) > float(preset.caption.quiet.font_size) * 2
+    assert block.rect is not None
+    # Плакат центрирован по кадру — выключка и место блока не одно и то же.
+    assert block.rect.center_x == pytest.approx(FRAME[0] / 2)
+
+
+def test_the_quiet_register_has_no_emphasis_at_all():
+    """У тихого блока выделения нет вовсе: ни золота, ни крика, ни крупного слова.
+
+    Гасится оно в САМИХ словах, а не подменой цвета в рендерере: тогда и кегль,
+    и поворот крика, и цвет отпадают разом и у ASS, и у Remotion. В эталоне
+    верхний кластер не содержит ни одного выделенного слова — а EDL настоящего
+    прогона ставит акцент и в верхние блоки тоже.
+    """
+    words = "Я думаю что каждый".split()  # верхний блок настоящего EDL, акцент на «думаю»
+    quiet = build_plan(register_edl("top", words, accent=1), "v.mp4", cfg=cfg()).blocks[0]
+    poster = build_plan(register_edl("bottom", words, accent=1), "v.mp4", cfg=cfg()).blocks[0]
+
+    assert [w.emphasis for w in quiet.words] == ["none"] * len(words)
+    assert len({w.size for w in quiet.words}) == 1, "увеличенного слова в тихом блоке нет"
+    # Тот же акцент в плакате живёт и крупнее соседей — регистр, а не потеря поля.
+    assert [w.emphasis for w in poster.words].count("accent") == 1
+    assert len({w.size for w in poster.words}) > 1
+
+
+@pytest.mark.parametrize("position", ["top", "bottom"])
+@pytest.mark.parametrize("anchor", ["top_left", "top_right", "bottom_right", "center"])
+def test_the_picture_clears_the_block_in_both_registers(position: str, anchor: str):
+    """DoD Ф7 в обоих регистрах: картинка ни разу не пересекает прямоугольник блока.
+
+    Регистр меняет прямоугольник целиком — тихий вдвое ниже, вчетверо уже и
+    стоит у левого края, — поэтому гарантия обязана проверяться на обоих.
+    """
+    plan = build_plan(register_edl(position, anchor=anchor), "v.mp4", cfg=cfg())
+    caption = plan.blocks[0].rect
+    picture = plan.broll[0].rect
+    assert isinstance(caption, Rect) and isinstance(picture, Rect)
+    if picture.width >= plan.width:
+        pytest.skip("места под карточку не осталось — осознанный полный кадр")
+    assert not caption.overlaps(picture), (position, anchor)
+
+
+def test_the_picture_yields_to_every_register_the_block_might_take():
+    """Картинка уступает блоку в КАЖДОЙ позиции, какую он может занять.
+
+    Это тот самый круг, из-за которого раскладка и считалась один раз на все
+    позиции: «auto» уклоняется от картинки, картинка считается после субтитров и
+    уступает всем его позициям сразу. Со вторым регистром раскладка от позиции
+    зависит, и уступать картинка обязана НАСТОЯЩИМ прямоугольникам — тихому
+    наверху и плакатному внизу, а не одному из них, растянутому на оба места.
+
+    Проверяется это измеримо: полоса под карточку начинается сразу под ТИХИМ
+    верхним прямоугольником. Посчитай верх плакатом — и карточка уехала бы на
+    290 px ниже, в полосу, которую текст никогда не занимает.
+    """
+    preset = load_preset("pulse").model_copy(deep=True)
+    # Пришпиленному пресету «auto» выбора не даёт (`caption_positions`), а нам
+    # нужен блок, который может встать и наверху, и внизу.
+    preset.caption.pinned = False
+    scaled = preset.scaled(FRAME[1])
+
+    auto = build_plan(
+        register_edl("auto", anchor="top_right"), "v.mp4", preset=preset, cfg=cfg()
+    )
+    at_top = build_plan(register_edl("top"), "v.mp4", preset=preset, cfg=cfg()).blocks[0]
+    at_bottom = build_plan(register_edl("bottom"), "v.mp4", preset=preset, cfg=cfg()).blocks[0]
+
+    picture = auto.broll[0].rect
+    assert isinstance(picture, Rect)
+    assert at_top.quiet is True and at_bottom.quiet is False
+    for rect in (at_top.rect, at_bottom.rect):
+        assert isinstance(rect, Rect)
+        assert not picture.overlaps(rect)
+    gap = FRAME[0] * scaled.geometry.broll_margin_ratio
+    assert picture.y == pytest.approx(at_top.rect.y + at_top.rect.height + gap, abs=1.0)
+
+
+@pytest.mark.parametrize("name", ["glass", "bold"])
+def test_themes_without_a_second_register_render_as_before(name: str):
+    """Регистр — ДАННЫЕ темы: у glass и bold его нет, и верх у них прежний.
+
+    Наверху блок должен выйти ровно тем же, чем внизу, — тем же кеглем, с тем же
+    золотом и центрированным. Иначе второй регистр протёк бы в темы, которые
+    его не просили.
+    """
+    preset = load_preset(name)
+    assert preset.caption.quiet.enabled is False
+    up = build_plan(register_edl("top", accent=2), "v.mp4", preset=preset, cfg=cfg()).blocks[0]
+    down = build_plan(
+        register_edl("bottom", accent=2), "v.mp4", preset=preset, cfg=cfg()
+    ).blocks[0]
+
+    assert up.quiet is False and down.quiet is False
+    assert [w.size for w in up.words] == [w.size for w in down.words]
+    assert [w.emphasis for w in up.words] == [w.emphasis for w in down.words]
+    assert up.rect is not None and down.rect is not None
+    assert up.rect.x == pytest.approx(down.rect.x)
+    assert up.rect.width == pytest.approx(down.rect.width)
+
+
+def test_the_declared_register_beats_the_position():
+    """Регистр решает ЗАЯВКА режиссёра, а не место блока в кадре.
+
+    Один и тот же четырёхсловный блок наверху: объявленный плакатом остаётся
+    крупным и с золотом, объявленный тихим — мелким и без золота. Пока регистр
+    выводился из позиции, верхний блок мог быть только вторым, и золотой плакат
+    эталона (9.2-12.0 с, центр отдан вставке — §1.4.1, §1.5) был невыразим.
+    """
+    words = "Я думаю что каждый".split()
+    preset = load_preset("pulse").scaled(FRAME[1])
+    poster = build_plan(
+        register_edl("top", words, accent=1, quiet=False), "v.mp4", cfg=cfg()
+    ).blocks[0]
+    quiet = build_plan(
+        register_edl("top", words, accent=1, quiet=True), "v.mp4", cfg=cfg()
+    ).blocks[0]
+
+    assert poster.position == quiet.position == "top"
+    assert poster.quiet is False and quiet.quiet is True
+    # Плакат наверху: золото на месте, кегль плакатный, блок центрирован.
+    assert [w.emphasis for w in poster.words].count("accent") == 1
+    assert glyph_share(poster) > 0.05
+    assert poster.rect is not None and poster.rect.center_x == pytest.approx(FRAME[0] / 2)
+    # Тихий в той же позиции: золота нет, кегль регистра, левый край кадра.
+    assert [w.emphasis for w in quiet.words] == ["none"] * len(words)
+    assert all(w.size == float(preset.caption.quiet.font_size) for w in quiet.words)
+    assert quiet.rect is not None
+    assert quiet.rect.x == pytest.approx(FRAME[0] * preset.caption.quiet.edge_ratio)
+
+
+def test_a_declared_quiet_block_is_ignored_by_themes_without_the_register():
+    """Заявка «тихий» — не приказ теме: у glass и bold второго регистра нет.
+
+    Гейт `caption.quiet.enabled` стоит ПЕРЕД заявкой, иначе объявленный регистр
+    протёк бы в темы, которые его не просили, и верх у них перестал бы быть
+    плакатом.
+    """
+    for name in ("glass", "bold"):
+        preset = load_preset(name)
+        up = build_plan(
+            register_edl("top", accent=2, quiet=True), "v.mp4", preset=preset, cfg=cfg()
+        ).blocks[0]
+        down = build_plan(
+            register_edl("bottom", accent=2, quiet=False), "v.mp4", preset=preset, cfg=cfg()
+        ).blocks[0]
+        assert up.quiet is False, name
+        assert [w.size for w in up.words] == [w.size for w in down.words], name
+        assert [w.emphasis for w in up.words] == [w.emphasis for w in down.words], name
+
+
+def test_a_list_without_the_register_renders_by_position_as_before():
+    """Лист до появления поля рендерится как рендерился: регистр решает позиция.
+
+    Инвариант 4 — сохранённый лист обязан пересобираться в тот же кадр, — и
+    поэтому необъявленный регистр разрешается старой приметой, а не длиной: в
+    рендере ею была позиция (`Quiet.plays_at`).
+    """
+    saved = register_edl("top", quiet=None)
+    assert saved.captions[0].quiet is None
+    block = build_plan(saved, "v.mp4", cfg=cfg()).blocks[0]
+    declared = build_plan(register_edl("top", quiet=True), "v.mp4", cfg=cfg()).blocks[0]
+    assert block.quiet is True
+    assert [w.size for w in block.words] == [w.size for w in declared.words]
+    assert block.rect == declared.rect
+
+
+def test_the_quiet_register_scales_to_the_preview_frame():
+    """Кегль и отступ регистра — пиксели кадра 1920, и на превью они уезжают.
+
+    Забыть их в `_PIXEL_FIELDS` значило бы оставить тихий блок в масштабе 1920:
+    на кадре 960 он вышел бы вдвое крупнее задуманного, то есть перестал бы быть
+    тихим ровно на том кадре, по которому сверяют композицию.
+    """
+    tall = build_plan(register_edl("top"), "v.mp4", height=1920, width=1080, cfg=cfg())
+    short = build_plan(register_edl("top"), "v.mp4", height=960, width=540, cfg=cfg())
+    assert short.preset["caption"]["quiet"]["font_size"] < tall.preset["caption"]["quiet"]["font_size"]
+    assert short.preset["caption"]["quiet"]["margin"] < tall.preset["caption"]["quiet"]["margin"]
+    # Доля кадра у регистра сохраняется: это и значит «композиция не поехала».
+    assert glyph_share(short.blocks[0], 960) == pytest.approx(
+        glyph_share(tall.blocks[0], 1920), abs=0.002
+    )
+    assert short.blocks[0].rect.x == pytest.approx(540 * 0.18)  # type: ignore[union-attr]
+
+
 # ------------------------------------------------------------------ контракт с рендерером
 
 
@@ -1022,6 +1366,38 @@ def test_plan_carries_the_keys_the_renderer_reads():
     assert "max_line_chars" not in caption, "поле удалено в Ф5 — оно не должно вернуться"
     contrast = data["preset"]["contrast"]
     assert {"enabled", "min_ratio", "text_dark", "text_light"} <= set(contrast)
+
+
+def test_plan_carries_the_quiet_register_the_renderer_reads():
+    """Имена второго регистра сторожим с этой стороны — в TSX они читаются мягко.
+
+    Рендерер подменяет числа темы числами регистра (`Captions.tsx`,
+    `registerPreset`) и узнаёт о регистре по флагу блока. Поле необязательное:
+    план, собранный до регистра, его не несёт, и опечатка в имени тихо
+    отключила бы весь тихий блок, вернув плакат наверх.
+    """
+    data = build_plan(register_edl("top"), "v.mp4", cfg=cfg()).to_dict()
+
+    assert data["blocks"][0]["quiet"] is True
+    quiet = data["preset"]["caption"]["quiet"]
+    assert {
+        "enabled", "position", "font_size", "margin", "line_height",
+        "align", "edge", "edge_ratio", "panel",
+    } <= set(quiet)
+    # Переживает запись на диск: перерендер сохранённого плана обязан дать тот
+    # же кадр, а не вернуть верхний блок в плакат.
+    again = RenderPlan.from_dict(data)
+    assert again.blocks[0].quiet is True
+    assert again.to_dict() == data
+
+
+def test_plans_saved_before_the_second_register_read_as_posters():
+    """План до §1.4.1 флага не несёт — читается как плакат, а не ломается."""
+    data = build_plan(register_edl("top"), "v.mp4", cfg=cfg()).to_dict()
+    del data["blocks"][0]["quiet"]
+    del data["preset"]["caption"]["quiet"]
+    assert RenderPlan.from_dict(data).blocks[0].quiet is False
+    assert Preset(**data["preset"]).caption.quiet.enabled is False
 
 
 def test_plans_saved_before_the_pixel_wrap_still_load():
@@ -1156,6 +1532,74 @@ def test_chromium_draws_the_block_the_plan_promised(name: str):
         box = measured["boxes"][key]
         assert box["width"] == pytest.approx(w, abs=2.0), (name, key, "ширина")
         assert box["height"] == pytest.approx(h, abs=2.0), (name, key, "высота")
+
+
+@pytest.mark.slow
+def test_chromium_draws_the_quiet_block_the_plan_promised():
+    """Тот же допуск 2 px, но в ТИХОМ регистре (§1.4.1).
+
+    Регистр подменяет кегль, межстрочие, бюджет колонки и панель — то есть
+    ровно те числа, которыми меряется строка и считается коробка блока. Сверка
+    плаката этого не ловит: у неё другой `base_size`, а от него зависят и пробел
+    между словами, и letter-spacing (он объявлен в em на контейнере строки), и
+    СТРУТ строчного бокса. То есть без этого теста тихий блок в Chromium не
+    проверял никто, а подмена пресета в Python и в `Captions.tsx` могла
+    разъехаться молча.
+
+    Отдельный запуск браузера, а не ещё одна параметризация: кегль контейнера на
+    странице линейки один, и два регистра в одну страницу не укладываются.
+    """
+    node = __import__("shutil").which("node")
+    if node is None or not (MEASURE.parent / "node_modules").exists():
+        pytest.skip("нужен node и render/node_modules")
+
+    theme = load_preset("pulse").scaled(FRAME[1])
+    assert theme.caption.quiet.enabled, "тест про тему со вторым регистром"
+    preset = theme.caption.quiet.preset(theme)
+    font = FONTS / (preset.font.file or "")
+    if not font.exists():
+        pytest.skip(f"нет шрифта {font}")
+
+    request: dict = {
+        "font": str(font),
+        "weight": preset.font.weight,
+        "base_size": preset.font.size,
+        "letter_spacing": preset.font.letter_spacing,
+        "line_height": preset.caption.line_height,
+        "items": [],
+        "boxes": [],
+    }
+    expected_lines: dict[str, float] = {}
+    expected_boxes: dict[str, tuple[float, float]] = {}
+    left = theme.caption.quiet.left_x(FRAME[0])
+    for bi, block in enumerate(all_blocks()):
+        # Выделение гасит сам регистр (`lay_places`), и мерить надо то, что
+        # уедет в план: слова без акцента и без крика.
+        words = [replace(w, emphasis="none") for w in plan_words(block, preset)]
+        lines, widths = wrap_block(words, preset, FRAME[0])
+        rect = _rect_of_lines("top", lines, widths, preset, FRAME, left=left)
+        assert rect.x == pytest.approx(left), "тихий блок стоит у левого края кадра"
+        for li, (line, width) in enumerate(zip(lines, widths)):
+            key = f"q{bi}l{li}"
+            expected_lines[key] = width
+            request["items"].append({"id": key, "words": [_as_word(w) for w in line]})
+        expected_boxes[f"q{bi}"] = (rect.width, rect.height)
+        panel = preset.panel
+        request["boxes"].append({
+            "id": f"q{bi}",
+            "lines": [[_as_word(w) for w in line] for line in lines],
+            "padding_x": panel.padding_x if panel.enabled else 0,
+            "padding_y": panel.padding_y if panel.enabled else 0,
+            "border_width": panel.border_width if panel.enabled else 0,
+        })
+
+    measured = _measure_in_chromium(request)
+    for key, width in expected_lines.items():
+        assert measured["widths"][key] == pytest.approx(width, abs=2.0), key
+    for key, (w, h) in expected_boxes.items():
+        box = measured["boxes"][key]
+        assert box["width"] == pytest.approx(w, abs=2.0), (key, "ширина")
+        assert box["height"] == pytest.approx(h, abs=2.0), (key, "высота")
 
 
 def test_the_panel_flag_survives_the_round_trip_to_the_plan():

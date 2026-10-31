@@ -94,6 +94,125 @@ class Panel(BaseModel):
 REMOVED_CAPTION_FIELDS = ("max_line_chars",)
 
 
+class Quiet(BaseModel):
+    """Тихий регистр субтитра: верхний блок — не уменьшённый плакат, а другой класс.
+
+    Регистров в эталоне ДВА (STYLE_PLAN §1.4.1), и отличаются они не на проценты:
+
+    | | нижний «плакат» | верхний «тихий» |
+    |---|---|---|
+    | кегль | до 6.2 % высоты кадра | ~1.5 % |
+    | золото | одно слово на блок | нет вообще |
+    | строк | 1-2 | 4 |
+    | выключка | по центру | влево, у левого края |
+    | плашка | иногда | нет |
+
+    Пока стиль от позиции не зависел, верхний блок выезжал тем же огромным
+    кеглем с золотым словом — то есть плакатом, поставленным наверх.
+
+    Это ДАННЫЕ темы, а не константы кода: регистр есть у pulse и нет у glass и
+    bold, и `enabled: false` обязан оставлять их прежний рендер байт в байт.
+
+    Числа — замеры, а не вкус:
+
+    * `font_size` 41 px при кадре 1920: высота глифов Montserrat ExtraBold это
+      `cap_height` 0.700 em, то есть 41·0.7 / 1920 = 1.49 % — ровно эталонные
+      ~1.5 %. Кеглем задаётся потому, что кегль и есть раскладка (`wrap_block`).
+    * `max_line_width_ratio` 0.30 — узкая колонка, и без неё четырёх строк не
+      бывает: эталонное «Я лишь отправляю ему сырое видео» (3.6-5.2 с) это шесть
+      слов в ЧЕТЫРЕ строки, то есть ~1.5 слова на строку. На полном бюджете
+      плаката (0.74) те же шесть слов кеглем 41 укладываются в одну строку, и
+      замер «строк 4» становится невоспроизводимым. При 0.30 (324 px в кадре
+      1080) перенос даёт «Я лишь / отправляю / ему сырое / видео» — те самые
+      четыре строки.
+    * `margin` 140 px: верхний кластер эталона центрирован на 12.9 % высоты, а
+      четырёхстрочный тихий блок высотой 220.8 px, прибитый к 140, даёт центр
+      13.04 %. Ниже 134 px (`safe_area_ratio`) опускаться всё равно нельзя.
+    * `line_height` 1.2 против 1.06 у плаката: межстрочие плаката считано для
+      кегля в четыре раза крупнее, на мелком тексте строки от него слипаются.
+    * `edge_ratio` 0.18 — единственный измеренный в эталоне левый край (§1.3,
+      слово «Бот» верхнего кластера стоит на 18 % ширины). §1.4.1 про тихий блок
+      говорит только «влево, у левого края», и брать тут иное число значило бы
+      выдумывать.
+
+    Чего здесь НЕТ и почему. Выделения: у тихого блока его нет вовсе — ни
+    золота, ни крика, ни увеличенного слова, — поэтому `render_plan` гасит
+    выделение самих СЛОВ, а не красит их иначе. Анимации: про вход и уход
+    верхнего блока эталон ничего отдельного не говорит, и выдумывать второй
+    набор чисел не на чем.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Выключатель темы. По умолчанию регистра нет: glass и bold рисуют верхний
+    # блок так же, как рисовали.
+    enabled: bool = False
+    # Позиция, которая играет тихо. Одна: в эталоне тихий блок висит наверху, и
+    # так же это понимает валидатор EDL (`edl.BLOCK_POSTER_MAX_WORDS` — длинный
+    # блок обязан стоять в `top`).
+    position: Literal["top", "center", "bottom"] = "top"
+    # Кегль и отступ от края — пиксели при высоте кадра 1920 (`_PIXEL_FIELDS`).
+    font_size: int = 41
+    margin: int = 140
+    line_height: float = 1.2
+    align: Literal["center", "left"] = "left"
+    # К какому краю КАДРА прижат блок (не выключка строк внутри него — это
+    # `align`). Плакат центрирован, тихий блок стоит у левого края.
+    edge: Literal["center", "left"] = "left"
+    edge_ratio: float = 0.18
+    max_lines: int = 4
+    max_line_width_ratio: float = 0.30
+    panel: bool = False
+
+    def plays_at(self, position: str) -> bool:
+        """Играет ли блок в этой позиции тихо."""
+        return self.enabled and position == self.position
+
+    def left_x(self, frame_width: int) -> float | None:
+        """Левый край блока в пикселях кадра; `None` — блок центрирован.
+
+        Одна формула на оба рендерера: Captions.tsx считает `paddingLeft` ею же,
+        поэтому прямоугольник плана и бокс в кадре совпадают без округлений.
+        """
+        return frame_width * self.edge_ratio if self.edge == "left" else None
+
+    def preset(self, base: "Preset") -> "Preset":
+        """Пресет тихого регистра: та же тема, другой класс субтитра.
+
+        Отдельный `Preset`, а не горсть параметров, ровно потому, что раскладку
+        считает общий код: `wrap_block`, `caption_text_width`, `line_gap`,
+        `line_box_height`, `block_rect` и резерв `caption_zone` получают пресет и
+        больше ничего не знают. Регистр, выраженный пресетом, проходит через них
+        без единой ветки «а если тихий».
+
+        `base` обязан быть уже приведён к высоте кадра (`scaled`): пиксельные
+        числа регистра пересчитывает тот же `_PIXEL_FIELDS`, что и остальные.
+
+        Что обнуляется и почему:
+
+        * `fill_max_scale` → 1.0. Рост под ширину строки (С1) — приём плаката; на
+          тихом блоке он поднял бы кегль до бюджета колонки и стёр бы весь
+          регистр, ради которого всё и делается.
+        * `accent_scale`/`shout_scale` → 1.0. У тихого блока выделенного слова
+          нет, и резерв `caption_zone` обязан это знать: иначе он уступает
+          картинке полосу под крик, которого в этом регистре не бывает.
+        * `panel.enabled` — по флагу регистра, но не шире темы: панель без
+          паддингов темы нарисовать нечем.
+        """
+        ps = base.model_copy(deep=True)
+        ps.font.size = self.font_size
+        ps.caption.margin = self.margin
+        ps.caption.line_height = self.line_height
+        ps.caption.align = self.align
+        ps.caption.max_lines = self.max_lines
+        ps.caption.fill_max_scale = 1.0
+        ps.geometry.max_line_width_ratio = self.max_line_width_ratio
+        ps.panel.enabled = self.panel and base.panel.enabled
+        ps.animation.accent_scale = 1.0
+        ps.animation.shout_scale = 1.0
+        return ps
+
+
 class Caption(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -139,6 +258,9 @@ class Caption(BaseModel):
     # (`broll_free_band`), а двигать сам блок нужно было только затем, чтобы
     # разойтись с ней же.
     pinned: bool = False
+    # Второй регистр субтитра — тихий верхний блок (§1.4.1). Всё остальное в
+    # этой секции описывает ПЛАКАТ, то есть нижний регистр.
+    quiet: Quiet = Field(default_factory=Quiet)
 
 
 class Geometry(BaseModel):
@@ -358,9 +480,16 @@ class Animation(BaseModel):
 # списком: появилось новое пиксельное поле — впиши сюда, иначе на превью 720p оно
 # останется в масштабе 1920 и композиция поедет. Всё, чего здесь нет, от высоты
 # кадра не зависит по своей природе: миллисекунды, множители, доли, цвета.
+#
+# Секция пишется путём через точку: пиксели есть и у вложенного тихого регистра
+# (`caption.quiet`), а он тоже обязан уезжать на превью целиком — кегль 41 px,
+# оставленный в масштабе 1920, на кадре 960 стал бы вдвое крупнее задуманного и
+# верхний блок перестал бы быть тихим.
 _PIXEL_FIELDS: tuple[tuple[str, str], ...] = (
     ("font", "size"),
     ("caption", "margin"),
+    ("caption.quiet", "font_size"),
+    ("caption.quiet", "margin"),
     ("panel", "padding_x"),
     ("panel", "padding_y"),
     ("panel", "radius"),
@@ -382,7 +511,17 @@ _PIXEL_FIELDS: tuple[tuple[str, str], ...] = (
 # 1080p и две в 720p, то есть композиция превью не совпадает с финалом.
 # Вниз кегль относительно бюджета только уменьшается, поэтому перенос на меньшем
 # кадре может стать разве что свободнее, но не теснее.
-_ROUND_DOWN: frozenset[tuple[str, str]] = frozenset({("font", "size")})
+_ROUND_DOWN: frozenset[tuple[str, str]] = frozenset(
+    {("font", "size"), ("caption.quiet", "font_size")}
+)
+
+
+def _section(root: object, path: str) -> object:
+    """Секция пресета по пути через точку (`caption.quiet`)."""
+    node = root
+    for part in path.split("."):
+        node = getattr(node, part)
+    return node
 
 
 class Preset(BaseModel):
@@ -415,7 +554,7 @@ class Preset(BaseModel):
         k = height / 1920
         clone = self.model_copy(deep=True)
         for section, name in _PIXEL_FIELDS:
-            value = getattr(getattr(self, section), name)
+            value = getattr(_section(self, section), name)
             # Ноль — это «выключено», он остаётся нулём. А единица это не размер,
             # а волосок: округление в ноль стирает край панели совсем.
             if value == 0:
@@ -424,8 +563,12 @@ class Preset(BaseModel):
                 fresh = max(1, int(value * k))
             else:
                 fresh = max(1, round(value * k))
-            setattr(getattr(clone, section), name, fresh)
+            setattr(_section(clone, section), name, fresh)
+        # Ниже 12 px текст перестаёт быть субтитром на любом кадре. Пол стоит по
+        # эту сторону, до выгрузки в план: рендерер читает уже зажатое число, и
+        # разойтись с замером Python ему негде.
         clone.font.size = max(12, clone.font.size)
+        clone.caption.quiet.font_size = max(12, clone.caption.quiet.font_size)
         return clone
 
 

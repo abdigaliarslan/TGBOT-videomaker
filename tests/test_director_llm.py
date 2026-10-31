@@ -31,9 +31,12 @@ def good_plan() -> dict:
         "hook_end_word": 2,
         "drop_words": [],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": 1, "accent": "accent", "position": "auto", "follow_face": False},
-            {"words": [3, 4, 5], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
-            {"words": [6, 7, 8], "accent_word": 8, "accent": "shout", "position": "auto", "follow_face": False},
+            {"words": [0, 1, 2], "register": "poster",
+             "accent_word": 1, "accent": "accent", "position": "auto", "follow_face": False},
+            {"words": [3, 4, 5], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [6, 7, 8], "register": "poster",
+             "accent_word": 8, "accent": "shout", "position": "auto", "follow_face": False},
         ],
     }
 
@@ -44,8 +47,10 @@ def broken_plan() -> dict:
         "hook_end_word": None,
         "drop_words": [],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
-            {"words": [3, 6, 7, 8], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [0, 1, 2], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [3, 6, 7, 8], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
         ],
     }
 
@@ -122,8 +127,10 @@ async def test_llm_returning_garbage_indices_is_survivable():
         "hook_end_word": 999,
         "drop_words": [-5, 999],
         "blocks": [
-            {"words": [0, 1, 2, 999], "accent_word": 999, "accent": "shout", "position": "auto", "follow_face": False},
-            {"words": [3, 4, 5], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [0, 1, 2, 999], "register": "poster",
+             "accent_word": 999, "accent": "shout", "position": "auto", "follow_face": False},
+            {"words": [3, 4, 5], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
         ],
     }
     llm = client_with(plan)
@@ -133,23 +140,117 @@ async def test_llm_returning_garbage_indices_is_survivable():
 
 
 async def test_out_of_range_value_costs_a_retry():
-    """Блок из шести слов схему нарушает — ловится ДО сборки EDL и лечится ретраем."""
-    ws = words(6)
+    """Блок из девяти слов схему нарушает — ловится ДО сборки EDL и лечится ретраем.
+
+    Потолок схемы — потолок тихого регистра (8 слов, §1.4.1): длина блока это
+    выбор режиссёра, и до восьми слов она законна. Девять не бывает ни плакатом,
+    ни тихим блоком.
+    """
+    ws = words(9)
     good = {
         "hook_end_word": None, "drop_words": [],
-        "blocks": [{"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
-                   {"words": [3, 4, 5], "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
+        "blocks": [{"words": [0, 1, 2], "register": "poster",
+                    "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+                   {"words": [3, 4, 5], "register": "poster",
+                    "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+                   {"words": [6, 7, 8], "register": "poster",
+                    "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
     }
     bad = {
         "hook_end_word": None, "drop_words": [],
-        "blocks": [{"words": [0, 1, 2, 3, 4, 5], "accent_word": None, "accent": None,
+        "blocks": [{"words": list(range(9)), "register": "quiet",
+                    "accent_word": None, "accent": None,
+                    "position": "top", "follow_face": False}],
+    }
+    llm = client_with(bad, good)
+    edl = await direct(ws, 4.5, llm=llm, language="ru", cfg=cfg())
+    assert validate_edl(edl) == []
+    assert len(llm.fake.calls) == 2
+    assert "максимум 8" in llm.fake.calls[1]["user"]
+
+
+async def test_a_long_block_in_the_poster_position_costs_a_retry():
+    """Тихий регистр в плакатной позиции — противоречие, и чинит его ретрай.
+
+    Тихий блок измерен только наверху (§1.4.1). Подвинуть его туда самим значило
+    бы решать за режиссёра, где висит текст: модель, которая набирает всё
+    длинными блоками, молча получила бы ролик, где субтитры уехали наверх
+    целиком. Позиция — её решение, и ошибка в нём приезжает ей текстом.
+    """
+    ws = words(6)
+    good = {
+        "hook_end_word": None, "drop_words": [],
+        "blocks": [{"words": [0, 1, 2], "register": "poster",
+                    "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+                   {"words": [3, 4, 5], "register": "poster",
+                    "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
+    }
+    bad = {
+        "hook_end_word": None, "drop_words": [],
+        "blocks": [{"words": list(range(6)), "register": "quiet",
+                    "accent_word": None, "accent": None,
                     "position": "auto", "follow_face": False}],
     }
     llm = client_with(bad, good)
     edl = await direct(ws, 3.0, llm=llm, language="ru", cfg=cfg())
     assert validate_edl(edl) == []
     assert len(llm.fake.calls) == 2
-    assert "максимум 5" in llm.fake.calls[1]["user"]
+    assert "тихого блока" in llm.fake.calls[1]["user"]
+
+
+async def test_a_quiet_block_keeps_its_silence():
+    """Тихий блок доезжает до EDL без золота, и `lead_word` в него не лезет.
+
+    С3 поднимает слово в блоке, где режиссёр никого не выделил, — иначе блок
+    выходит стеной ровного крупного текста. К тихому регистру это не относится:
+    в эталоне у него нет ни одного золотого слова (§1.4.1), а выделение в мелком
+    кегле у левого края — не иерархия, а пятно.
+    """
+    ws = words(10)
+    plan = {
+        "hook_end_word": 1,
+        "drop_words": [],
+        "blocks": [
+            {"words": [0, 1], "register": "poster",
+             "accent_word": 1, "accent": "shout", "position": "auto", "follow_face": False},
+            {"words": [2, 3, 4, 5, 6, 7], "register": "quiet",
+             "accent_word": None, "accent": None, "position": "top", "follow_face": False},
+            {"words": [8, 9], "register": "poster",
+             "accent_word": 9, "accent": "accent", "position": "auto", "follow_face": False},
+        ],
+    }
+    edl = await direct(ws, 5.0, llm=client_with(plan), language="ru", cfg=cfg())
+    assert validate_edl(edl) == []
+    quiet = edl.captions[1]
+    assert quiet.position == "top" and len(quiet.words) == 6
+    assert all(cw.emphasis.value == "none" for cw in quiet.words)
+    # Плакаты рядом иерархию не теряют.
+    assert [sum(1 for cw in b.words if cw.emphasis.value != "none") for b in edl.captions] == [1, 0, 1]
+
+
+async def test_gold_asked_for_a_quiet_block_is_dropped_not_retried():
+    """Акцент в тихом блоке — перебор с приёмом, и он снимается молча.
+
+    Так же устроены `anchor_track` и `panel`: лишний приём дешевле снять, чем
+    гонять модель по кругу. Регистр при этом модель объявила сама, и позиция у
+    него верная — спорить тут не о чем, противоречит только акцент.
+    """
+    ws = words(8)
+    plan = {
+        "hook_end_word": None,
+        "drop_words": [],
+        "blocks": [
+            {"words": list(range(6)), "register": "quiet",
+             "accent_word": 2, "accent": "shout", "position": "top", "follow_face": False},
+            {"words": [6, 7], "register": "poster",
+             "accent_word": 7, "accent": "accent", "position": "auto", "follow_face": False},
+        ],
+    }
+    llm = client_with(plan)
+    edl = await direct(ws, 4.0, llm=llm, language="ru", cfg=cfg())
+    assert validate_edl(edl) == []
+    assert len(llm.fake.calls) == 1, "ретрая быть не должно"
+    assert all(cw.emphasis.value == "none" for cw in edl.captions[0].words)
 
 
 async def test_dropped_words_are_excluded_from_captions_and_cuts():
@@ -158,9 +259,12 @@ async def test_dropped_words_are_excluded_from_captions_and_cuts():
         "hook_end_word": 2,
         "drop_words": [4],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
-            {"words": [3, 5], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
-            {"words": [6, 7, 8], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [0, 1, 2], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [3, 5], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [6, 7, 8], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
         ],
     }
     llm = client_with(plan)
@@ -183,9 +287,12 @@ async def test_a_long_filler_is_still_cut():
         "hook_end_word": 2,
         "drop_words": [],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
-            {"words": [3, 5], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
-            {"words": [6, 7, 8], "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [0, 1, 2], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [3, 5], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
+            {"words": [6, 7, 8], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto", "follow_face": False},
         ],
     }
     edl = await direct(ws, 4.5, llm=client_with(plan), language="ru", cfg=cfg())
@@ -201,7 +308,9 @@ async def test_words_table_is_sent_not_raw_text():
         {
             "hook_end_word": None,
             "drop_words": [],
-            "blocks": [{"words": [0, 1, 2, 3], "accent_word": None, "accent": None, "position": "auto", "follow_face": False}],
+            "blocks": [{"words": [0, 1, 2, 3], "register": "poster",
+                        "accent_word": None, "accent": None,
+                        "position": "auto", "follow_face": False}],
         }
     )
     await direct(ws, 2.0, llm=llm, language="ru", cfg=cfg())

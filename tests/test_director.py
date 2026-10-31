@@ -10,12 +10,21 @@ from __future__ import annotations
 import pytest
 
 from src.core.config import Settings
-from src.core.edl import Cut, Word, validate_edl
+from src.core.edl import (
+    BLOCK_MAX_WORDS,
+    BLOCK_POSTER_MAX_WORDS,
+    BLOCK_QUIET_MIN_WORDS,
+    Cut,
+    Word,
+    validate_edl,
+)
 from src.pipeline.director import (
     FRAMING_MIN_HOLD,
     FRAMING_MIN_SEGMENT,
+    QUIET_EVERY_SECONDS,
     assign_framing,
     build_cuts,
+    compose_blocks,
     deterministic_edl,
     edl_from_plan,
     hesitation_indices,
@@ -155,6 +164,104 @@ def test_lonely_tail_word_is_glued():
     assert [i for b in blocks for i in b] == [0, 1, 2, 3, 4]
 
 
+# --------------------------------------------- два регистра в фолбэке (§1.4.1)
+
+
+def speech(texts: list[str], step: float = 0.35) -> list[Word]:
+    return [
+        Word(idx=i, text=t, start=i * step, end=i * step + step * 0.8)
+        for i, t in enumerate(texts)
+    ]
+
+
+SENTENCE = "Я думаю, что каждый человек должен понять одну истину.".split()
+AFTER = "То есть если ты думаешь о том, что можно делать сегодня, завтра.".split()
+
+
+def test_fallback_composes_both_registers():
+    """Фолбэк держит не только текст, но и облик.
+
+    Замер золотой маски: у эталона размер главного слова гуляет 2.7-7.5 %
+    высоты кадра, у нас 4.0-6.2 % — потому что все блоки выходили одной длины и
+    после подгонки строки под ширину получались одного кегля. Ролик, упавший в
+    фолбэк, обязан терять b-roll, а не разброс кегля.
+    """
+    ws = speech(SENTENCE + AFTER)
+    out = compose_blocks(ws, [w.idx for w in ws], cfg=cfg(sub_max_chars=99))
+    # Регистр фолбэк ОБЪЯВЛЯЕТ третьим значением, а не оставляет на догадку по
+    # позиции: наверху стоят оба регистра (§1.4.1).
+    quiet = [(g, p) for g, p, silent in out if silent]
+    assert len(quiet) == 1, out
+    group, position = quiet[0]
+    assert position == "top"
+    assert BLOCK_QUIET_MIN_WORDS <= len(group) <= BLOCK_MAX_WORDS
+    # Тихий блок взял связку, открывающую новое предложение, а не пик.
+    assert [ws[i].text for i in group][:3] == ["То", "есть", "если"]
+    # Плакаты рядом есть, и они короче.
+    assert any(len(g) <= BLOCK_POSTER_MAX_WORDS for g, _, silent in out if not silent)
+    assert [i for g, _, _ in out for i in g] == [w.idx for w in ws]
+
+
+def test_the_fallback_never_opens_with_a_quiet_block():
+    """Первый блок — хук, единственный обязанный удержать зрителя.
+
+    Тихий блок висит наверху мелким кеглем: открыть им ролик значит открыть
+    ролик тем, что зритель не прочитает.
+    """
+    ws = speech(SENTENCE + AFTER)
+    out = compose_blocks(ws, [w.idx for w in ws], cfg=cfg(sub_max_chars=99))
+    assert out[0][1] == "auto" and out[0][2] is False
+
+
+def test_a_short_reel_stays_all_posters():
+    """Прогона под тихий блок нет — и регистр не навязывается.
+
+    Тихий блок забирает голову прогона, который открывает новое предложение, и
+    оставляет хвосту плакат с точкой. Одна короткая фраза такого прогона не
+    даёт.
+    """
+    ws = speech("Короткая фраза без длинных прогонов.".split())
+    out = compose_blocks(ws, [w.idx for w in ws], cfg=cfg(sub_max_chars=99))
+    assert all(p == "auto" and not silent for _, p, silent in out)
+
+
+def test_the_quiet_block_leaves_the_period_to_a_poster():
+    """Точка стоит в конце прогона, и этот конец — пик, а пик набирают крупно."""
+    ws = speech(SENTENCE + AFTER)
+    out = compose_blocks(ws, [w.idx for w in ws], cfg=cfg(sub_max_chars=99))
+    last_group, last_pos, last_quiet = out[-1]
+    assert last_pos == "auto" and last_quiet is False
+    assert ws[last_group[-1]].text.endswith(".")
+
+
+def test_the_quiet_block_budget_follows_the_speech_length():
+    """Тихих блоков тем больше, чем длиннее речь: один на QUIET_EVERY_SECONDS.
+
+    В эталоне тихий блок один на 23.6 с (§1.4.1). Приём редкий, и на коротком
+    ролике его больше одного быть не должно, иначе субтитры читаются как
+    уехавшие наверх целиком.
+    """
+    long_speech = (SENTENCE + AFTER) * 4
+    ws = speech(long_speech, step=0.5)
+    out = compose_blocks(ws, [w.idx for w in ws], cfg=cfg(sub_max_chars=99))
+    span = ws[-1].end - ws[0].start
+    quiet = sum(1 for _, _, silent in out if silent)
+    assert 1 <= quiet <= max(1, int(span / QUIET_EVERY_SECONDS))
+    # Подряд тихие блоки не идут: после каждого в прогоне остаётся плакат.
+    registers = [silent for _, _, silent in out]
+    assert not any(a and b for a, b in zip(registers, registers[1:]))
+
+
+def test_the_fallback_edl_keeps_the_quiet_block_silent():
+    """В тихом блоке фолбэка выделенного слова нет, в плакатах — ровно одно."""
+    ws = speech(SENTENCE + AFTER)
+    edl = deterministic_edl(ws, ws[-1].end + 0.5, cfg=cfg(sub_max_chars=99))
+    assert validate_edl(edl) == []
+    for block in edl.captions:
+        marked = sum(1 for cw in block.words if cw.emphasis.value != "none")
+        assert marked == (0 if block.quiet_register() else 1), block
+
+
 # ------------------------------------------------------------------ сборка EDL
 
 
@@ -176,9 +283,12 @@ def test_edl_from_plan_is_valid():
         "hook_end_word": 2,
         "drop_words": [4],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": 1, "accent": "accent", "position": "auto"},
-            {"words": [3, 5], "accent_word": None, "accent": None, "position": "auto"},
-            {"words": [6, 7, 8], "accent_word": 8, "accent": "shout", "position": "auto"},
+            {"words": [0, 1, 2], "register": "poster",
+             "accent_word": 1, "accent": "accent", "position": "auto"},
+            {"words": [3, 5], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto"},
+            {"words": [6, 7, 8], "register": "poster",
+             "accent_word": 8, "accent": "shout", "position": "auto"},
         ],
     }
     edl = edl_from_plan(ws, 5.0, plan, cfg=cfg())
@@ -194,8 +304,10 @@ def test_edl_from_plan_drops_unknown_indices():
     plan = {
         "hook_end_word": 99,
         "drop_words": [77],
-        "blocks": [{"words": [0, 1, 99], "accent_word": 99, "accent": "shout", "position": "auto"},
-                   {"words": [2, 3], "accent_word": None, "accent": None, "position": "auto"}],
+        "blocks": [{"words": [0, 1, 99], "register": "poster",
+                    "accent_word": 99, "accent": "shout", "position": "auto"},
+                   {"words": [2, 3], "register": "poster",
+                    "accent_word": None, "accent": None, "position": "auto"}],
     }
     edl = edl_from_plan(ws, 3.0, plan, cfg=cfg())
     assert validate_edl(edl) == []
@@ -206,8 +318,10 @@ def test_edl_from_plan_ignores_accent_outside_block():
     plan = {
         "hook_end_word": None,
         "drop_words": [],
-        "blocks": [{"words": [0, 1], "accent_word": 3, "accent": "shout", "position": "auto"},
-                   {"words": [2, 3], "accent_word": None, "accent": None, "position": "auto"}],
+        "blocks": [{"words": [0, 1], "register": "poster",
+                    "accent_word": 3, "accent": "shout", "position": "auto"},
+                   {"words": [2, 3], "register": "poster",
+                    "accent_word": None, "accent": None, "position": "auto"}],
     }
     edl = edl_from_plan(ws, 3.0, plan, cfg=cfg())
     assert validate_edl(edl) == []
@@ -236,8 +350,10 @@ def test_every_block_gets_a_lead_word():
         "hook_end_word": None,
         "drop_words": [],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": None, "accent": None, "position": "auto"},
-            {"words": [3, 4], "accent_word": None, "accent": None, "position": "auto"},
+            {"words": [0, 1, 2], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto"},
+            {"words": [3, 4], "register": "poster",
+             "accent_word": None, "accent": None, "position": "auto"},
         ],
     }
     edl = edl_from_plan(ws, 3.0, plan, cfg=cfg())
@@ -256,7 +372,8 @@ def test_the_directors_word_beats_the_fallback():
     plan = {
         "hook_end_word": None,
         "drop_words": [],
-        "blocks": [{"words": [0, 1, 2], "accent_word": 2, "accent": "shout", "position": "auto"}],
+        "blocks": [{"words": [0, 1, 2], "register": "poster",
+                    "accent_word": 2, "accent": "shout", "position": "auto"}],
     }
     edl = edl_from_plan(ws, 2.0, plan, cfg=cfg())
     marked = {cw.word_idx: cw.emphasis.value for cw in edl.captions[0].words}
@@ -443,9 +560,9 @@ def test_the_panel_is_the_directors_call_and_stays_rare():
         "hook_end_word": None,
         "drop_words": [],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": 1, "accent": "accent",
+            {"words": [0, 1, 2], "register": "poster", "accent_word": 1, "accent": "accent",
              "position": "auto", "panel": True},
-            {"words": [3, 4, 5], "accent_word": 4, "accent": "accent",
+            {"words": [3, 4, 5], "register": "poster", "accent_word": 4, "accent": "accent",
              "position": "auto"},
         ],
     }
@@ -466,17 +583,110 @@ def test_a_panel_on_every_block_is_trimmed_to_the_cap():
         "hook_end_word": None,
         "drop_words": [],
         "blocks": [
-            {"words": [0, 1, 2], "accent_word": 1, "accent": "accent",
+            {"words": [0, 1, 2], "register": "poster", "accent_word": 1, "accent": "accent",
              "position": "auto", "panel": True},
-            {"words": [3, 4, 5], "accent_word": 4, "accent": "accent",
+            {"words": [3, 4, 5], "register": "poster", "accent_word": 4, "accent": "accent",
              "position": "auto", "panel": True},
-            {"words": [6, 7, 8], "accent_word": 7, "accent": "accent",
+            {"words": [6, 7, 8], "register": "poster", "accent_word": 7, "accent": "accent",
              "position": "auto", "panel": True},
         ],
     }
     edl = edl_from_plan(ws, 4.5, plan, cfg=cfg())
     assert validate_edl(edl) == []
     assert [b.panel for b in edl.captions] == [True, True, False]
+
+
+def test_a_poster_at_the_top_keeps_its_gold():
+    """Регистр приходит из плана, а не из позиции — иначе верх всегда тихий.
+
+    В эталоне наверху стоит и крупный ЗОЛОТОЙ плакат (9.2-12.0 с, центр отдан
+    вставке — §1.4.1, §1.5). Пока регистр выводился из позиции, этот блок был
+    невыразим: любой верхний терял золото.
+    """
+    ws = mk([(f"сл{i}", i * 0.4, i * 0.4 + 0.3) for i in range(6)])
+    plan = {
+        "hook_end_word": None,
+        "drop_words": [],
+        "blocks": [
+            {"words": [0, 1, 2], "register": "poster", "accent_word": 1,
+             "accent": "accent", "position": "top", "follow_face": False},
+            {"words": [3, 4, 5], "register": "quiet", "accent_word": None,
+             "accent": None, "position": "top", "follow_face": False},
+        ],
+    }
+    edl = edl_from_plan(ws, 3.0, plan, cfg=cfg())
+    assert validate_edl(edl) == []
+    poster, quiet = edl.captions
+    assert poster.quiet is False and poster.position == "top"
+    assert [cw.emphasis.value for cw in poster.words].count("accent") == 1
+    # Тихий блок в той же позиции золота не носит — регистр, а не место.
+    assert quiet.quiet is True
+    assert all(cw.emphasis.value == "none" for cw in quiet.words)
+
+
+def test_a_long_block_called_a_poster_is_quieted_without_a_retry():
+    """Перебор с ДЛИНОЙ правим молча: столько слов кеглем плаката уедут за кадр.
+
+    Это не непонятый регистр, а арифметика раскладки
+    (`BLOCK_POSTER_MAX_WORDS`), и ретрай к ней ничего не добавит. Акцент при
+    этом снимается вместе с регистром.
+    """
+    ws = mk([(f"сл{i}", i * 0.4, i * 0.4 + 0.3) for i in range(7)])
+    plan = {
+        "hook_end_word": None,
+        "drop_words": [],
+        "blocks": [
+            {"words": list(range(7)), "register": "poster", "accent_word": 2,
+             "accent": "accent", "position": "top", "follow_face": False},
+        ],
+    }
+    edl = edl_from_plan(ws, 3.5, plan, cfg=cfg())
+    assert validate_edl(edl) == []
+    assert edl.captions[0].quiet is True
+    assert all(cw.emphasis.value == "none" for cw in edl.captions[0].words)
+
+
+def test_a_panel_asked_for_a_quiet_block_is_dropped():
+    """Стекло на тихом блоке снимаем молча: в эталоне тихий регистр его не носит.
+
+    Та же логика, что у акцента и привязки к голове: противоречивая заявка
+    дешевле в правке, чем в ретрае.
+    """
+    ws = mk([(f"сл{i}", i * 0.4, i * 0.4 + 0.3) for i in range(6)])
+    plan = {
+        "hook_end_word": None,
+        "drop_words": [],
+        "blocks": [
+            {"words": list(range(6)), "register": "quiet", "accent_word": None,
+             "accent": None, "position": "top", "follow_face": False, "panel": True},
+        ],
+    }
+    edl = edl_from_plan(ws, 3.0, plan, cfg=cfg())
+    assert validate_edl(edl) == []
+    assert edl.captions[0].quiet is True and edl.captions[0].panel is False
+
+
+def test_a_plan_without_the_register_field_falls_back_to_length():
+    """Плана не по схеме регистр не несёт — тогда его решает длина, как решала.
+
+    Схема `direct` поле требует, но план может приехать и мимо неё (ручная
+    правка, чужой инструмент). Терять из-за этого раскадровку нельзя.
+    """
+    ws = mk([(f"сл{i}", i * 0.4, i * 0.4 + 0.3) for i in range(9)])
+    plan = {
+        "hook_end_word": None,
+        "drop_words": [],
+        "blocks": [
+            {"words": [0, 1, 2]},
+            {"words": list(range(3, 9)), "position": "top"},
+        ],
+    }
+    edl = edl_from_plan(ws, 4.5, plan, cfg=cfg())
+    assert validate_edl(edl) == []
+    assert [b.quiet for b in edl.captions] == [None, True]
+    # Короткий блок остался плакатом и золото получил (С3), длинный — тихий.
+    assert sum(1 for cw in edl.captions[0].words if cw.emphasis.value != "none") == 1
+    assert all(cw.emphasis.value == "none" for cw in edl.captions[1].words)
 
 
 def test_a_plan_without_the_panel_field_means_no_panel():
