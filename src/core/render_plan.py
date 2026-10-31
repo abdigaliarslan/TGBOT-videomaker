@@ -27,6 +27,11 @@
 регистром раскладка поэтому зависит от того, какую позицию блок займёт. Значит
 мерить его приходится под каждую возможную позицию (`_Place`, `lay_places`), а не
 один раз на все.
+
+Третий регистр — ТИТР первых секунд (STYLE_PLAN §5, `title_card_block`). Он тоже
+плакат, только наверху и своим кеглем, и от двух других отличается не раскладкой,
+а происхождением: его текст приезжает заголовком листа (`EDL.title`), а не
+словами транскрипта, поэтому блока для него в EDL нет и собирается он здесь.
 """
 
 from __future__ import annotations
@@ -56,7 +61,7 @@ from src.core.geometry import (
     resting_anchor,
     space_width,
 )
-from src.core.preset import Preset, load_preset
+from src.core.preset import Preset, TitleCard, load_preset
 from src.core.text import display_text
 from src.core.track import FaceTrack
 
@@ -113,6 +118,16 @@ class PlanBlock:
     # (`caption.quiet`), которые уже лежат в плане. `False` у всего плана — тема
     # без второго регистра (glass, bold) или план, собранный до его появления.
     quiet: bool = False
+    # ТИТР ролика (STYLE_PLAN §5) — третий регистр. Блок, которого нет в речи:
+    # текст ему даёт заголовок (`EDL.title`), а не слова транскрипта, и собирает
+    # его `build_plan`, а не режиссёр.
+    #
+    # Флаг, а не вывод по позиции или по кеглю: числа регистра лежат в
+    # `preset.caption.title_card`, и рендерер обязан подменить ими числа темы —
+    # отступ от верха у титра свой (332 px против 380 у плаката) и межстрочие
+    # своё, иначе полоса титра уедет мимо замера. Регистры взаимоисключающи:
+    # титр — это плакат наверху, и `quiet` у него всегда `False`.
+    title_card: bool = False
 
     @property
     def words(self) -> list[PlanWord]:
@@ -178,6 +193,7 @@ class RenderPlan:
                     panel=bool(b.get("panel", False)),
                     anchor_path=b.get("anchor_path"),
                     quiet=bool(b.get("quiet", False)),
+                    title_card=bool(b.get("title_card", False)),
                 )
                 for b in data.get("blocks", [])
             ],
@@ -219,6 +235,7 @@ class RenderPlan:
                     "panel": b.panel,
                     "anchor_path": b.anchor_path,
                     "quiet": b.quiet,
+                    "title_card": b.title_card,
                 }
                 for b in self.blocks
             ],
@@ -476,6 +493,13 @@ def _rect_of_lines(
     Прямоугольник обязан НАКРЫВАТЬ текст (по нему меряется яркость фона и
     разводится картинка); зажатый бюджетом, он бы врал про место текста.
 
+    Накрывает он, пока межстрочие не меньше единицы: это КОРОБКА строк, а глифы
+    при тесном межстрочии торчат из своего строчного бокса. У титра (§5,
+    межстрочие 0.5) они выходят за коробку на 6 px сверху и снизу — замерено на
+    кадре. Для развода с картинкой это в пределах зазора `broll_margin_ratio`
+    (54 px), а занижать коробку ради них значило бы разойтись с Chromium,
+    который рисует именно её.
+
     `left` уезжает в `block_rect` как есть: тихий регистр стоит у левого края
     кадра, а не по центру (§1.4.1). `None` — центр.
     """
@@ -489,6 +513,53 @@ def _rect_of_lines(
         line_box_height((w.size for w in line if w.size), preset) for line in lines
     ) + gap * max(0, len(lines) - 1)
     return block_rect(position, text_w, text_h, preset, frame, left=left)
+
+
+# --------------------------------------------------------------------------- титр
+
+
+def title_card_words(
+    title: str, card: TitleCard, window: tuple[float, float], *, uppercase: bool = False
+) -> list[PlanWord]:
+    """Заголовок ролика → слова титра (STYLE_PLAN §5).
+
+    Крупным идёт ПОСЛЕДНЕЕ слово заголовка, остальные — подписью над ним. Два
+    довода, и оба про раскладку, а не про вкус:
+
+    * Так устроен титр эталона: подпись сверху, одно огромное слово под ней.
+      Перенос у нас жадный (`_greedy`) и порядок слов не меняет, поэтому на
+      отдельную строку слово уходит только с КРАЯ последовательности. Слово
+      покрупнее из середины (так выбирает `director.lead_word` для плаката, С3)
+      разорвало бы подпись пополам, и структура регистра рассыпалась бы.
+    * Заголовок пишет `make_metadata` как обещание ролика, и его конец —
+      именно та точка, ради которой он написан.
+
+    Слова приходят по одному, как в обычном блоке: место под ещё не пришедшее
+    зарезервировано заранее (замер §1.3 — левый край подписи не шевелится по
+    мере набора), это обычный механизм ghost-слов. Шаг — `word_step`, но
+    последнее слово обязано встать не позже середины жизни титра: заголовок из
+    восьми слов иначе дорисовывался бы ровно к своему исчезновению.
+
+    `word_idx` отрицательный: в транскрипте этих слов нет вовсе, ссылаться им
+    не на что, а рендереру нужен только уникальный в блоке ключ.
+    """
+    start, end = window
+    parts = [display_text(p, uppercase=uppercase) for p in title.split()]
+    parts = [p for p in parts if p]
+    if not parts:
+        return []
+    half = max(0.0, (end - start) / 2)
+    step = min(card.word_step, half / (len(parts) - 1)) if len(parts) > 1 else 0.0
+    return [
+        PlanWord(
+            text=text,
+            start=round(start + i * step, 3),
+            end=round(end, 3),
+            emphasis="accent" if i == len(parts) - 1 else "none",
+            word_idx=-1 - i,
+        )
+        for i, text in enumerate(parts)
+    ]
 
 
 # --------------------------------------------------------------------------- сборка
@@ -945,6 +1016,109 @@ def build_plan(
             a.end = b.start
     if blocks and duration > 0:
         blocks[-1].end = min(blocks[-1].end, duration)
+
+    def title_card_block() -> PlanBlock | None:
+        """Титр ролика или `None`, если ему в этом ролике не место (STYLE_PLAN §5).
+
+        Текст приезжает заголовком листа (`EDL.title`), а не из речи: титр — это
+        обещание ролика, а не реплика. Числа — из темы (`caption.title_card`),
+        которая выражена пресетом и проходит через тот же общий код, что и два
+        других регистра (`TitleCard.preset`).
+
+        Титра НЕ БУДЕТ, и каждая причина — правило, а не осторожность:
+
+        1. Тема титра не просит или заголовка нет (лист до появления поля, прогон
+           без LLM) — рисовать нечего.
+        2. Ролик кончается раньше титра. Обрезанный титр читается как сбой.
+        3. Заголовок не уложился в свои две строки даже после ужатия. Три строки
+           наверху кадра — это абзац, а не титр.
+        4. После ужатия большое слово не крупнее потолка ПЛАКАТА этой темы. Весь
+           смысл титра в том, что он крупнее любого субтитра ролика (эталон: 10.1 %
+           высоты кадра против потолка плаката 7.5 %); ужатый до плакатного кегля,
+           он перестаёт быть титром и становится вторым субтитром наверху.
+        5. Полосу титра занимает субтитр или картинка.
+
+        Про последнее — правило разведения. Титр УСТУПАЕТ всему и не двигает
+        ничего: он не попадает в `text_zones`, то есть картинка про него не знает
+        и место под него не освобождает (иначе необязательный блок выталкивал бы
+        вставку в полный кадр), а занятость проверяется теми же прямоугольниками,
+        что и везде в этом модуле. Уступает он целиком, а не частично: ужать
+        титр значит отнять у него единственное, чем он является (пункт 4), а
+        обрезать по времени — показать половину заголовка (слова приходят по
+        одному), и обе половинчатости хуже честного отсутствия.
+
+        Что при этом НЕ считается занятостью: субтитр, который просто звучит в
+        это же время. У нас речь начинается с первых кадров (`cut_pad_before`
+        0.15 с), и запрет «титр только в тишине» означал бы, что титра не бывает
+        никогда. Плакат живёт внизу кадра, титр — наверху, и мешают они друг
+        другу тогда же, когда любые два блока: когда пересекаются
+        прямоугольники. В эталоне вопрос не возникает вовсе — там первый субтитр
+        приходит на 2.4 с, через секунду после титра.
+        """
+        card = ps.caption.title_card
+        text = (edl.title or "").strip()
+        if not card.enabled or not text:
+            return None
+        start = card.start
+        end = start + card.duration
+        if duration > 0 and end > duration:
+            log.info("титр не поставлен: ролик (%.2f с) короче титра", duration)
+            return None
+
+        card_ps = card.preset(ps)
+        words = title_card_words(
+            text, card, (start, end), uppercase=card_ps.font.uppercase
+        )
+        if not words:
+            return None
+        lines, widths = layout(words, card_ps)
+        if not widths:
+            # Метрик шрифта нет, строка не измерена. Субтитр в этом случае
+            # отдаёт раскладку браузеру, а титр — нет: без прямоугольника его
+            # нечем развести с остальным кадром, а стоит он поверх лица.
+            log.info("титр не поставлен: строку нечем измерить")
+            return None
+        if len(lines) > card_ps.caption.max_lines:
+            log.info("титр не поставлен: заголовок не уложился в %d строки", card.max_lines)
+            return None
+        biggest = max((w.size or 0.0) for w in words)
+        poster_ceiling = ps.font.size * max(1.0, ps.caption.fill_max_scale)
+        if biggest <= poster_ceiling:
+            log.info(
+                "титр не поставлен: большое слово ужато до %.0f px при потолке плаката %.0f px",
+                biggest, poster_ceiling,
+            )
+            return None
+
+        rect = _rect_of_lines("top", lines, widths, card_ps, frame)
+        if any(rect.overlaps(zone) for zone in text_zones(start, end)):
+            log.info("титр не поставлен: его полосу занимает субтитр")
+            return None
+        if any(
+            pic.rect is not None
+            and pic.start < end
+            and pic.end > start
+            and pic.rect.overlaps(rect)
+            for pic in broll
+        ):
+            log.info("титр не поставлен: его полосу занимает картинка")
+            return None
+        return PlanBlock(
+            start=start,
+            end=end,
+            position="top",
+            lines=lines,
+            rect=rect,
+            title_card=True,
+        )
+
+    card_block = title_card_block()
+    if card_block is not None:
+        # Титр идёт ПЕРВЫМ и в обрезку соседей выше не попадает намеренно: она
+        # разводит блоки, стоящие в одном месте кадра друг за другом, а титр
+        # стоит в своей полосе — пустой, иначе его бы тут не было, — и обрывать
+        # его началом нижнего субтитра не за что.
+        blocks.insert(0, card_block)
 
     return RenderPlan(
         version=1,

@@ -696,25 +696,60 @@ def caption_text_width(preset: Any, frame_width: int) -> float:
 
 
 def line_gap(preset: Any) -> float:
-    """Просвет между строками блока (flex-`gap` в Captions.tsx)."""
-    return float(_round_px(preset.font.size * (preset.caption.line_height - 1)))
+    """Просвет между строками блока (flex-`gap` в Captions.tsx).
+
+    Отрицательным не бывает: CSS отрицательный `gap` не принимает — объявление
+    невалидно, и свойство остаётся нулём. Межстрочие меньше единицы — не
+    выдумка, а титр (`caption.title_card.line_height` 0.5, см. там же почему), и
+    Python обязан посчитать тот же ноль, который нарисует Chromium, иначе
+    прямоугольник блока разойдётся с кадром на целый просвет.
+    """
+    return max(0.0, float(_round_px(preset.font.size * (preset.caption.line_height - 1))))
 
 
-def line_box_height(sizes: Iterable[float], preset: Any) -> float:
+def line_box_height(
+    sizes: Iterable[float], preset: Any, *, metrics: "FontMetrics | None" = None
+) -> float:
     """Высота строчного бокса по кеглям слов в строке.
 
-    `line-height` задан числом, значит наследуется множителем и считается от
-    собственного кегля элемента: бокс поднимает самое крупное слово. Но не
-    бывает ниже СТРУТА — кегля самого контейнера строки, то есть кегля пресета:
-    как бы сильно перенос ни ужал слова, строка остаётся высотой
-    `font.size * line_height` (замерено в Chromium: строка из слова кеглем 35
-    занимает 93.27 px, ровно струт, а не 37).
+    Строчный бокс CSS — это не «самый крупный кегль на межстрочие». Слова
+    выровнены ПО БАЗОВОЙ ЛИНИИ, и высота строки складывается из двух максимумов:
+    самого высокого подъёма НАД базовой линией и самого глубокого спуска ПОД
+    неё. У бокса кеглем F при межстрочии lh подъём равен `F·(lh/2 + c)`, спуск —
+    `F·(lh/2 − c)`, где `c = (ascender + descender)/2` в em (у Montserrat
+    ExtraBold это 0.3585). В строке участвует и СТРУТ — бокс самого контейнера,
+    то есть кегль пресета.
 
-    Единственная реализация на оба пути — `caption_rect` и `_rect_of_lines`.
-    Пока их было две, вторая знала про струт, а первая нет.
+    Пока `lh ≥ 2c` (1.06 у плаката, 1.2 у тихого регистра) спуск положителен,
+    оба максимума берёт самый крупный кегль, и всё схлопывается в привычное
+    `max(кегль)·lh`. Замерено в Chromium: строка из слова кеглем 35 при пресете
+    88 занимает 93.27 px — ровно струт, а не 37. Эта ветка возвращает ровно
+    прежнее число, бит в бит: темы, у которых титра нет, от правки не меняются.
+
+    Ниже `2c = 0.717` спуск становится ОТРИЦАТЕЛЬНЫМ (строки заходят друг на
+    друга), и максимум спуска берёт уже самый МЕЛКИЙ кегль строки. Это титр
+    (`caption.title_card`, межстрочие 0.5): его огромное слово поднимается выше
+    базовой линии мелкой строки — ровно так набран титр эталона, где верх
+    большого слова на 15 px (кадр 848 px) ВЫШЕ базовой линии подписи над ним. По
+    старой формуле такая строка занижалась на 23 px при кегле 276, и
+    прямоугольник блока переставал накрывать текст.
+
+    Без метрик шрифта `c` взять неоткуда, и остаётся прежняя формула: она верна
+    везде, где `lh ≥ 2c`, то есть во всех поставляемых темах, а титра без
+    метрик не бывает вовсе — его раскладку считает `wrap_block`.
     """
-    biggest = max([float(preset.font.size), *(float(s) for s in sizes)])
-    return biggest * preset.caption.line_height
+    all_sizes = [float(preset.font.size), *(float(s) for s in sizes)]
+    biggest = max(all_sizes)
+    lh = float(preset.caption.line_height)
+    if metrics is None:
+        try:
+            metrics = metrics_for(preset)
+        except (FileNotFoundError, ValueError):
+            return biggest * lh
+    half = (metrics.ascender + metrics.descender) / (2 * metrics.units_per_em)
+    if lh / 2 >= half:
+        return biggest * lh
+    return biggest * (lh / 2 + half) + min(all_sizes) * (lh / 2 - half)
 
 
 def block_rect(
@@ -796,7 +831,7 @@ def caption_rect(block: _HasLines, preset: Any, frame_size: tuple[int, int]) -> 
                 line, metrics=metrics, letter_spacing=ls, base_size=float(preset.font.size)
             ),
         )
-        text_h += line_box_height((w.size for w in line), preset)
+        text_h += line_box_height((w.size for w in line), preset, metrics=metrics)
         if i:
             text_h += line_gap(preset)
     text_w = min(text_w, caption_text_width(preset, width))

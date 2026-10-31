@@ -221,12 +221,31 @@ async def process_video(
             raise JobError("Не удалось собрать монтажный лист: " + "; ".join(errors[:3]), "edl_invalid")
         edl_from_llm = bool(llm and llm.ready and any(u.prompt == "direct" for u in llm.usages))
         style = apply_accent(load_preset(preset or edl.preset), options.accent)
+
         if not options.camera:
             # Движение камеры выключено: один план на весь ролик. Правится EDL, а
             # не кроп, — тогда и звуковые акценты на укрупнениях пропадают сами,
             # и сохранённый лист честно описывает то, что видно в кадре.
             for c in edl.cuts:
                 c.framing = "wide"
+
+        # ---------------------------------------------------------- заголовок
+        # Метаданные считаются ЗДЕСЬ, а не после рендера, как раньше: заголовок
+        # из них — это текст ТИТРА первых секунд (STYLE_PLAN §5), а титр ставит
+        # `build_plan`. Кладём его в EDL, а не носим отдельной переменной:
+        # перерендер (`process_from_edl`, `rerender_job`) получает ровно лист и
+        # обязан дать то же видео — см. `EDL.title`.
+        #
+        # Шаг необязательный, как и раньше: модель недоступна — заголовка нет,
+        # титра нет, ролик собирается.
+        t = time.perf_counter()
+        metadata = await make_metadata(
+            asr.text, edl.out_duration, llm=llm, language=asr.language, cfg=cfg
+        )
+        title = (metadata or {}).get("title")
+        if isinstance(title, str) and title.strip():
+            edl.title = title.strip()
+        mark("metadata", t)
 
         # ---------------------------------------------------------- b-roll
         broll_used = 0
@@ -353,9 +372,6 @@ async def process_video(
             )
         mark("render", t)
 
-        metadata = await make_metadata(
-            asr.text, edl.out_duration, llm=llm, language=asr.language, cfg=cfg
-        )
         await _notify(progress, "done")
 
         result = JobResult(

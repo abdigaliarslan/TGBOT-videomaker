@@ -1632,3 +1632,334 @@ def test_a_panelled_block_takes_the_same_room_as_a_bare_one():
     glass = build_plan(edl, "v.mp4", cfg=cfg())
     for a, b in zip(bare.blocks, glass.blocks):
         assert a.rect == b.rect
+
+
+# ------------------------------------------------------------------ титр (STYLE_PLAN §5)
+
+# Заголовок длиной с эталонный титр: подпись в одну строку и короткое слово под
+# ней. Текст СВОЙ — титр эталона называет чужой продукт, и копировать там нечего:
+# наш титр набирает заголовок самого ролика (`EDL.title`).
+CARD_TITLE = "Ролики из сырого видео"
+# Полоса титра в эталоне и высота глифов его большого слова — доли высоты кадра.
+CARD_BAND = (0.170, 0.277)
+CARD_GLYPHS = 0.101
+
+
+def card_edl(
+    title: str | None = CARD_TITLE,
+    *,
+    speech: list[str] | None = None,
+    position: str = "bottom",
+    quiet: bool | None = False,
+    anchor: str | None = None,
+    preset: str = "pulse",
+    source_duration: float = 12.0,
+) -> EDL:
+    """Ролик, который начинает говорить сразу, плюс заголовок для титра."""
+    spoken = speech or ["так", "вот", "смотрите"]
+    words = [
+        Word(idx=i, text=t, start=0.15 + i * 0.45, end=0.15 + i * 0.45 + 0.4)
+        for i, t in enumerate(spoken)
+    ]
+    return EDL(
+        source_duration=source_duration,
+        words=words,
+        cuts=[Cut(src_in=0.0, src_out=source_duration, reason="keep")],
+        captions=[
+            CaptionBlock(
+                words=[CaptionWord(word_idx=i) for i in range(len(words))],
+                position=position,
+                quiet=quiet,
+            )
+        ],
+        broll=(
+            [Broll(word_idx=0, duration=3.0, query="q", anim=BrollAnim.POP_IN, anchor=anchor)]
+            if anchor
+            else []
+        ),
+        preset=preset,
+        title=title,
+    )
+
+
+def card_of(plan: RenderPlan):
+    """Блок-титр плана или None."""
+    return next((b for b in plan.blocks if b.title_card), None)
+
+
+def test_the_title_card_is_the_largest_type_in_the_reel():
+    """Титр эталона: полоса 17.0-27.7 % высоты кадра, глифы большого слова 10.1 %.
+
+    Потолок плаката в том же ролике — 7.5 %, то есть титр крупнее ЛЮБОГО
+    субтитра, и это единственное, чем он является. Полоса меряется по
+    прямоугольнику блока, а глифы — `cap_height`, как все замеры §1.1.
+    """
+    preset = load_preset("pulse").scaled(FRAME[1])
+    card = preset.caption.title_card
+    plan = build_plan(card_edl(), "v.mp4", cfg=cfg())
+    block = card_of(plan)
+
+    assert block is not None and block.position == "top"
+    assert block.quiet is False, "титр — плакат, а не тихий регистр"
+    assert (block.start, block.end) == (card.start, card.start + card.duration)
+    assert len(block.lines) == 2, [[w.text for w in line] for line in block.lines]
+    assert [w.text for w in block.lines[1]] == ["видео"], "крупным идёт последнее слово"
+
+    big = max(w.size or 0.0 for w in block.words)
+    assert big == pytest.approx(card.font_size * card.accent_scale)
+    assert glyph_share(block) == pytest.approx(CARD_GLYPHS, abs=0.004)
+    # Крупнее любого субтитра ролика — иначе это не титр, а второй субтитр.
+    speech = [b for b in plan.blocks if not b.title_card]
+    assert speech and big > max(w.size or 0.0 for b in speech for w in b.words)
+    assert big > preset.font.size * preset.caption.fill_max_scale
+
+    assert block.rect is not None
+    # Прямоугольник — это БОКС строк, а глифы при межстрочии 0.5 торчат из него
+    # на половину полулидинга в обе стороны (см. `geometry.line_box_height`),
+    # поэтому допуск здесь шире замера: сами пиксели меряются на ролике.
+    assert block.rect.y / FRAME[1] == pytest.approx(CARD_BAND[0], abs=0.006)
+    assert block.rect.bottom / FRAME[1] == pytest.approx(CARD_BAND[1], abs=0.006)
+    assert block.rect.center_x == pytest.approx(FRAME[0] / 2), "титр центрирован"
+
+
+def test_the_title_card_builds_word_by_word():
+    """Титр набирается по слову, как обычный блок, и успевает собраться.
+
+    Замер эталона: маска растёт 324 → 664 → 1049 → 1692 пикселей с шагом 0.1 с,
+    место под ещё не пришедшее слово зарезервировано заранее (§1.3). У нас это
+    обычные ghost-слова, поэтому проверяем ровно тайминги: шаг из темы и
+    последнее слово не позже середины жизни титра.
+    """
+    card = load_preset("pulse").caption.title_card
+    short = card_of(build_plan(card_edl(), "v.mp4", cfg=cfg()))
+    assert short is not None
+    starts = [w.start for w in short.words]
+    assert starts[0] == card.start
+    assert all(
+        b - a == pytest.approx(card.word_step, abs=1e-3) for a, b in zip(starts, starts[1:])
+    )
+    assert all(w.end == short.end for w in short.words), "слова титра не гаснут поодиночке"
+
+    long_title = card_of(
+        build_plan(
+            card_edl("Один два три четыре пять шесть семь восемь девять"), "v.mp4", cfg=cfg()
+        )
+    )
+    assert long_title is not None
+    middle = long_title.start + (long_title.end - long_title.start) / 2
+    assert max(w.start for w in long_title.words) <= middle + 1e-6
+
+
+def test_the_card_text_lives_in_the_edl_and_survives_a_rebuild():
+    """Перерендер сохранённого листа обязан дать тот же титр (инвариант 4).
+
+    Заголовок лежит в самом листе, а не в метаданных задачи: перерендер
+    получает EDL и больше ничего. Лист без заголовка — лист до появления поля
+    или прогон без LLM — рендерится как раньше, без титра.
+    """
+    saved = json.loads(card_edl().model_dump_json())
+    assert saved["title"] == CARD_TITLE
+    again = card_of(build_plan(EDL(**saved), "v.mp4", cfg=cfg()))
+    first = card_of(build_plan(card_edl(), "v.mp4", cfg=cfg()))
+    assert again is not None and first is not None
+    assert [[w.text for w in line] for line in again.lines] == [
+        [w.text for w in line] for line in first.lines
+    ]
+    assert again.rect == first.rect
+
+    bare = build_plan(card_edl(None), "v.mp4", cfg=cfg())
+    assert card_of(bare) is None
+    assert [b.title_card for b in bare.blocks] == [False]
+
+
+@pytest.mark.parametrize("name", ["glass", "bold"])
+def test_themes_without_a_card_never_draw_one(name: str):
+    """Титр — ДАННЫЕ темы: у glass и bold его нет, и заголовок их не меняет.
+
+    Сравниваем планы с заголовком и без: у темы без титра они обязаны совпадать
+    целиком, иначе третий регистр протёк бы в темы, которые его не просили.
+    """
+    preset = load_preset(name)
+    assert preset.caption.title_card.enabled is False
+    with_title = build_plan(card_edl(preset=name), "v.mp4", preset=preset, cfg=cfg())
+    without = build_plan(card_edl(None, preset=name), "v.mp4", preset=preset, cfg=cfg())
+    assert card_of(with_title) is None
+    assert with_title.to_dict() == without.to_dict()
+
+
+def test_the_card_yields_to_a_block_in_its_band():
+    """Полосу титра занял субтитр — титра нет.
+
+    Проверяется ПРЯМОУГОЛЬНИКАМИ, как и всё остальное в этом модуле: плакат
+    живёт внизу кадра и титру не мешает, а четырёхстрочный тихий блок достаёт до
+    его полосы. Запретить титру жить, пока кто-то говорит, нельзя: речь у нас
+    начинается с первых кадров (`cut_pad_before` 0.15 с), и титра не было бы
+    никогда.
+    """
+    talking = card_edl()  # нижний плакат с первого кадра
+    assert card_of(build_plan(talking, "v.mp4", cfg=cfg())) is not None
+
+    upstairs = card_edl(
+        speech=QUIET_LINE, position="top", quiet=True, source_duration=12.0
+    )
+    plan = build_plan(upstairs, "v.mp4", cfg=cfg())
+    quiet_block = next(b for b in plan.blocks if not b.title_card)
+    assert quiet_block.quiet is True and quiet_block.rect is not None
+    assert card_of(plan) is None, "титр и тихий блок в одной полосе"
+
+
+@pytest.mark.parametrize("anchor", ["fullscreen", "top_right"])
+def test_the_card_yields_to_a_picture_in_its_band(anchor: str):
+    """Полосу титра заняла картинка — титра нет. Двигать её титр не вправе."""
+    with_pic = build_plan(card_edl(anchor=anchor), "v.mp4", cfg=cfg())
+    assert card_of(with_pic) is None
+
+    # И не двигает: картинка встаёт туда же, что и в ролике без заголовка.
+    without = build_plan(card_edl(None, anchor=anchor), "v.mp4", cfg=cfg())
+    assert [x.rect for x in with_pic.broll] == [x.rect for x in without.broll]
+
+
+def test_a_title_too_big_for_the_card_drops_it():
+    """Титр, ужатый до плакатного кегля, не рисуется вовсе.
+
+    Длинный заголовок перенос ужимает целиком (`wrap_block`), и в какой-то
+    момент большое слово перестаёт быть крупнее любого субтитра — то есть титр
+    перестаёт быть титром. Половинчатый титр хуже его отсутствия.
+    """
+    preset = load_preset("pulse").scaled(FRAME[1])
+    ceiling = preset.font.size * preset.caption.fill_max_scale
+    long_title = (
+        "Как за одну короткую минуту собрать вертикальный ролик "
+        "из совершенно сырого исходного видео"
+    )
+    assert card_of(build_plan(card_edl(long_title), "v.mp4", cfg=cfg())) is None
+
+    medium = card_of(build_plan(card_edl("Монтаж за минуту"), "v.mp4", cfg=cfg()))
+    assert medium is not None
+    assert max(w.size or 0.0 for w in medium.words) > ceiling
+
+
+def test_the_card_is_dropped_when_the_reel_is_shorter_than_it():
+    """Ролик кончается раньше титра — титра нет: обрезанный титр читается как сбой."""
+    card = load_preset("pulse").caption.title_card
+    short = card_edl(source_duration=card.start + card.duration - 0.2)
+    assert card_of(build_plan(short, "v.mp4", cfg=cfg())) is None
+
+
+def test_the_card_is_not_cut_short_by_the_next_block():
+    """Титр живёт свои 1.1 с, даже если субтитр внизу начался раньше.
+
+    Обрезка соседей разводит блоки, стоящие в одном месте кадра друг за другом;
+    титр стоит в своей полосе, и обрывать его началом нижнего плаката не за что.
+    """
+    plan = build_plan(card_edl(), "v.mp4", cfg=cfg())
+    block = card_of(plan)
+    speech = next(b for b in plan.blocks if not b.title_card)
+    assert block is not None
+    assert speech.start < block.start, "ролик заговорил раньше титра"
+    assert block.end - block.start == pytest.approx(
+        load_preset("pulse").caption.title_card.duration
+    )
+
+
+def test_the_card_scales_to_the_preview_frame():
+    """Кегль и отступ титра — пиксели кадра 1920, на превью они уезжают вместе с ним."""
+    tall = build_plan(card_edl(), "v.mp4", height=1920, width=1080, cfg=cfg())
+    short = build_plan(card_edl(), "v.mp4", height=960, width=540, cfg=cfg())
+    tall_card, short_card = card_of(tall), card_of(short)
+    assert tall_card is not None and short_card is not None
+    assert (
+        short.preset["caption"]["title_card"]["font_size"]
+        < tall.preset["caption"]["title_card"]["font_size"]
+    )
+    assert glyph_share(short_card, 960) == pytest.approx(glyph_share(tall_card, 1920), abs=0.004)
+    assert short_card.rect is not None and tall_card.rect is not None
+    assert short_card.rect.y / 960 == pytest.approx(tall_card.rect.y / 1920, abs=0.004)
+
+
+def test_plan_carries_the_card_the_renderer_reads():
+    """Имена третьего регистра сторожим здесь: в TSX они читаются мягким кастом.
+
+    Рендерер узнаёт титр по флагу блока и подменяет числа темы числами регистра
+    (`Captions.tsx`, `registerPreset`). Опечатка в имени тихо вернула бы титру
+    отступ и межстрочие плаката, то есть увела бы его полосу мимо замера.
+    """
+    data = build_plan(card_edl(), "v.mp4", cfg=cfg()).to_dict()
+    block = data["blocks"][0]
+    assert block["title_card"] is True
+    assert all(b["title_card"] is False for b in data["blocks"][1:])
+    card = data["preset"]["caption"]["title_card"]
+    assert {
+        "enabled", "start", "duration", "word_step", "font_size", "margin",
+        "accent_scale", "line_height", "max_lines", "panel",
+    } <= set(card)
+
+    again = RenderPlan.from_dict(data)
+    assert again.blocks[0].title_card is True
+    assert again.to_dict() == data
+
+    # План до появления титра поля не несёт — читается как обычный блок.
+    del data["blocks"][0]["title_card"]
+    del data["preset"]["caption"]["title_card"]
+    assert RenderPlan.from_dict(data).blocks[0].title_card is False
+    assert Preset(**data["preset"]).caption.title_card.enabled is False
+
+
+async def test_the_pipeline_puts_the_title_in_the_edl_before_the_plan(tmp_path, monkeypatch):
+    """Заголовок обязан попасть в лист ДО сборки плана, иначе титра не будет.
+
+    Раньше `make_metadata` вызывался ПОСЛЕ рендера, и заголовок выбрасывался:
+    `mark_done` его не сохранял, читателей у него не было. Теперь он считается
+    сразу после режиссёра и ложится в EDL — тот самый лист, который уезжает в
+    `jobs.edl` и из которого перерендер собирает ролик заново.
+
+    Прогон обрывается на кропе: всё, что после, к проводке отношения не имеет и
+    стоит минуты.
+    """
+    import shutil as _shutil
+
+    from src.pipeline.asr import ASRResult
+    from src.pipeline.job import process_video
+    from src.pipeline.probe import MediaInfo
+
+    edl = card_edl(None)  # лист без заголовка: его обязан проставить прогон
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"")
+    settings = Settings(_env_file=None, default_preset="pulse", audio_post_enabled=False)
+
+    class Reached(RuntimeError):
+        pass
+
+    async def fake_direct(*a, **k):
+        return edl
+
+    async def fake_metadata(*a, **k):
+        return {"title": CARD_TITLE, "description": "", "hashtags": []}
+
+    def stop(*a, **k):
+        raise Reached
+
+    monkeypatch.setattr(
+        "src.pipeline.job.probe",
+        lambda *a, **k: MediaInfo(
+            path="—", duration=12.0, width=1080, height=1920, fps=30.0, has_audio=True,
+            audio_channels=2, audio_rate=48000, rotation=0, video_codec="h264", bitrate=0,
+        ),
+    )
+    monkeypatch.setattr("src.pipeline.job.is_playable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "src.pipeline.job.apply_cuts", lambda e, s, d, **k: _shutil.copy2(s, d)
+    )
+    monkeypatch.setattr(
+        "src.pipeline.job.transcribe",
+        lambda *a, **k: ASRResult(words=list(edl.words), language="ru", backend="test", model="—"),
+    )
+    monkeypatch.setattr("src.pipeline.job.direct", fake_direct)
+    monkeypatch.setattr("src.pipeline.job.make_metadata", fake_metadata)
+    monkeypatch.setattr("src.pipeline.job.autocrop", stop)
+
+    with pytest.raises(Reached):
+        await process_video(src, tmp_path / "work", preset="pulse", cfg=settings)
+
+    assert edl.title == CARD_TITLE, "заголовок не доехал до листа к моменту кропа"
+    assert card_of(build_plan(edl, "v.mp4", cfg=cfg())) is not None

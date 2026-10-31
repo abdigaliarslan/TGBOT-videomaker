@@ -75,6 +75,17 @@ export type PlanBlock = {
    * Отсутствует — плакат: тема без второго регистра или план, собранный до него.
    */
   quiet?: boolean;
+  /**
+   * ТИТР ролика (STYLE_PLAN §5) — третий регистр: плакат наверху, набранный
+   * кеглем, которого в субтитрах не бывает (10.1 % высоты кадра против потолка
+   * плаката 7.5 %). Текст ему даёт не речь, а заголовок ролика, и собирает его
+   * Python: в блоках EDL титра нет вовсе.
+   *
+   * Числа регистра лежат в `preset.caption.title_card`, и рендерер только
+   * подменяет ими числа темы — отступ от верха, межстрочие и кегль у титра
+   * свои. Отсутствует — обычный блок.
+   */
+  title_card?: boolean;
 };
 
 export type PlanBroll = {
@@ -168,6 +179,30 @@ export type Preset = {
       edge_ratio: number;
       max_lines?: number;
       max_line_width_ratio?: number;
+      panel: boolean;
+    };
+    /**
+     * Титр первых секунд (STYLE_PLAN §5): числа, которыми рисуется блок с
+     * `title_card: true`.
+     *
+     * Рендереру из них нужны отступ от верха кадра, межстрочие и кегль
+     * контейнера (им рисуется пробел между словами и струт строки — теми же
+     * числами Python мерил строку). Время (`start`, `duration`, `word_step`) и
+     * `max_lines` ему не нужны: блок приезжает с готовыми секундами и готовыми
+     * строками. Кегли слов лежат в самих словах.
+     *
+     * Необязательная: план, собранный до титра, её не содержит.
+     */
+    title_card?: {
+      enabled: boolean;
+      start: number;
+      duration: number;
+      word_step: number;
+      font_size: number;
+      margin: number;
+      accent_scale: number;
+      line_height: number;
+      max_lines?: number;
       panel: boolean;
     };
   };

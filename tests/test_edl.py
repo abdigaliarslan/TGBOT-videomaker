@@ -355,3 +355,22 @@ def test_assert_valid_raises_with_errors():
     with pytest.raises(EDLValidationError) as ei:
         assert_valid(edl)
     assert ei.value.errors
+
+
+def test_the_title_lives_in_the_list_and_survives_the_round_trip():
+    """Заголовок — текст титра (STYLE_PLAN §5), и он обязан пережить сохранение.
+
+    Перерендер (`process_from_edl`, `rerender_job`) получает РОВНО лист: ни
+    метаданных задачи, ни транскрипта, ни LLM. Всё, что должно дать то же видео
+    (инвариант 4), лежит здесь — иначе титр пришлось бы сочинять заново, а
+    второй вызов модели дал бы другой заголовок.
+    """
+    edl = base_edl(title="Ролики из сырого видео")
+    assert validate_edl(edl) == []
+    again = EDL.model_validate_json(edl.model_dump_json())
+    assert again.title == edl.title
+
+    # Лист до появления поля читается и валидируется как раньше — просто без титра.
+    saved = edl.model_dump()
+    del saved["title"]
+    assert EDL(**saved).title is None

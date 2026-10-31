@@ -44,7 +44,13 @@ from src.core.geometry import (
     space_width,
 )
 from src.core.preset import load_preset
-from src.core.render_plan import PlanBlock, PlanWord, _rect_of_lines, wrap_block
+from src.core.render_plan import (
+    PlanBlock,
+    PlanWord,
+    _rect_of_lines,
+    title_card_words,
+    wrap_block,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 FRAME = (1080, 1920)
@@ -455,6 +461,65 @@ def test_line_box_is_never_shorter_than_the_strut():
         big * preset.caption.line_height, abs=0.05
     )
     assert line_box_height([big], preset) > strut
+
+
+@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
+def test_shipped_presets_keep_the_simple_line_box(name: str):
+    """У всех поставляемых тем строчный бокс — ровно `max(кегль)·межстрочие`.
+
+    Общая формула строчного бокса (подъём над базовой линией плюс спуск под неё)
+    схлопывается в это произведение, пока межстрочие не ниже `2c ≈ 0.717`, и
+    ровно на этом держится обратная совместимость: темы от появления титра не
+    поехали ни на бит. Регистры считаются отдельно — у тихого межстрочие своё.
+    """
+    preset = load_preset(name).scaled(1920)
+    metrics = metrics_for(preset)
+    tight = (metrics.ascender + metrics.descender) / metrics.units_per_em
+    for ps in (preset, preset.caption.quiet.preset(preset)):
+        assert ps.caption.line_height >= tight, name
+        big = ps.font.size * ps.animation.shout_scale
+        assert line_box_height([big, 35.0], ps) == big * ps.caption.line_height
+
+
+def test_a_tight_line_lets_the_big_word_rise_over_the_small_one():
+    """Межстрочие ниже 0.717 em: строки заходят друг на друга — это титр (§5).
+
+    Высота строки тогда складывается из подъёма САМОГО КРУПНОГО слова над
+    базовой линией и спуска самого МЕЛКОГО под неё, а спуск этот отрицательный:
+    низ строки оказывается выше базовой линии. Формула `max(кегль)·межстрочие`
+    тут занижает строку на 23 px при кегле 276 — на столько прямоугольник
+    перестал бы накрывать текст.
+    """
+    preset = load_preset("pulse").scaled(1920)
+    card = preset.caption.title_card.preset(preset)
+    metrics = metrics_for(preset)
+    half = (metrics.ascender + metrics.descender) / (2 * metrics.units_per_em)
+    big = preset.caption.title_card.font_size * preset.caption.title_card.accent_scale
+    small = float(card.font.size)
+    lh = card.caption.line_height
+
+    assert lh / 2 < half, "титр за тем сюда и пришёл: межстрочие ниже 2c"
+    height = line_box_height([big, small], card)
+    assert height == pytest.approx(big * (lh / 2 + half) + small * (lh / 2 - half))
+    assert height > big * lh, "простая формула занижает тесную строку"
+    # Большое слово поднимается ВЫШЕ базовой линии мелкой строки — ровно так
+    # набран титр эталона. Подъём считаем от верха своей строки.
+    above_small = small * (lh / 2 + half)
+    cap_top_big = line_box_height([small], card) + big * (lh / 2 + half) - big * 0.7
+    assert cap_top_big < above_small, "иначе строки не заходят друг на друга"
+
+
+def test_the_line_gap_is_never_negative():
+    """Отрицательного `gap` в CSS не бывает: объявление невалидно, остаётся ноль.
+
+    Межстрочие титра (0.5) даёт именно такой случай, и Python обязан считать тот
+    же ноль, что нарисует Chromium, иначе прямоугольник блока уедет на просвет.
+    """
+    preset = load_preset("pulse").scaled(1920)
+    card = preset.caption.title_card.preset(preset)
+    assert card.caption.line_height < 1.0
+    assert line_gap(card) == 0.0
+    assert line_gap(preset) > 0.0
 
 
 def test_pixel_rounding_matches_the_renderer():
@@ -1167,3 +1232,64 @@ def test_the_production_block_rect_matches_chromium(name: str):
                 f"chromium {box['width']:.2f}×{box['height']:.2f}"
             )
     assert not report, "прямоугольник плана разъехался с Chromium:\n" + "\n".join(report)
+
+
+@pytest.mark.slow
+def test_the_title_card_box_matches_chromium():
+    """Тесная строка титра (§5) — та же сверка с Chromium, что у субтитра.
+
+    Межстрочие 0.5 ломает прежнюю формулу строчного бокса, и проверить новую
+    можно только браузером: строки титра заходят друг на друга, низ строки
+    оказывается ВЫШЕ базовой линии, а просвет между строками CSS зажимает в
+    ноль, потому что отрицательного `gap` не бывает. Каждое из трёх слагаемых
+    может разъехаться молча — здесь меряется их сумма.
+    """
+    preset = load_preset("pulse").scaled(FRAME[1])
+    card = preset.caption.title_card.preset(preset)
+    cases = {
+        # Эталонная длина заголовка: подпись в строку и короткое слово под ней.
+        "short": "Ролики из сырого видео",
+        # Длинный: перенос ужимает блок целиком, и страховка струта вступает в игру.
+        "long": "Как собрать вертикальный ролик из сырого видео",
+        # Одно слово: подписи нет вовсе, строка одна.
+        "one": "Автомонтаж",
+    }
+    laid: dict[str, tuple[list[list[PlanWord]], list[float]]] = {}
+    for key, title in cases.items():
+        words = title_card_words(
+            title, preset.caption.title_card, (0.2, 1.3), uppercase=card.font.uppercase
+        )
+        laid[key] = wrap_block(words, card, FRAME[0])
+
+    request = {
+        "font": str(REPO / "assets" / "fonts" / card.font.file),
+        "weight": card.font.weight,
+        "base_size": card.font.size,
+        "letter_spacing": card.font.letter_spacing,
+        "line_height": card.caption.line_height,
+        "items": [],
+        "boxes": [
+            {
+                "id": key,
+                "lines": [[{"text": w.text, "size": w.size} for w in line] for line in lines],
+                # `gap` страница считает сама формулой Captions.tsx — заодно
+                # проверяется, что отрицательный просвет обе стороны видят нулём.
+                "padding_x": card.panel.padding_x if card.panel.enabled else 0,
+                "padding_y": card.panel.padding_y if card.panel.enabled else 0,
+                "border_width": card.panel.border_width if card.panel.enabled else 0,
+            }
+            for key, (lines, _) in laid.items()
+        ],
+    }
+    measured = _measure_in_node(request)["boxes"]
+
+    report: list[str] = []
+    for key, (lines, widths) in laid.items():
+        rect = _rect_of_lines("top", lines, widths, card, FRAME)
+        box = measured[key]
+        if abs(rect.width - box["width"]) >= 2.0 or abs(rect.height - box["height"]) >= 2.0:
+            report.append(
+                f"{key}: python {rect.width:.2f}×{rect.height:.2f}, "
+                f"chromium {box['width']:.2f}×{box['height']:.2f}"
+            )
+    assert not report, "коробка титра разъехалась с Chromium:\n" + "\n".join(report)

@@ -92,19 +92,64 @@ const quietRegister = (preset: Preset, block: PlanBlock): QuietRegister | null =
 };
 
 /**
- * Пресет, которым нарисован ЭТОТ блок: тема или её тихий регистр.
+ * Титр первых секунд (STYLE_PLAN §5) — третий регистр.
+ *
+ * Плакат наверху, набранный кеглем, которого в субтитрах не бывает: в эталоне
+ * высота глифов большого слова 10.1 % высоты кадра при потолке плаката 7.5 %.
+ * Решает Python и присылает флагом, как и тихий регистр: текста титра нет ни в
+ * речи, ни в блоках EDL — он приезжает из заголовка ролика.
+ */
+type TitleCardRegister = NonNullable<Preset["caption"]["title_card"]>;
+
+const titleCardRegister = (preset: Preset, block: PlanBlock): TitleCardRegister | null => {
+  if (block.title_card !== true) return null;
+  const card = preset.caption.title_card;
+  return card && card.enabled ? card : null;
+};
+
+/**
+ * Пресет, которым нарисован ЭТОТ блок: тема, её тихий регистр или титр.
  *
  * Подмена чисел, а не вторая ветка рисования: ниже всё считается от
  * `font.size`, `caption.align` и панели, и регистр, выраженный пресетом,
  * проходит через это как обычная тема. Ровно так же его считает Python
- * (`preset.Quiet.preset`) — одна подмена на оба рендерера, поэтому сверка
- * коробки блока с Chromium остаётся верной в обоих регистрах.
+ * (`preset.Quiet.preset`, `preset.TitleCard.preset`) — одна подмена на оба
+ * рендерера, поэтому сверка коробки блока с Chromium остаётся верной во всех
+ * регистрах.
  *
  * `accent_scale`/`shout_scale` обнуляются вслед за Python: у тихого блока
  * выделения нет вовсе, и в плане его слова приходят уже без него — числа
  * остались бы висеть только на запасном пути, где кегля в плане нет.
+ *
+ * У титра наоборот: выделение несёт РАЗМЕР большого слова, а цвета у него нет
+ * — в титре эталона золота нет ни пикселя (#FDFAF2 против акцентного #F3D28F),
+ * поэтому акцентный цвет подменяется цветом обычного слова. Регистры
+ * взаимоисключающи: титр — это плакат, и `quiet` у него всегда `false`.
  */
 const registerPreset = (preset: Preset, block: PlanBlock): Preset => {
+  const card = titleCardRegister(preset, block);
+  if (card) {
+    return {
+      ...preset,
+      font: { ...preset.font, size: card.font_size },
+      caption: {
+        ...preset.caption,
+        margin: card.margin,
+        line_height: card.line_height,
+      },
+      colors: {
+        ...preset.colors,
+        accent: preset.colors.active,
+        shout: preset.colors.active,
+      },
+      panel: { ...preset.panel, enabled: card.panel && preset.panel.enabled },
+      animation: {
+        ...preset.animation,
+        accent_scale: card.accent_scale,
+        shout_scale: card.accent_scale,
+      },
+    };
+  }
   const quiet = quietRegister(preset, block);
   if (!quiet) return preset;
   return {
@@ -614,7 +659,12 @@ const Block: React.FC<{ block: PlanBlock; preset: Preset }> = ({ block, preset }
         display: "inline-flex",
         flexDirection: "column",
         alignItems: preset.caption.align === "left" ? "flex-start" : "center",
-        gap: Math.round(preset.font.size * (preset.caption.line_height - 1)),
+        // Просвет между строками. Не бывает отрицательным: CSS такой `gap` не
+        // принимает — объявление невалидно и свойство остаётся нулём, — а
+        // межстрочие меньше единицы у нас есть (титр, 0.5). Зажимаем явно, тем
+        // же нулём его считает `geometry.line_gap`: Python меряет блок этим
+        // числом, и разойтись им негде.
+        gap: Math.max(0, Math.round(preset.font.size * (preset.caption.line_height - 1))),
         padding: p.enabled ? `${p.padding_y}px ${p.padding_x}px` : 0,
         borderRadius: p.enabled ? p.radius : 0,
         // Два разных слоя в одном свойстве: снизу стекло (стиль, только у
