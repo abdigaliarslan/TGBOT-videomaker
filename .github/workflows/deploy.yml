@@ -21,6 +21,28 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+
+    # Postgres для денежных тестов (`tests/test_money.py`): списание, возврат и
+    # зачисление оплаты держатся на транзакции и на условии в WHERE, а этого
+    # двойником не изобразить. Без базы они ПРОПУСКАЮТСЯ — поэтому ниже стоит
+    # TEST_POSTGRES_REQUIRED, который превращает пропуск в провал.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_POSTGRES_DSN: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/postgres
+      TEST_POSTGRES_REQUIRED: "1"
+
     steps:
       - uses: actions/checkout@v4
 
