@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass, asdict
 from fractions import Fraction
 from pathlib import Path
 
 from src.core.proc import ProcError, run
+
+# Крайний срок на чтение метаданных. Щедрый: файл может лежать на сетевом томе
+# локального Bot API и читаться вхолодную. Но не бесконечный — ffprobe зовут и
+# из бота, и из приложения, где зависший вызов виден пользователю сразу.
+PROBE_TIMEOUT = 120
 
 
 @dataclass(slots=True)
@@ -78,6 +84,11 @@ def is_playable(path: str | Path) -> bool:
         return True
     except (ProcError, ValueError, FileNotFoundError):
         return False
+    except subprocess.TimeoutExpired:
+        # Вопрос был «цел ли файл», и зависший ffprobe на него уже ответил.
+        # Пробросить тайм-аут значило бы обойти ветку с внятной ошибкой про
+        # оборванную нарезку и показать пользователю «мы записали ошибку».
+        return False
 
 
 def probe(path: str | Path) -> MediaInfo:
@@ -94,7 +105,8 @@ def probe(path: str | Path) -> MediaInfo:
             "-show_format",
             "-show_streams",
             str(path),
-        ]
+        ],
+        timeout=PROBE_TIMEOUT,
     )
     data = json.loads(out)
     streams = data.get("streams", [])
@@ -133,7 +145,8 @@ def probe(path: str | Path) -> MediaInfo:
                 "-of",
                 "csv=p=0",
                 str(path),
-            ]
+            ],
+            timeout=PROBE_TIMEOUT,
         ).strip().splitlines()
         duration = float(got[-1]) if got else 0.0
 

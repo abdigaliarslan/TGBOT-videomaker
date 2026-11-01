@@ -12,6 +12,11 @@ from src.core.proc import capture, ffmpeg
 log = logging.getLogger(__name__)
 
 ASR_SAMPLE_RATE = 16_000
+# Крайний срок на один проход по звуку ролика. Проходов за джоб несколько
+# (извлечение, два замера громкости, тишина), каждый — секунды на разрешённых
+# трёх минутах видео. Срок стоит против зависшего процесса: без него задача
+# висит в RUNNING, пока её не освободит сторож.
+AUDIO_PASS_TIMEOUT = 1800
 
 # Цель по умолчанию для нарезки (M6). Звуковой пост (Ф2) просит свою из пресета:
 # −16 LUFS — то, что ждут соцсети, −14 осталось историческим значением этапа cut.
@@ -36,7 +41,8 @@ def extract_wav(src: str | Path, dst: str | Path, *, sample_rate: int = ASR_SAMP
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     ffmpeg(
-        ["-i", str(src), "-vn", "-ac", "1", "-ar", str(sample_rate), "-c:a", "pcm_s16le", str(dst)]
+        ["-i", str(src), "-vn", "-ac", "1", "-ar", str(sample_rate), "-c:a", "pcm_s16le", str(dst)],
+        timeout=AUDIO_PASS_TIMEOUT,
     )
     return dst
 
@@ -66,7 +72,8 @@ def measure_loudness(
             "-f",
             "null",
             "-",
-        ]
+        ],
+        timeout=AUDIO_PASS_TIMEOUT,
     )
     if code != 0:
         log.warning("loudnorm-замер не удался (код %s)", code)
@@ -126,7 +133,8 @@ def measure_ebur128(src: str | Path) -> dict[str, float] | None:
             "-f",
             "null",
             "-",
-        ]
+        ],
+        timeout=AUDIO_PASS_TIMEOUT,
     )
     if code != 0:
         log.warning("ebur128-замер не удался (код %s)", code)
@@ -171,7 +179,8 @@ def detect_silence(
             "-f",
             "null",
             "-",
-        ]
+        ],
+        timeout=AUDIO_PASS_TIMEOUT,
     )
     if code != 0:
         return []

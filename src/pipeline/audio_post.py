@@ -39,7 +39,8 @@ from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, Music, Sfx, Timeline, Word
 from src.core.preset import Preset, load_preset
 from src.core.proc import capture, ffmpeg
-from src.pipeline.audio import loudnorm_filter, measure_loudness
+from src.pipeline.audio import AUDIO_PASS_TIMEOUT, loudnorm_filter, measure_loudness
+from src.pipeline.probe import PROBE_TIMEOUT
 
 log = logging.getLogger(__name__)
 
@@ -155,7 +156,8 @@ def _peak_dbfs(path: Path) -> float | None:
     """Пик дорожки в dBFS через volumedetect. None, если замерить не удалось."""
     code, out, err = capture(
         ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(path), "-vn", "-af", "volumedetect",
-         "-f", "null", "-"]
+         "-f", "null", "-"],
+        timeout=AUDIO_PASS_TIMEOUT,
     )
     if code != 0:
         return None
@@ -173,7 +175,8 @@ def _audio_duration(path: str | Path) -> float | None:
     code, out, _ = capture(
         ["ffprobe", "-v", "error", "-select_streams", "a:0",
          "-show_entries", "stream=codec_type,duration:format=duration",
-         "-of", "default=nw=1", str(path)]
+         "-of", "default=nw=1", str(path)],
+        timeout=PROBE_TIMEOUT,
     )
     if code != 0 or "codec_type=audio" not in out:
         return None

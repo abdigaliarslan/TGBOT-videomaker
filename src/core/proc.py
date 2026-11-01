@@ -6,7 +6,10 @@ import asyncio
 import logging
 import shlex
 import subprocess
+import threading
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Iterator
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +60,28 @@ async def arun(cmd: list[str], *, stdin: str | None = None, timeout: float | Non
     if proc.returncode != 0:
         raise ProcError(cmd, proc.returncode or -1, err.decode("utf-8", "replace"))
     return out.decode("utf-8", "replace")
+
+
+@contextmanager
+def deadline(proc: subprocess.Popen[Any], seconds: float) -> Iterator[None]:
+    """Крайний срок процессу, чей вывод читают потоком.
+
+    `run()` отмеряет срок сам, но его нельзя применить там, где вывод читается
+    по частям и нужен по ходу дела (кадры для замера яркости). А `read` на
+    зависшем процессе не возвращается никогда — то есть задача встаёт насмерть,
+    и `job_timeout` воркера её не спасёт: arq отмеряет его через
+    `asyncio.wait_for`, а тот не умеет прерывать чужой процесс.
+
+    Будильник убивает процесс, `read` отдаёт пустоту, и читающий цикл кончается
+    сам — для вызывающего это «данных меньше, чем ожидалось», случай, который он
+    и так обрабатывает.
+    """
+    alarm = threading.Timer(seconds, proc.kill)
+    alarm.start()
+    try:
+        yield
+    finally:
+        alarm.cancel()
 
 
 def capture(cmd: list[str], *, timeout: float | None = None) -> tuple[int, str, str]:

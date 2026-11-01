@@ -16,6 +16,7 @@ import itertools
 import logging
 import math
 import re
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -783,6 +784,10 @@ def words_table(words: Sequence[Word], *, gap_threshold: float = 0.35) -> str:
 # («Coffee Boom» на месте «Coffee-bon»): ASR склеивает его в одно слово, и
 # разложить обратно по индексам нечем.
 MAX_FIX_WORDS = 3
+# Крайний срок на извлечение голоса: это один проход по звуку ролика длиной до
+# получаса, то есть десятки секунд работы. Запас десятикратный — срок стоит
+# против зависания, а не против медленного диска.
+VOICE_CLIP_TIMEOUT = 600
 # Неразрывный пробел: название остаётся одним словом субтитра и не рвётся
 # между строками, а в метриках шрифта он той же ширины, что обычный.
 NBSP = " "
@@ -802,9 +807,14 @@ def voice_clip(src: Path) -> tuple[bytes, str] | None:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "voice.mp3"
         try:
-            ffmpeg(["-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", str(out)])
+            ffmpeg(
+                ["-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", str(out)],
+                timeout=VOICE_CLIP_TIMEOUT,
+            )
             return out.read_bytes(), "audio/mp3"
-        except (ProcError, OSError) as e:
+        except (ProcError, OSError, subprocess.TimeoutExpired) as e:
+            # Тайм-аут здесь — такой же «не вышло», как и ошибка: шаг
+            # необязательный, и ронять из-за него оплаченный ролик нельзя.
             log.warning("голос для корректора не извлечён: %s", e)
             return None
 

@@ -70,7 +70,7 @@ from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL
 from src.core.geometry import Rect
 from src.core.preset import Preset
-from src.core.proc import ProcError
+from src.core.proc import ProcError, deadline
 from src.core.render_plan import build_plan
 from src.pipeline.probe import probe
 
@@ -80,6 +80,11 @@ log = logging.getLogger(__name__)
 # живёт секунду, за секунду фон успевает поменяться), больше четырёх не меняет
 # среднее, но каждый кадр стоит распаковки.
 SAMPLES_PER_BLOCK = 3
+
+# Крайний срок на весь проход декодирования. Цена этапа — O(длины ролика) (см.
+# шапку), на трёхминутном входе это секунды; срок стоит против зависшего
+# процесса, а не против долгого файла, поэтому запас большой.
+DECODE_TIMEOUT = 600
 
 # Коэффициенты яркости Rec.709 в порядке каналов rgb24, который отдаёт ffmpeg.
 # Перепутанный порядок здесь не падает, а тихо врёт: синий весит 0.07, красный
@@ -170,12 +175,14 @@ def _decode(path: Path, indices: list[int], width: int, height: int, cfg: Settin
     size = width * height * 3
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        assert proc.stdout is not None
-        while True:
-            buf = proc.stdout.read(size)
-            if buf is None or len(buf) < size:
-                break
-            yield np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3)
+        # Кадры читаются потоком, поэтому срок отмеряет будильник, а не `run()`.
+        with deadline(proc, DECODE_TIMEOUT):
+            assert proc.stdout is not None
+            while True:
+                buf = proc.stdout.read(size)
+                if buf is None or len(buf) < size:
+                    break
+                yield np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3)
     finally:
         if proc.poll() is None:
             proc.kill()
