@@ -66,15 +66,19 @@ def env(monkeypatch):
         seen["cutoffs"] = (running_before, queued_before)
         return seen["jobs"]
 
-    async def mark_failed(job_id, error, *, code="failed"):
+    async def mark_failed(job_id, error, *, code="failed", expect=None):
+        if not seen["fail_applies"]:
+            return False
         seen["failed"].append((job_id, code))
+        return True
 
     async def refund(job_id):
         seen["refunded"].append(job_id)
         return True
 
+    seen["fail_applies"] = True
     monkeypatch.setattr(tasks.repo, "jobs_to_reap", to_reap, raising=False)
-    monkeypatch.setattr(tasks.repo, "mark_failed", mark_failed)
+    monkeypatch.setattr(tasks.repo, "fail_if_still", mark_failed, raising=False)
     monkeypatch.setattr(tasks.repo, "refund_job", refund)
     return seen
 
@@ -168,17 +172,36 @@ def test_the_reason_has_its_own_phrase_in_both_languages():
     assert ru != en
 
 
+async def test_a_job_that_finished_in_the_meantime_keeps_its_reel(env):
+    """Гонка: между выборкой кандидатов и приговором задача успевает доделаться.
+
+    Пульс снимается в конце прогона, и сторож, уже державший эту задачу в
+    списке, увидит его отсутствие. Поэтому приговор — условный: он меняет
+    статус только если тот всё ещё тот, по которому задачу выбрали. Не
+    сработало — значит ролик доделан, и возвращать за него нечего, иначе
+    пользователь получил бы и видео, и деньги обратно.
+    """
+    env["jobs"] = [job_of()]
+    env["fail_applies"] = False  # UPDATE не нашёл строки: статус уже не RUNNING
+
+    out = await tasks.reap_stuck_jobs({"redis": FakeRedis()})
+
+    assert env["refunded"] == [], "вернули ролик за задачу, которая доделалась"
+    assert out == {"running": 0, "queued": 0}
+
+
 async def test_one_unreapable_job_does_not_stop_the_round(env, monkeypatch):
     """Падение на одной задаче не имеет права оставить остальные висеть."""
     bad, good = job_of(), job_of()
     env["jobs"] = [bad, good]
 
-    async def mark_failed(job_id, error, *, code="failed"):
+    async def mark_failed(job_id, error, *, code="failed", expect=None):
         if job_id == bad.id:
             raise RuntimeError("база отвалилась")
         env["failed"].append((job_id, code))
+        return True
 
-    monkeypatch.setattr(tasks.repo, "mark_failed", mark_failed)
+    monkeypatch.setattr(tasks.repo, "fail_if_still", mark_failed, raising=False)
 
     out = await tasks.reap_stuck_jobs({"redis": FakeRedis()})
 
@@ -212,7 +235,46 @@ def test_the_query_asks_about_the_two_statuses_by_their_stored_spelling():
     assert "started_at" in src and "created_at" in src
 
 
+async def test_a_job_that_is_no_longer_queued_is_not_built_twice(monkeypatch, tmp_path):
+    """arq возвращает задачу в очередь, когда воркер умер, не доработав: ключ
+    `in-progress` живёт `job_timeout`, а после него задача снова на виду. Если
+    сторож её уже освободил и вернул ролик, второй прогон отдал бы видео
+    бесплатно. Поэтому в работу берётся только та задача, что всё ещё в очереди.
+    """
+    started = []
+
+    async def fake_process_video(*a, **k):
+        started.append(1)
+        raise AssertionError("взяли в работу задачу, которой там быть не должно")
+
+    async def noop(*a, **k):
+        return None
+
+    async def fake_get_job(job_id):
+        return SimpleNamespace(
+            id=uuid.uuid4(), user_id=42, preset="pulse", options=None,
+            source_local_path=None, source_key=None, status=JobStatus.FAILED,
+        )
+
+    async def refuse(job_id):
+        return False  # UPDATE ... WHERE status = QUEUED не нашёл строки
+
+    monkeypatch.setattr(tasks, "settings", SimpleNamespace(work_dir=tmp_path, debug=False))
+    monkeypatch.setattr(tasks.repo, "get_job", fake_get_job)
+    monkeypatch.setattr(tasks.repo, "mark_running", refuse)
+    monkeypatch.setattr(tasks, "process_video", fake_process_video)
+
+    out = await tasks.process_job({"redis": FakeRedis()}, "job-1")
+
+    assert started == []
+    assert out.get("skipped") == "not_queued"
+
+
 # --------------------------------------------------------------------- пульс
+
+
+async def _took_it(job_id):
+    return True
 
 
 async def test_the_pulse_beats_while_the_reel_is_being_made(monkeypatch, tmp_path):
@@ -221,7 +283,7 @@ async def test_the_pulse_beats_while_the_reel_is_being_made(monkeypatch, tmp_pat
     redis = FakeRedis()
     job = SimpleNamespace(
         id=uuid.uuid4(), user_id=42, preset="pulse", options=None,
-        source_local_path=None, source_key=None,
+        source_local_path=None, source_key=None, status=JobStatus.QUEUED,
     )
     beats: list[str | None] = []
 
@@ -242,7 +304,7 @@ async def test_the_pulse_beats_while_the_reel_is_being_made(monkeypatch, tmp_pat
         work_dir=tmp_path, debug=False, llm_provider="fal",
     ))
     monkeypatch.setattr(tasks.repo, "get_job", fake_get_job)
-    monkeypatch.setattr(tasks.repo, "mark_running", noop)
+    monkeypatch.setattr(tasks.repo, "mark_running", _took_it)
     monkeypatch.setattr(tasks.repo, "update_job", noop)
     monkeypatch.setattr(tasks.repo, "mark_failed", noop)
     monkeypatch.setattr(tasks.repo, "refund_job", noop)

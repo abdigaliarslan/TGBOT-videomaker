@@ -230,10 +230,29 @@ async def update_job(job_id: uuid.UUID | str, **values: Any) -> None:
         await s.execute(update(Job).where(Job.id == uuid.UUID(str(job_id))).values(**values))
 
 
-async def mark_running(job_id: uuid.UUID | str) -> None:
-    await update_job(
-        job_id, status=JobStatus.RUNNING, started_at=datetime.now(timezone.utc), progress=0.0
-    )
+async def mark_running(job_id: uuid.UUID | str) -> bool:
+    """Берёт задачу в работу. False — её там быть не должно.
+
+    Переход разрешён только из очереди. arq возвращает задачу в очередь, если
+    воркер умер, не доработав: ключ `in-progress` живёт `job_timeout`, а после
+    него задача снова на виду. Если сторож её к тому времени освободил и вернул
+    ролик на баланс, второй прогон отдал бы видео бесплатно. Условие в WHERE —
+    единственное место, где это можно отсечь без гонки.
+    """
+    async with session() as s:
+        got = (
+            await s.execute(
+                update(Job)
+                .where(Job.id == uuid.UUID(str(job_id)), Job.status == JobStatus.QUEUED)
+                .values(
+                    status=JobStatus.RUNNING,
+                    started_at=datetime.now(timezone.utc),
+                    progress=0.0,
+                )
+                .returning(Job.id)
+            )
+        ).scalar_one_or_none()
+        return got is not None
 
 
 async def mark_failed(job_id: uuid.UUID | str, error: str, *, code: str = "failed") -> None:
@@ -244,6 +263,38 @@ async def mark_failed(job_id: uuid.UUID | str, error: str, *, code: str = "faile
         error_code=code[:32],
         finished_at=datetime.now(timezone.utc),
     )
+
+
+async def fail_if_still(
+    job_id: uuid.UUID | str, error: str, *, code: str = "failed", expect: JobStatus
+) -> bool:
+    """Помечает задачу упавшей, но только если её статус всё ещё `expect`.
+
+    Нужно сторожу (`worker.tasks.reap_stuck_jobs`): между выборкой кандидатов и
+    приговором задача успевает доделаться — пульс как раз и снимается в конце
+    прогона. Без условия в WHERE сторож переписал бы DONE на FAILED и вернул
+    ролик на баланс за видео, которое пользователь уже получил.
+
+    Обратную сторону гонки (сторож успел раньше, чем `mark_done`) условием не
+    закрыть, и закрывать её намеренно не стали: там DONE ложится поверх FAILED,
+    то есть пользователь получает и ролик, и возврат. Запрет писать DONE поверх
+    приговора стоил бы дороже — готовый ролик не дошёл бы до него вовсе.
+    """
+    async with session() as s:
+        got = (
+            await s.execute(
+                update(Job)
+                .where(Job.id == uuid.UUID(str(job_id)), Job.status == expect)
+                .values(
+                    status=JobStatus.FAILED,
+                    error=error[:4000],
+                    error_code=code[:32],
+                    finished_at=datetime.now(timezone.utc),
+                )
+                .returning(Job.id)
+            )
+        ).scalar_one_or_none()
+        return got is not None
 
 
 async def mark_done(job_id: uuid.UUID | str, **values: Any) -> None:

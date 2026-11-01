@@ -119,9 +119,16 @@ async def process_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
     if job is None:
         raise RuntimeError(f"задача {job_id} не найдена в БД")
 
+    if not await repo.mark_running(job.id):
+        # В работу берётся только задача из очереди. Сюда попадает та, которую
+        # arq вернул в очередь после смерти воркера (ключ `in-progress` живёт
+        # `job_timeout`) и которую сторож уже освободил, вернув ролик на баланс.
+        # Собрать её второй раз значило бы отдать видео бесплатно.
+        log.warning("задача %s уже не в очереди (%s) — второй прогон не нужен", job.id, job.status)
+        return {"job_id": str(job.id), "skipped": "not_queued"}
+
     work = Path(settings.work_dir) / str(job.id)
     work.mkdir(parents=True, exist_ok=True)
-    await repo.mark_running(job.id)
 
     async def publish(stage: str, share: float, key: str | None = None) -> None:
         # `stage` — русский заголовок для логов и старых читателей, `stage_key` —
@@ -363,13 +370,20 @@ async def reap_stuck_jobs(ctx: dict[str, Any]) -> dict[str, int]:
         if not queued and await redis.exists(heartbeat_key(str(job.id))):
             continue  # воркер жив, ролик просто долгий
         try:
-            await repo.mark_failed(
+            # Приговор условный: статус обязан быть всё тем же, по которому
+            # задачу выбрали. Пульс снимается в конце прогона, поэтому между
+            # выборкой и этой строкой ролик мог как раз доделаться — и возврат
+            # за него был бы подарком вдобавок к видео.
+            if not await repo.fail_if_still(
                 job.id,
                 "воркер не довёл задачу до конца: пульс пропал"
                 if not queued
                 else f"задача простояла в очереди больше {QUEUED_MAX_WAIT // 3600} ч",
                 code="worker_lost",
-            )
+                expect=job.status,
+            ):
+                log.info("сторож: задача %s разошлась с выборкой, оставляю как есть", job.id)
+                continue
             await _refund(job.id)
             # Наблюдатель в чате читает прогресс из Redis, а не из БД: без этой
             # записи пользователь так и смотрел бы на полосу.
