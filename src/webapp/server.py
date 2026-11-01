@@ -122,18 +122,36 @@ MAX_OPEN_UPLOADS = 2
 DISK_RESERVE_MB = 4096
 
 
-def _open_uploads(cfg: Settings, user_id: int) -> list[Path]:
-    """Незавершённые приёмы этого пользователя, старые первыми."""
+def _open_uploads(cfg: Settings) -> list[tuple[Path, dict[str, Any]]]:
+    """Все незавершённые приёмы с их заявками, старые первыми."""
     root = Path(cfg.work_dir)
-    mine: list[Path] = []
+    found: list[tuple[Path, dict[str, Any]]] = []
     for folder in root.glob(f"{UPLOAD_PREFIX}*") if root.exists() else []:
         try:
             meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            continue  # недописанная или чужая папка — не наше дело
-        if meta.get("user_id") == user_id:
-            mine.append(folder)
-    return sorted(mine, key=lambda p: p.stat().st_mtime)
+            continue  # папка недописана или уже убрана — не наше дело
+        if isinstance(meta, dict):
+            found.append((folder, meta))
+    return sorted(found, key=lambda pair: pair[0].stat().st_mtime)
+
+
+def _promised_bytes(open_uploads: list[tuple[Path, dict[str, Any]]]) -> int:
+    """Сколько байт уже обещано приёмам, но ещё не легло на диск.
+
+    Без этого счёта проверка места бессмысленна: байты незавершённого приёма на
+    диске не лежат, и `disk_usage` показывает их место свободным. Лимит на
+    пользователя тут не помогает — десять человек по два приёма обещают
+    двадцать гигабайт на диске, где их нет.
+    """
+    promised = 0
+    for folder, meta in open_uploads:
+        try:
+            have = (folder / "data").stat().st_size
+        except OSError:
+            have = 0
+        promised += max(0, int(meta.get("size") or 0) - have)
+    return promised
 
 
 def _job_view(job: Job, *, live: dict[str, Any] | None, secret: str, lang: str, cfg: Settings) -> dict[str, Any]:
@@ -282,12 +300,18 @@ async def upload_start(request: web.Request) -> web.Response:
         return await _fail(request, 400, "api.empty_file")
     if size > cfg.webapp_max_upload_mb * 1024 * 1024:
         return await _fail(request, 413, "api.too_big", mb=cfg.webapp_max_upload_mb)
-    if len(_open_uploads(cfg, user.id)) >= MAX_OPEN_UPLOADS:
+    open_uploads = _open_uploads(cfg)
+    if sum(1 for _, meta in open_uploads if meta.get("user_id") == user.id) >= MAX_OPEN_UPLOADS:
         return await _fail(request, 429, "api.too_many_uploads", n=MAX_OPEN_UPLOADS)
     # Отказ до первого байта, а не на середине: пользователь с гигабайтным
     # файлом иначе узнаёт о нехватке места через десять минут загрузки.
+    #
+    # Из свободного места вычитается обещанное другим приёмам: их байты ещё не
+    # пришли, и без этого вычета каждый новый приём получал бы одно и то же
+    # место заново. Диск может кончиться и снаружи — машина общая, — тогда
+    # запись упадёт по ходу загрузки; это уже не наш учёт, а чужой сосед.
     free = shutil.disk_usage(cfg.work_dir).free - DISK_RESERVE_MB * 1024 * 1024
-    if size > free:
+    if size > free - _promised_bytes(open_uploads):
         return await _fail(request, 507, "api.no_space")
 
     upload_id = uuid.uuid4().hex

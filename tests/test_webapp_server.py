@@ -147,6 +147,34 @@ async def test_an_upload_that_does_not_fit_the_disk_is_refused_up_front(client, 
     assert (await client.post("/api/uploads", json={"size": 2 * 1024 * 1024}, headers=auth())).status == 200
 
 
+async def test_space_already_promised_to_other_uploads_is_not_promised_twice(client, monkeypatch):
+    """Проверка «влезет ли файл» обязана считать и уже обещанное.
+
+    Байты незавершённого приёма на диске ещё не лежат, поэтому свободного места
+    по `disk_usage` сколько было, столько и есть. Лимит на пользователя тут не
+    спасает: десять человек по два приёма — это двадцать обещанных гигабайт на
+    диске, где их нет.
+    """
+    import shutil
+
+    from src.webapp import server as mod
+
+    free = 12 * 1024 * 1024
+    monkeypatch.setattr(mod, "DISK_RESERVE_MB", 0)
+    monkeypatch.setattr(
+        mod.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(0, 0, free)
+    )
+    # Два приёма по 5 МБ от разных людей — обещано 10 из 12 МБ.
+    for user in (42, 43):
+        r = await client.post("/api/uploads", json={"size": 5 * 1024 * 1024}, headers=auth(user))
+        assert r.status == 200
+
+    r = await client.post("/api/uploads", json={"size": 5 * 1024 * 1024}, headers=auth(44))
+    assert r.status == 507, "пообещали место, которое уже обещано другим приёмам"
+    # А то, что в остаток влезает, принимается.
+    assert (await client.post("/api/uploads", json={"size": 1024}, headers=auth(44))).status == 200
+
+
 async def test_an_abandoned_upload_is_swept_sooner_than_a_work_folder(tmp_path, monkeypatch):
     """Брошенная папка приёма — не папка задачи: за ней никто не придёт, а
     держит она до гигабайта. Сутки для неё слишком долго."""
