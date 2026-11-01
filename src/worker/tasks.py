@@ -9,13 +9,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
 import uuid
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from arq import cron, create_pool
 from arq.connections import RedisSettings
@@ -23,6 +25,7 @@ from arq.connections import RedisSettings
 from src.core.config import settings
 from src.core.logging import setup_logging
 from src.db import repo
+from src.db.models import JobStatus
 from src.core.options import JobOptions, apply_accent
 from src.llm.client import LLMClient, Usage
 from src.pipeline.job import STAGE_KEYS_BY_TITLE, JobError, process_video
@@ -47,6 +50,49 @@ async def get_queue(name: str = QUEUE_CPU):
 
 def progress_key(job_id: str) -> str:
     return f"reelbot:progress:{job_id}"
+
+
+# Пульс задачи: пока воркер жив, он подновляет этот ключ. Сторож (`reap_stuck_jobs`)
+# по его отсутствию отличает мёртвую задачу от долгой — больше ничем они в базе не
+# различаются. Срок жизни с запасом на четыре пропущенных удара: loop занят
+# вытеснением тяжёлых этапов в поток, и ровный такт ему никто не гарантирует.
+JOB_HEARTBEAT_TTL = 120
+JOB_HEARTBEAT_EVERY = 30
+
+
+def heartbeat_key(job_id: str) -> str:
+    return f"reelbot:alive:{job_id}"
+
+
+@asynccontextmanager
+async def heartbeat(redis: Any, job_id: str) -> AsyncIterator[None]:
+    """Держит пульс задачи, пока идёт работа внутри блока.
+
+    Первый удар — ДО входа в блок, синхронно: иначе сторож, проснувшийся между
+    `mark_running` и первым ударом, снимет живую задачу. Последний ключ
+    снимается на выходе, чтобы доделанная задача не выглядела живой ещё две
+    минуты.
+    """
+    key = heartbeat_key(job_id)
+    await redis.set(key, "1", ex=JOB_HEARTBEAT_TTL)
+
+    async def beat() -> None:
+        while True:
+            await asyncio.sleep(JOB_HEARTBEAT_EVERY)
+            try:
+                await redis.set(key, "1", ex=JOB_HEARTBEAT_TTL)
+            except Exception as e:  # noqa: BLE001 — потеря удара не повод ронять монтаж
+                log.warning("пульс задачи %s не поставлен: %s", job_id, e)
+
+    task = asyncio.create_task(beat())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        with suppress(Exception):
+            await redis.delete(key)
 
 
 async def fetch_source(job: Any, dst: Path) -> Path:
@@ -91,44 +137,50 @@ async def process_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
     llm = LLMClient(usage_sink=_usage_sink(job.id))
 
     try:
-        await publish("Скачиваю файл", 0.01, "download")
-        src_path = await fetch_source(job, work / "source.mp4")
+        # Пульс — вокруг всей работы: пока он есть, сторож зависших задач знает,
+        # что воркер жив, и не трогает задачу, сколько бы она ни шла.
+        async with heartbeat(redis, str(job.id)):
+            await publish("Скачиваю файл", 0.01, "download")
+            src_path = await fetch_source(job, work / "source.mp4")
 
-        options = JobOptions.from_stored(job.options)
-        result = await process_video(
-            src_path,
-            work,
-            preset=job.preset,
-            llm=llm,
-            progress=publish,
-            cut_pauses=options.cut,
-            cfg=settings,
-            options=options,
-        )
+            options = JobOptions.from_stored(job.options)
+            result = await process_video(
+                src_path,
+                work,
+                preset=job.preset,
+                llm=llm,
+                progress=publish,
+                cut_pauses=options.cut,
+                cfg=settings,
+                options=options,
+            )
 
-        await publish("Загружаю результат", 0.99, "upload")
-        result_key = storage.key_for(RESULTS, str(job.id), "result.mp4")
-        await storage.upload(result.output, result_key, content_type="video/mp4")
+            await publish("Загружаю результат", 0.99, "upload")
+            result_key = storage.key_for(RESULTS, str(job.id), "result.mp4")
+            await storage.upload(result.output, result_key, content_type="video/mp4")
 
-        await repo.mark_done(
-            job.id,
-            result_key=result_key,
-            result_duration=round(result.edl.out_duration, 2),
-            source_duration=result.info.duration,
-            edl=json.loads(result.edl.model_dump_json()),
-            words={"words": [w.model_dump() for w in result.asr.words], "language": result.asr.language},
-            timings=result.timings,
-            edl_from_llm=result.edl_from_llm,
-            cost_usd=llm.total_cost(),
-            stage="done",
-        )
-        await repo.bump_videos_done(job.user_id)
-        await redis.set(
-            progress_key(str(job.id)),
-            json.dumps({"stage": "done", "progress": 1.0, "result_key": result_key}),
-            ex=PROGRESS_TTL,
-        )
-        return {"job_id": str(job.id), "result_key": result_key, **result.summary()}
+            await repo.mark_done(
+                job.id,
+                result_key=result_key,
+                result_duration=round(result.edl.out_duration, 2),
+                source_duration=result.info.duration,
+                edl=json.loads(result.edl.model_dump_json()),
+                words={
+                    "words": [w.model_dump() for w in result.asr.words],
+                    "language": result.asr.language,
+                },
+                timings=result.timings,
+                edl_from_llm=result.edl_from_llm,
+                cost_usd=llm.total_cost(),
+                stage="done",
+            )
+            await repo.bump_videos_done(job.user_id)
+            await redis.set(
+                progress_key(str(job.id)),
+                json.dumps({"stage": "done", "progress": 1.0, "result_key": result_key}),
+                ex=PROGRESS_TTL,
+            )
+            return {"job_id": str(job.id), "result_key": result_key, **result.summary()}
 
     except JobError as e:
         # Понятная пользователю причина: показываем как есть.
@@ -214,7 +266,9 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
         edl = EDL(**job.edl)
         edl.preset = preset
 
-        info = probe(src_path)
+        # Тяжёлое — в рабочий поток, по той же причине, что и в `process_video`:
+        # loop обязан дышать, иначе воркер не слышит SIGTERM от выкладки.
+        info = await asyncio.to_thread(probe, src_path)
         # Перерендер меняет тему, а выбранный пользователем цвет выделения
         # сохраняет: он выбирал цвет, а не «цвет конкретной темы».
         options = JobOptions.from_stored(job.options)
@@ -224,20 +278,21 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
         # нарезался бы, а субтитры и звук разъехались бы с картинкой.
         cut_path = work / "cut.mp4"
         if options.cut:
-            apply_cuts(edl, src_path, cut_path, info=info, cfg=settings)
+            await asyncio.to_thread(apply_cuts, edl, src_path, cut_path, info=info, cfg=settings)
         else:
-            shutil.copy2(src_path, cut_path)
+            await asyncio.to_thread(shutil.copy2, src_path, cut_path)
         # Пресет и крупность передаются ЯВНО. Без них перерендер брал цветокор из
         # `cfg.default_preset`, а не из пресета задачи, и снимал весь ролик одной
         # крупностью — то есть §0.4 «сохранённый EDL + другой пресет = новое
         # видео» выполнялся только для субтитров. `autocrop` про эту деградацию
         # предупреждает в своём докстринге; правка была за владельцем вызова.
-        vertical = autocrop(
+        vertical = await asyncio.to_thread(
+            autocrop,
             cut_path, work / "vertical.mp4", work_dir=work, cfg=settings,
             preset=style, framing=framing_spans(edl, applied_cuts=options.cut),
             track_out=work / "track.json",
         )
-        staged_info = probe(vertical)
+        staged_info = await asyncio.to_thread(probe, vertical)
 
         # Трек считается заново, а не берётся из кеша задачи. MOTION_PLAN просит
         # кешировать его в MinIO и не пересчитывать, но здесь всё равно заново
@@ -252,7 +307,7 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
         )
         out = work / "result.mp4"
         if settings.render_backend == "ass":
-            render_ass(plan, out, work_dir=work, cfg=settings)
+            await asyncio.to_thread(render_ass, plan, out, work_dir=work, cfg=settings)
         else:
             await arender_remotion(plan, out, assets_dir=work, job_key=work.name, cfg=settings)
 
@@ -267,6 +322,71 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
     finally:
         if not settings.debug:
             shutil.rmtree(work, ignore_errors=True)
+
+
+# Запас от последнего пульса до приговора. Больше срока жизни ключа — иначе
+# сторож успеет застать живую задачу в промежутке между двумя ударами.
+STUCK_GRACE = 5 * 60
+# Ожидание в очереди, после которого задача считается потерянной. Длинное
+# намеренно: пул `cpu` берёт один ролик за раз при потолке очереди в несколько
+# задач, и честное ожидание здесь измеряется часами. Короткая отсечка снимала бы
+# задачи, которые просто стоят за долгим роликом.
+QUEUED_MAX_WAIT = 6 * 3600
+
+
+async def reap_stuck_jobs(ctx: dict[str, Any]) -> dict[str, int]:
+    """Освобождает задачи, за которыми больше некому следить.
+
+    Воркера снимают не по своей воле: выкладка перезапускает службу, OOM-killer
+    убивает процесс на тяжёлом ролике. Запись в БД остаётся RUNNING навсегда, и
+    пользователь получает двойной штраф — `active_jobs_count` больше никогда не
+    пустит его прислать видео, а списанный ролик не вернётся на баланс.
+
+    Живую задачу от мёртвой отличает только пульс в Redis. Поэтому: сначала
+    отсечка по времени (кандидаты, которым пульс уже пора было поставить),
+    потом проверка пульса — и лишь затем приговор.
+
+    ⚠ Потеря самого Redis (flush, переезд) выглядит отсюда как смерть всех
+    воркеров: задачи в работе будут сняты и возвращены на баланс. Это
+    осознанный перекос в пользу пользователя — в той же аварии теряется и
+    очередь, то есть почти всегда он прав.
+    """
+    redis = ctx["redis"]
+    now = datetime.now(timezone.utc)
+    jobs = await repo.jobs_to_reap(
+        running_before=now - timedelta(seconds=STUCK_GRACE),
+        queued_before=now - timedelta(seconds=QUEUED_MAX_WAIT),
+    )
+    reaped = {"running": 0, "queued": 0}
+    for job in jobs:
+        queued = job.status == JobStatus.QUEUED
+        if not queued and await redis.exists(heartbeat_key(str(job.id))):
+            continue  # воркер жив, ролик просто долгий
+        try:
+            await repo.mark_failed(
+                job.id,
+                "воркер не довёл задачу до конца: пульс пропал"
+                if not queued
+                else f"задача простояла в очереди больше {QUEUED_MAX_WAIT // 3600} ч",
+                code="worker_lost",
+            )
+            await _refund(job.id)
+            # Наблюдатель в чате читает прогресс из Redis, а не из БД: без этой
+            # записи пользователь так и смотрел бы на полосу.
+            await redis.set(
+                progress_key(str(job.id)),
+                json.dumps(
+                    {"stage": "failed", "progress": 0.0, "error_code": "worker_lost"},
+                    ensure_ascii=False,
+                ),
+                ex=PROGRESS_TTL,
+            )
+        except Exception as e:  # noqa: BLE001 — одна задача не должна оставить висеть остальные
+            log.error("сторож: задачу %s освободить не удалось: %s", job.id, e)
+            continue
+        reaped["queued" if queued else "running"] += 1
+        log.warning("сторож: задача %s освобождена (%s)", job.id, job.status)
+    return reaped
 
 
 # Общие папки внутри WORK_DIR: они не принадлежат ни одной задаче и живут
@@ -358,7 +478,6 @@ async def startup(ctx: dict[str, Any]) -> None:
     setup_logging(settings.log_level)
     repo.init_engine(settings)
     await storage.ensure_bucket_async()
-    import asyncio
 
     # Всё тяжёлое качаем на старте, а не внутри пользовательской задачи:
     # иначе первый ролик на новом языке упирается в 1.2 ГБ загрузки, а
@@ -424,13 +543,20 @@ class LightWorkerSettings(WorkerSettings):
     max_tries = WorkerSettings.max_tries
     keep_result = WorkerSettings.keep_result
     on_startup = light_startup
-    functions = [cleanup_old_files, purge_expired_files]
+    functions = [cleanup_old_files, purge_expired_files, reap_stuck_jobs]
     # Раз в час: папки задач, переживших падение воркера, и файлы старше срока
     # хранения. Второе — сразу при старте тоже: после долгого простоя ждать час
     # незачем, а работа идемпотентна.
+    #
+    # Сторож зависших задач — раз в пять минут и обязательно при старте: самая
+    # частая причина его работы это выкладка, а она перезапускает и этот пул.
+    # Час ожидания означал бы час, в котором пользователь не может прислать
+    # видео и не видит своих денег.
     cron_jobs = [
         cron(cleanup_old_files, minute=17, run_at_startup=False),
         cron(purge_expired_files, minute=47, run_at_startup=True),
+        cron(reap_stuck_jobs, minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+             run_at_startup=True),
     ]
     queue_name = QUEUE_LIGHT
     max_jobs = 4

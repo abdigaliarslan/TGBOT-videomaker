@@ -69,7 +69,7 @@ def videos_word(n: int, lang: str | None) -> str:
 # Коды ошибок монтажа. Пайплайн знает только код, фразу подставляет интерфейс.
 ERROR_CODES = (
     "source_lost", "edl_missing", "too_short", "too_long", "no_audio",
-    "no_speech", "edl_invalid", "cut_broken", "crop_broken", "failed",
+    "no_speech", "edl_invalid", "cut_broken", "crop_broken", "worker_lost", "failed",
 )
 
 STAGE_KEYS = ("probe", "asr", "clean", "direct", "broll", "cut", "audio", "crop", "render", "done")
@@ -227,6 +227,7 @@ TEXTS: dict[str, dict[str, str]] = {
     "err.edl_invalid": {"ru": "Не удалось собрать монтаж. Попробуйте прислать видео ещё раз.", "en": "Couldn't put the edit together. Please try sending the video again."},
     "err.cut_broken": {"ru": "Нарезка оборвалась — файл повреждён. Пришлите видео ещё раз.", "en": "Cutting was interrupted and the file is damaged. Please send the video again."},
     "err.crop_broken": {"ru": "Кадрирование оборвалось — файл повреждён. Пришлите видео ещё раз.", "en": "Reframing was interrupted and the file is damaged. Please send the video again."},
+    "err.worker_lost": {"ru": "Монтаж прервался на нашей стороне — ролик вернулся на баланс. Пришлите видео ещё раз.", "en": "The edit was interrupted on our side — the reel is back on your balance. Please send the video again."},
     "err.failed": {"ru": "Не получилось смонтировать этот ролик. Мы записали ошибку.", "en": "We couldn't edit this video. The error has been logged."},
 
     # ------------------------------------------------------------ оплата

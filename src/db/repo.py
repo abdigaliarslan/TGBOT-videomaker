@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -284,6 +284,35 @@ async def jobs_in_flight() -> list[Job]:
                 Job.delivered.is_(False),
                 Job.chat_id.isnot(None),
                 Job.status_message_id.isnot(None),
+            )
+            .order_by(Job.created_at)
+        )
+        return list((await s.execute(q)).scalars())
+
+
+async def jobs_to_reap(running_before: datetime, queued_before: datetime) -> list[Job]:
+    """Задачи, за которыми, судя по времени, уже некому следить.
+
+    Две разные беды одним запросом, потому что и лечатся они одинаково:
+
+    * RUNNING с давним `started_at` — воркер взял задачу и не отчитался. Жив он
+      или нет, по базе не видно: это решает пульс в Redis, и отсечка здесь
+      только отбирает кандидатов, которым пульс вообще пора было поставить.
+    * QUEUED с давним `created_at` — задачу никто не взял. Пульса у неё нет и
+      быть не может, поэтому отсечка здесь — единственная проверка, и она
+      длинная: за ней не авария, а честный простой в очереди.
+    """
+    async with session() as s:
+        q = (
+            select(Job)
+            .where(
+                or_(
+                    and_(
+                        Job.status == JobStatus.RUNNING,
+                        func.coalesce(Job.started_at, Job.created_at) < running_before,
+                    ),
+                    and_(Job.status == JobStatus.QUEUED, Job.created_at < queued_before),
+                )
             )
             .order_by(Job.created_at)
         )

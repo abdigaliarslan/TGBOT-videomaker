@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
@@ -123,6 +124,15 @@ def _measure_luma(
         log.warning("замер яркости фона пропущен: %s", e)
 
 
+# Тяжёлые этапы (ffmpeg, Whisper, YuNet) синхронные, и вызываются они через
+# `asyncio.to_thread`. Причина не в скорости — ускорения тут нет никакого, этапы
+# всё равно идут друг за другом, а воркер берёт один ролик за раз. Причина в том,
+# что loop обязан дышать: на нём висит пульс задачи (`worker.tasks.heartbeat`), по
+# которому сторож отличает живой монтаж от мёртвого, и обработчик SIGTERM, которым
+# выкладка просит воркер доработать. Занятый на четыре минуты loop не делает ни
+# того, ни другого: systemd добивает процесс SIGKILL'ом, и задача остаётся висеть
+# в RUNNING. Чистая арифметика написана прямо здесь и в поток не уезжает —
+# `build_plan` считает миллисекунды, и прыжок в поток стоил бы дороже работы.
 async def _notify(progress: Progress | None, stage: str) -> None:
     if progress is None:
         return
@@ -167,7 +177,7 @@ async def process_video(
         # ---------------------------------------------------------- восприятие
         await _notify(progress, "probe")
         t = time.perf_counter()
-        info = probe(src)
+        info = await asyncio.to_thread(probe, src)
         mark("probe", t)
 
         if info.duration < cfg.min_video_seconds:
@@ -185,7 +195,7 @@ async def process_video(
 
         await _notify(progress, "asr")
         t = time.perf_counter()
-        asr = transcribe(src)
+        asr = await asyncio.to_thread(transcribe, src)
         mark("asr", t)
         if not asr.words:
             raise JobError("Речь не распознана. Возможно, в ролике только музыка или шум.", "no_speech")
@@ -198,7 +208,7 @@ async def process_video(
             t = time.perf_counter()
             # Корректор слушает запись: по одному тексту «Родине» в «Зенит» не
             # исправить. Звук нужен только ему, поэтому и извлекается здесь.
-            voice = voice_clip(src) if cfg.asr_fix_by_audio else None
+            voice = await asyncio.to_thread(voice_clip, src) if cfg.asr_fix_by_audio else None
             words, fixes = await clean_transcript(
                 asr.words, llm=llm, language=asr.language, cfg=cfg, audio=voice
             )
@@ -265,10 +275,10 @@ async def process_video(
         t = time.perf_counter()
         cut_path = work / "cut.mp4"
         if cut_pauses:
-            apply_cuts(edl, src, cut_path, info=info, cfg=cfg)
+            await asyncio.to_thread(apply_cuts, edl, src, cut_path, info=info, cfg=cfg)
         else:
-            shutil.copy2(src, cut_path)
-        if not is_playable(cut_path):
+            await asyncio.to_thread(shutil.copy2, src, cut_path)
+        if not await asyncio.to_thread(is_playable, cut_path):
             # Оборванный ffmpeg (упавший воркер, kill) оставляет mp4 без
             # moov-атома. Дальше он поедет в рендер и упадёт там, где причину
             # уже не видно.
@@ -284,7 +294,8 @@ async def process_video(
             await _notify(progress, "audio")
             t = time.perf_counter()
             try:
-                track = build_audio(
+                track = await asyncio.to_thread(
+                    build_audio,
                     edl, cut_path, work / "audio.wav", preset=style,
                     apply_cuts=cut_pauses, sfx=options.sfx, cfg=cfg,
                 )
@@ -304,7 +315,8 @@ async def process_video(
         t = time.perf_counter()
         staged = cut_path
         if vertical:
-            staged = autocrop(
+            staged = await asyncio.to_thread(
+                autocrop,
                 cut_path, work / "vertical.mp4", work_dir=work,
                 out_width=cfg.render_width, out_height=cfg.render_height,
                 # Пресет несёт цветокор (Ф3), крупность — смену плана на резе (Ф6).
@@ -313,18 +325,20 @@ async def process_video(
                 preset=style, framing=framing_spans(edl, applied_cuts=cut_pauses),
                 cfg=cfg, track_out=work / "track.json",
             )
-        if not is_playable(staged):
+        if not await asyncio.to_thread(is_playable, staged):
             raise JobError("Кадрирование оборвалось — файл повреждён. Пришлите видео ещё раз.", "crop_broken")
         mark("crop", t)
 
         t = time.perf_counter()
-        _measure_luma(edl, staged, preset=style, cut_pauses=cut_pauses, cfg=cfg)
+        await asyncio.to_thread(
+            _measure_luma, edl, staged, preset=style, cut_pauses=cut_pauses, cfg=cfg
+        )
         mark("luma", t)
 
         # ---------------------------------------------------------- рендер
         await _notify(progress, "render")
         t = time.perf_counter()
-        staged_info = probe(staged)
+        staged_info = await asyncio.to_thread(probe, staged)
         plan = build_plan(
             edl,
             str(staged),
@@ -357,7 +371,7 @@ async def process_video(
         out_path = work / "result.mp4"
         chosen = backend or cfg.render_backend
         if chosen == "ass":
-            render_ass(plan, out_path, work_dir=work, cfg=cfg)
+            await asyncio.to_thread(render_ass, plan, out_path, work_dir=work, cfg=cfg)
         else:
             async def on_render(done: float) -> None:
                 if progress is None:
