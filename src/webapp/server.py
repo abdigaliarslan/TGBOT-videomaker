@@ -31,7 +31,7 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from aiohttp import web
 
-from src.core.config import UPLOAD_PREFIX, Settings
+from src.core.config import CLAIMED_PREFIX, UPLOAD_PREFIX, Settings
 from src.core.i18n import LANGS, error_text, lang_of, stage_title, t, videos_word
 from src.core.options import ACCENTS, JobOptions
 from src.core.preset import available, load_preset
@@ -127,11 +127,6 @@ DISK_RESERVE_MB = 4096
 # поэтому живой загрузке он не мешает: кусок — 8 МБ, и четверть часа на него
 # не уходит даже на плохой мобильной сети.
 UPLOAD_LEASE = 15 * 60
-# Приставка папки, которую уже забрали под сборку. Отличается от `UPLOAD_PREFIX`
-# намеренно: такая папка не попадает ни в учёт обещанного места, ни под уборку
-# просроченных заявок. Если процесс умрёт посреди сборки, её подберёт почасовая
-# уборка рабочих папок — как обычную папку задачи.
-CLAIMED_PREFIX = "taking-"
 
 
 def _claim_upload(folder: Path) -> Path | None:
@@ -447,77 +442,77 @@ async def upload_finish(request: web.Request) -> web.Response:
         return await _fail(request, 404, "api.upload_not_found")
     folder = claimed
     data_path = folder / "data"
-
-    body = await request.json()
-    preset = str(body.get("preset") or "")
-    if preset not in available():
-        return await _fail(request, 400, "api.unknown_style")
-    options = JobOptions.model_validate(body.get("options") or {})
-
-    user = await _db_user(request)
-    lang = lang_of(user)
-    request[LANG_KEY] = lang
-    limits = {"min_s": cfg.min_video_seconds, "max_m": cfg.max_video_minutes}
-    if user.is_blocked:
-        return await _fail(request, 403, "api.blocked")
-    if not user.is_admin and await repo.active_jobs_count(user.id) >= 1:
-        return await _fail(request, 429, "video.one_in_flight")
-    if await repo.active_jobs_count() >= cfg.queue_max_size:
-        return await _fail(request, 503, "video.queue_full")
-
+    # ВСЁ, что дальше, — под общей уборкой. Отказ после того, как приём забрали
+    # (не та тема, нет баланса, очередь полна, упал ffprobe), оставлял папку
+    # лежать до почасовой уборки, и в счёт обещанного места она уже не шла:
+    # цикл «залил — получил отказ» кладёт на диск сколько угодно гигабайт.
     try:
-        info = await asyncio.to_thread(probe, data_path)
-    except Exception:  # noqa: BLE001 — ffprobe не прочитал: это не видео или битый файл
-        shutil.rmtree(folder, ignore_errors=True)
-        return await _fail(request, 415, "api.unreadable")
-    if info.duration < cfg.min_video_seconds:
-        shutil.rmtree(folder, ignore_errors=True)
-        return _json_error(400, error_text("too_short", lang, **limits))
-    if info.duration > cfg.max_video_seconds:
-        shutil.rmtree(folder, ignore_errors=True)
-        return _json_error(400, error_text("too_long", lang, **limits))
-    if not info.has_audio:
-        shutil.rmtree(folder, ignore_errors=True)
-        return _json_error(400, error_text("no_audio", lang, **limits))
+        body = await request.json()
+        preset = str(body.get("preset") or "")
+        if preset not in available():
+            return await _fail(request, 400, "api.unknown_style")
+        options = JobOptions.model_validate(body.get("options") or {})
 
-    try:
-        job = await repo.create_job(
-            user.id,
-            source_file_id=None,
-            source_key=None,
-            source_size=meta["size"],
-            preset=preset,
-            chat_id=user.id,
-            options=options.model_dump(),
-            charge=not user.is_admin,
-        )
-    except repo.InsufficientBalance:
-        return await _fail(request, 402, "api.no_balance", extra={"balance": user.balance})
+        user = await _db_user(request)
+        lang = lang_of(user)
+        request[LANG_KEY] = lang
+        limits = {"min_s": cfg.min_video_seconds, "max_m": cfg.max_video_minutes}
+        if user.is_blocked:
+            return await _fail(request, 403, "api.blocked")
+        if not user.is_admin and await repo.active_jobs_count(user.id) >= 1:
+            return await _fail(request, 429, "video.one_in_flight")
+        if await repo.active_jobs_count() >= cfg.queue_max_size:
+            return await _fail(request, 503, "video.queue_full")
 
-    try:
-        key = storage.key_for(SOURCES, str(job.id), "source.mp4")
-        await storage.upload(data_path, key, content_type="video/mp4")
-        await repo.update_job(job.id, source_key=key, source_duration=info.duration, preset=preset)
-        await repo.set_user_preset(user.id, preset)
-
-        status_id: int | None = None
         try:
-            status = await bot.send_message(user.id, t("video.accepted_app", lang))
-            status_id = status.message_id
-            await repo.update_job(job.id, status_message_id=status_id)
-        except Exception as e:  # noqa: BLE001 — нет чата с ботом: прогресс увидят в приложении
-            log.warning("задача %s: не смог написать в чат %s: %s", job.id, user.id, e)
+            info = await asyncio.to_thread(probe, data_path)
+        except Exception:  # noqa: BLE001 — ffprobe не прочитал: это не видео или битый файл
+            return await _fail(request, 415, "api.unreadable")
+        if info.duration < cfg.min_video_seconds:
+            return _json_error(400, error_text("too_short", lang, **limits))
+        if info.duration > cfg.max_video_seconds:
+            return _json_error(400, error_text("too_long", lang, **limits))
+        if not info.has_audio:
+            return _json_error(400, error_text("no_audio", lang, **limits))
 
-        queue = await get_queue(QUEUE_CPU)
         try:
-            await queue.enqueue_job("process_job", str(job.id), _queue_name=QUEUE_CPU)
-        finally:
-            await queue.close()
-    except Exception as e:  # noqa: BLE001
-        log.exception("задача %s: не поставилась в очередь", job.id)
-        await repo.mark_failed(job.id, f"постановка в очередь: {e}")
-        await repo.refund_job(job.id)
-        return await _fail(request, 500, "api.enqueue_failed")
+            job = await repo.create_job(
+                user.id,
+                source_file_id=None,
+                source_key=None,
+                source_size=meta["size"],
+                preset=preset,
+                chat_id=user.id,
+                options=options.model_dump(),
+                charge=not user.is_admin,
+            )
+        except repo.InsufficientBalance:
+            return await _fail(request, 402, "api.no_balance", extra={"balance": user.balance})
+
+        try:
+            key = storage.key_for(SOURCES, str(job.id), "source.mp4")
+            await storage.upload(data_path, key, content_type="video/mp4")
+            await repo.update_job(job.id, source_key=key, source_duration=info.duration, preset=preset)
+            await repo.set_user_preset(user.id, preset)
+
+            status_id: int | None = None
+            try:
+                status = await bot.send_message(user.id, t("video.accepted_app", lang))
+                status_id = status.message_id
+                await repo.update_job(job.id, status_message_id=status_id)
+            except Exception as e:  # noqa: BLE001 — нет чата с ботом: прогресс увидят в приложении
+                log.warning("задача %s: не смог написать в чат %s: %s", job.id, user.id, e)
+
+            queue = await get_queue(QUEUE_CPU)
+            try:
+                await queue.enqueue_job("process_job", str(job.id), _queue_name=QUEUE_CPU)
+            finally:
+                await queue.close()
+        except Exception as e:  # noqa: BLE001
+            log.exception("задача %s: не поставилась в очередь", job.id)
+            await repo.mark_failed(job.id, f"постановка в очередь: {e}")
+            await repo.refund_job(job.id)
+            return await _fail(request, 500, "api.enqueue_failed")
     finally:
         shutil.rmtree(folder, ignore_errors=True)
 

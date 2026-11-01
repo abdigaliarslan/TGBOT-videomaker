@@ -22,7 +22,7 @@ from typing import Any, AsyncIterator
 from arq import cron, create_pool
 from arq.connections import RedisSettings
 
-from src.core.config import UPLOAD_PREFIX, settings
+from src.core.config import CLAIMED_PREFIX, UPLOAD_PREFIX, settings
 from src.core.logging import setup_logging
 from src.db import repo
 from src.db.models import JobStatus
@@ -436,7 +436,7 @@ async def cleanup_old_files(ctx: dict[str, Any]) -> int:
             continue  # не папка задачи — чистится пофайлово ниже
         if not child.is_dir():
             continue
-        upload = child.name.startswith(UPLOAD_PREFIX)
+        upload = child.name.startswith((UPLOAD_PREFIX, CLAIMED_PREFIX))
         if child.stat().st_mtime < (upload_cutoff if upload else cutoff):
             shutil.rmtree(child, ignore_errors=True)
             removed += 1

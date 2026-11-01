@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -279,6 +280,33 @@ async def test_a_claimed_upload_is_out_of_the_sweepers_reach(client, monkeypatch
     assert claimed.exists(), "уборка снесла приём, который прямо сейчас собирают"
 
 
+async def test_a_refused_finish_leaves_no_folder_behind(client):
+    """Отказ на сборке обязан убирать за собой файл.
+
+    Забранная папка не попадает ни в квоту пользователя, ни под уборку заявок —
+    в этом и смысл, пока сборка идёт. Но если отказ случился ПОСЛЕ того, как её
+    забрали (не та тема, нет баланса, очередь полна), папка оставалась лежать до
+    почасовой уборки и места не занимала ни в одном счёте. Цикл «залил —
+    получил отказ» тогда кладёт на диск сколько угодно гигабайт.
+    """
+    from src.webapp import server as mod
+
+    cfg = client.server.app[mod.CFG_KEY]
+    r = await client.post("/api/uploads", json={"size": 4}, headers=auth())
+    upload_id = (await r.json())["upload_id"]
+    await client.put(f"/api/uploads/{upload_id}?offset=0", data=b"abcd", headers=auth())
+
+    r = await client.post(
+        f"/api/uploads/{upload_id}/finish",
+        json={"preset": "такой-темы-нет", "options": {}},
+        headers=auth(),
+    )
+    assert r.status == 400
+
+    left = list(Path(cfg.work_dir).glob("*"))
+    assert left == [], f"после отказа на диске осталось: {[p.name for p in left]}"
+
+
 async def test_an_abandoned_upload_is_swept_sooner_than_a_work_folder(tmp_path, monkeypatch):
     """Брошенная папка приёма — не папка задачи: за ней никто не придёт, а
     держит она до гигабайта. Сутки для неё слишком долго."""
@@ -293,14 +321,20 @@ async def test_an_abandoned_upload_is_swept_sooner_than_a_work_folder(tmp_path, 
     for d in (job_dir, upload_dir):
         d.mkdir()
         (d / "data").write_bytes(b"x")
-    # Обеим по три часа: папка задачи обязана дожить до суток, приём — нет.
+    # Папку, забранную под сборку, тоже подбираем по короткому сроку: сюда она
+    # попадает только если процесс умер на середине, и ждать сутки нечего.
+    claimed_dir = tmp_path / "taking-deadbeef"
+    claimed_dir.mkdir()
+    (claimed_dir / "data").write_bytes(b"x")
+    # Всем по три часа: папка задачи обязана дожить до суток, приёмы — нет.
     old = _time.time() - 3 * 3600
-    for d in (job_dir, upload_dir):
+    for d in (job_dir, upload_dir, claimed_dir):
         os.utime(d, (old, old))
 
-    assert await tasks.cleanup_old_files({}) == 1
+    assert await tasks.cleanup_old_files({}) == 2
     assert job_dir.exists(), "уборка снесла папку живой задачи"
     assert not upload_dir.exists(), "брошенный приём остался занимать диск"
+    assert not claimed_dir.exists(), "брошенная сборка осталась занимать диск"
 
 
 @pytest.mark.parametrize("upload_id", ["../../etc", "zz", "0" * 31])
