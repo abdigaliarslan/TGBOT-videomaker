@@ -175,6 +175,66 @@ async def test_space_already_promised_to_other_uploads_is_not_promised_twice(cli
     assert (await client.post("/api/uploads", json={"size": 1024}, headers=auth(44))).status == 200
 
 
+async def test_a_reservation_nobody_feeds_stops_holding_space(client, monkeypatch):
+    """Заявка на место — не бронь навечно.
+
+    Объявить гигабайт и не прислать ни байта стоит ничего, а место держит до
+    уборщика. Пяти аккаунтов хватило бы, чтобы на два часа закрыть загрузку
+    всем. Поэтому заявка живёт коротким сроком, который продлевает каждый
+    пришедший кусок: кто молчит — место отпускает, и своей же квоты не
+    занимает.
+    """
+    import os
+    import shutil
+    import time as _time
+
+    from src.webapp import server as mod
+
+    free = 5 * 1024 * 1024
+    monkeypatch.setattr(mod, "DISK_RESERVE_MB", 0)
+    monkeypatch.setattr(
+        mod.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(0, 0, free)
+    )
+    cfg = client.server.app[mod.CFG_KEY]
+
+    # Два приёма по 2 МБ — обещано 4 из 5, третий такой же не влезает.
+    ids = []
+    for user in (42, 43):
+        r = await client.post("/api/uploads", json={"size": 2 * 1024 * 1024}, headers=auth(user))
+        ids.append((await r.json())["upload_id"])
+    assert (await client.post("/api/uploads", json={"size": 2 * 1024 * 1024}, headers=auth(44))).status == 507
+
+    # Старим оба: кусков по ним не было дольше срока заявки.
+    old = _time.time() - mod.UPLOAD_LEASE - 60
+    for upload_id in ids:
+        data = mod._upload_dir(cfg, upload_id) / "data"
+        os.utime(data, (old, old))
+        os.utime(data.parent, (old, old))
+
+    r = await client.post("/api/uploads", json={"size": 2 * 1024 * 1024}, headers=auth(44))
+    assert r.status == 200, "молчащая заявка продолжает держать место"
+    # И своя же молчащая заявка не запирает квоту пользователя.
+    assert (await client.post("/api/uploads", json={"size": 1024}, headers=auth(42))).status == 200
+
+
+async def test_a_live_upload_keeps_its_reservation(client, monkeypatch):
+    """Кусок пришёл — срок заявки пошёл заново, место остаётся за ней."""
+    import shutil
+
+    from src.webapp import server as mod
+
+    monkeypatch.setattr(mod, "DISK_RESERVE_MB", 0)
+    monkeypatch.setattr(
+        mod.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(0, 0, 5 * 1024 * 1024)
+    )
+    r = await client.post("/api/uploads", json={"size": 4 * 1024 * 1024}, headers=auth(42))
+    upload_id = (await r.json())["upload_id"]
+    await client.put(f"/api/uploads/{upload_id}?offset=0", data=b"x" * 1024, headers=auth(42))
+
+    r = await client.post("/api/uploads", json={"size": 2 * 1024 * 1024}, headers=auth(43))
+    assert r.status == 507, "живой приём лишился своего места"
+
+
 async def test_an_abandoned_upload_is_swept_sooner_than_a_work_folder(tmp_path, monkeypatch):
     """Брошенная папка приёма — не папка задачи: за ней никто не придёт, а
     держит она до гигабайта. Сутки для неё слишком долго."""

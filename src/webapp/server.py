@@ -21,6 +21,7 @@ import hmac
 import json
 import logging
 import re
+import os
 import shutil
 import time
 import uuid
@@ -120,20 +121,40 @@ MAX_OPEN_UPLOADS = 2
 # Запас свободного места, который приёму не отдаётся ни при каких условиях:
 # под базу, журналы и рабочие папки самого монтажа.
 DISK_RESERVE_MB = 4096
+# Сколько живёт заявка на место без единого нового куска. Заявка держит место
+# за собой (иначе учёт обещанного ничего не стоит), а объявить гигабайт и
+# ничего не прислать стоит одного запроса: пяти аккаунтов хватило бы, чтобы
+# закрыть загрузку всем до прихода уборщика. Срок продлевает каждый кусок,
+# поэтому живой загрузке он не мешает: кусок — 8 МБ, и четверть часа на него
+# не уходит даже на плохой мобильной сети.
+UPLOAD_LEASE = 15 * 60
 
 
-def _open_uploads(cfg: Settings) -> list[tuple[Path, dict[str, Any]]]:
-    """Все незавершённые приёмы с их заявками, старые первыми."""
+def _sweep_stale_uploads(cfg: Settings) -> list[tuple[Path, dict[str, Any]]]:
+    """Сносит заявки с истёкшим сроком и отдаёт живые, старые первыми.
+
+    Снос здесь, а не только в уборщике: просроченная заявка иначе держала бы и
+    место, и квоту своего хозяина — то есть пользователь, у которого
+    приложение закрылось посреди загрузки, не смог бы начать заново.
+    """
     root = Path(cfg.work_dir)
-    found: list[tuple[Path, dict[str, Any]]] = []
+    alive: list[tuple[Path, dict[str, Any]]] = []
+    stale_before = time.time() - UPLOAD_LEASE
     for folder in root.glob(f"{UPLOAD_PREFIX}*") if root.exists() else []:
         try:
             meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+            data = folder / "data"
+            # Срок считается по файлу данных: его трогает каждый кусок.
+            touched = (data if data.exists() else folder).stat().st_mtime
         except (OSError, ValueError):
             continue  # папка недописана или уже убрана — не наше дело
-        if isinstance(meta, dict):
-            found.append((folder, meta))
-    return sorted(found, key=lambda pair: pair[0].stat().st_mtime)
+        if not isinstance(meta, dict):
+            continue
+        if touched < stale_before:
+            shutil.rmtree(folder, ignore_errors=True)
+            continue
+        alive.append((folder, meta))
+    return sorted(alive, key=lambda pair: pair[0].stat().st_mtime)
 
 
 def _promised_bytes(open_uploads: list[tuple[Path, dict[str, Any]]]) -> int:
@@ -300,7 +321,7 @@ async def upload_start(request: web.Request) -> web.Response:
         return await _fail(request, 400, "api.empty_file")
     if size > cfg.webapp_max_upload_mb * 1024 * 1024:
         return await _fail(request, 413, "api.too_big", mb=cfg.webapp_max_upload_mb)
-    open_uploads = _open_uploads(cfg)
+    open_uploads = _sweep_stale_uploads(cfg)
     if sum(1 for _, meta in open_uploads if meta.get("user_id") == user.id) >= MAX_OPEN_UPLOADS:
         return await _fail(request, 429, "api.too_many_uploads", n=MAX_OPEN_UPLOADS)
     # Отказ до первого байта, а не на середине: пользователь с гигабайтным
@@ -395,6 +416,10 @@ async def upload_finish(request: web.Request) -> web.Response:
     data_path = folder / "data"
     if data_path.stat().st_size != meta["size"]:
         return await _fail(request, 409, "api.incomplete", extra={"received": data_path.stat().st_size})
+    # Продлеваем срок заявки на время самой сборки: дальше идут ffprobe и
+    # заливка в хранилище, кусков больше не будет, и чужой `upload_start` иначе
+    # имеет право снести папку у нас из-под рук.
+    os.utime(data_path)
 
     body = await request.json()
     preset = str(body.get("preset") or "")
