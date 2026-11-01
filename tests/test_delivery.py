@@ -19,6 +19,7 @@ class FakeJob:
     preset: str = "glass"
     source_duration: float | None = 30.0
     result_duration: float | None = 20.0
+    result_key: str | None = "results/r.mp4"
 
 
 class FakeBot:
@@ -113,3 +114,47 @@ async def test_an_unreadable_file_is_still_sent(tmp_path):
     bot = FakeBot(fail=0)
     await mod._send_video(bot, 1, job(), tmp_path / "missing.mp4", "glass")
     assert bot.calls == 1
+
+
+async def test_a_failure_report_survives_the_html_parser(tmp_path, monkeypatch):
+    """Бот говорит с Telegram в режиме HTML, а текст исключения HTML не знает.
+
+    Угловая скобка из `<class 'aiohttp...'>` делала сообщение невалидной
+    разметкой, Telegram его отклонял, а `_safe_edit` ошибку глотал — и
+    пользователь оставался смотреть на полосу прогресса, так и не узнав, что
+    ролик готов и его можно забрать кнопкой.
+    """
+    edits: list[str] = []
+
+    class Bot:
+        async def edit_message_text(self, text, **kw):
+            # Как сам Telegram: незакрытый тег — отказ.
+            import re
+
+            tags = re.findall(r"<[^>]*>?", text)
+            bad = [tag for tag in tags if not re.fullmatch(r"</?(b|i|u|s|code|pre|a)[^<]*>", tag)]
+            if bad:
+                raise TelegramBadRequest(method=None, message=f"can't parse entities: {bad}")
+            edits.append(text)
+
+    async def one_job(_id):
+        return FakeJob(id=uuid.uuid4())
+
+    monkeypatch.setattr(mod.repo, "get_job", one_job)
+    monkeypatch.setattr(mod.repo, "get_user", lambda _id: _none())
+    monkeypatch.setattr(
+        mod.storage, "download", lambda *a, **k: _boom("<class 'aiohttp.Timeout'> & co")
+    )
+
+    await mod._deliver(Bot(), 1, 2, "job-1", "glass")
+
+    assert edits, "сообщение пользователю не прошло разметку и потерялось"
+    assert "aiohttp.Timeout" in edits[-1], "причина потерялась вместе с разметкой"
+
+
+async def _none():
+    return None
+
+
+async def _boom(message: str):
+    raise RuntimeError(message)
