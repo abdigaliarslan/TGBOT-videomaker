@@ -235,6 +235,50 @@ async def test_a_live_upload_keeps_its_reservation(client, monkeypatch):
     assert r.status == 507, "живой приём лишился своего места"
 
 
+async def test_only_one_finisher_can_claim_an_upload(client):
+    """Сборку приёма забирает ровно один — переименованием папки.
+
+    Два «Готово» разом (двойной тап, повтор по тайм-ауту) иначе создали бы две
+    задачи за один файл, то есть списали бы два ролика. И папка уходит из-под
+    уборки на время сборки: дальше ffprobe и заливка, кусков больше не будет, а
+    чужой `upload_start` имеет право снести просроченную заявку.
+    """
+    import asyncio as _asyncio
+
+    from src.webapp import server as mod
+
+    cfg = client.server.app[mod.CFG_KEY]
+    r = await client.post("/api/uploads", json={"size": 4}, headers=auth())
+    folder = mod._upload_dir(cfg, (await r.json())["upload_id"])
+
+    claims = await _asyncio.gather(
+        _asyncio.to_thread(mod._claim_upload, folder),
+        _asyncio.to_thread(mod._claim_upload, folder),
+    )
+    won = [c for c in claims if c is not None]
+    assert len(won) == 1, f"приём забрали дважды: {claims}"
+    assert won[0].exists() and not folder.exists()
+
+
+async def test_a_claimed_upload_is_out_of_the_sweepers_reach(client, monkeypatch):
+    """Забранную папку уборка приёмов не видит, даже когда срок заявки истёк."""
+    import os
+    import time as _time
+
+    from src.webapp import server as mod
+
+    cfg = client.server.app[mod.CFG_KEY]
+    r = await client.post("/api/uploads", json={"size": 4}, headers=auth())
+    claimed = mod._claim_upload(mod._upload_dir(cfg, (await r.json())["upload_id"]))
+    assert claimed is not None
+    old = _time.time() - mod.UPLOAD_LEASE - 60
+    os.utime(claimed / "data", (old, old))
+    os.utime(claimed, (old, old))
+
+    assert mod._sweep_stale_uploads(cfg) == []
+    assert claimed.exists(), "уборка снесла приём, который прямо сейчас собирают"
+
+
 async def test_an_abandoned_upload_is_swept_sooner_than_a_work_folder(tmp_path, monkeypatch):
     """Брошенная папка приёма — не папка задачи: за ней никто не придёт, а
     держит она до гигабайта. Сутки для неё слишком долго."""

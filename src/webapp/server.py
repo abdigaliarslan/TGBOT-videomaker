@@ -21,7 +21,6 @@ import hmac
 import json
 import logging
 import re
-import os
 import shutil
 import time
 import uuid
@@ -128,6 +127,30 @@ DISK_RESERVE_MB = 4096
 # поэтому живой загрузке он не мешает: кусок — 8 МБ, и четверть часа на него
 # не уходит даже на плохой мобильной сети.
 UPLOAD_LEASE = 15 * 60
+# Приставка папки, которую уже забрали под сборку. Отличается от `UPLOAD_PREFIX`
+# намеренно: такая папка не попадает ни в учёт обещанного места, ни под уборку
+# просроченных заявок. Если процесс умрёт посреди сборки, её подберёт почасовая
+# уборка рабочих папок — как обычную папку задачи.
+CLAIMED_PREFIX = "taking-"
+
+
+def _claim_upload(folder: Path) -> Path | None:
+    """Забирает приём себе под сборку. None — его уже забрал кто-то другой.
+
+    Переименование атомарно, и это здесь главное. Два «Готово» разом (двойной
+    тап, повтор по тайм-ауту) иначе создали бы две задачи за один файл — то
+    есть списали бы два ролика. Выигрывает ровно один вызов `rename`.
+
+    Заодно папка уходит из-под уборки приёмов: дальше идут ffprobe и заливка в
+    хранилище, новых кусков не будет, и срок заявки на большом файле мог бы
+    истечь прямо посреди сборки.
+    """
+    claimed = folder.with_name(f"{CLAIMED_PREFIX}{folder.name[len(UPLOAD_PREFIX):]}")
+    try:
+        folder.rename(claimed)
+    except OSError:
+        return None
+    return claimed
 
 
 def _sweep_stale_uploads(cfg: Settings) -> list[tuple[Path, dict[str, Any]]]:
@@ -413,13 +436,17 @@ async def upload_finish(request: web.Request) -> web.Response:
     if isinstance(own, web.Response):
         return own
     folder, meta = own
+    if (folder / "data").stat().st_size != meta["size"]:
+        received = (folder / "data").stat().st_size
+        return await _fail(request, 409, "api.incomplete", extra={"received": received})
+    # Забираем приём себе ДО всякой долгой работы: это и защита от двух «Готово»
+    # разом (две задачи за один файл — два списанных ролика), и уход из-под
+    # уборки просроченных заявок на время сборки.
+    claimed = _claim_upload(folder)
+    if claimed is None:
+        return await _fail(request, 404, "api.upload_not_found")
+    folder = claimed
     data_path = folder / "data"
-    if data_path.stat().st_size != meta["size"]:
-        return await _fail(request, 409, "api.incomplete", extra={"received": data_path.stat().st_size})
-    # Продлеваем срок заявки на время самой сборки: дальше идут ffprobe и
-    # заливка в хранилище, кусков больше не будет, и чужой `upload_start` иначе
-    # имеет право снести папку у нас из-под рук.
-    os.utime(data_path)
 
     body = await request.json()
     preset = str(body.get("preset") or "")
