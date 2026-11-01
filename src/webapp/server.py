@@ -31,7 +31,7 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from aiohttp import web
 
-from src.core.config import Settings
+from src.core.config import UPLOAD_PREFIX, Settings
 from src.core.i18n import LANGS, error_text, lang_of, stage_title, t, videos_word
 from src.core.options import ACCENTS, JobOptions
 from src.core.preset import available, load_preset
@@ -43,7 +43,6 @@ from src.webapp.auth import AuthError, WebAppUser, validate_init_data
 log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
-UPLOAD_PREFIX = "upload-"
 _UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
 
 BOT_KEY = web.AppKey("bot", Bot)
@@ -110,6 +109,31 @@ def _upload_dir(cfg: Settings, upload_id: str) -> Path:
     # Папка лежит прямо в work_dir: её подберёт почасовая уборка старых папок,
     # если пользователь закрыл приложение посреди загрузки.
     return Path(cfg.work_dir) / f"{UPLOAD_PREFIX}{upload_id}"
+
+
+# Сколько незавершённых приёмов разрешено одному пользователю. Приём занимает
+# диск до самого конца загрузки, а брошенную папку убирает только уборщик.
+# При разрешённом гигабайте на файл десяток брошенных приёмов съедает весь
+# свободный диск сервера — вместе с местом под Postgres, который там же.
+# Два — чтобы повтор на оборванной мобильной сети не упирался в отказ.
+MAX_OPEN_UPLOADS = 2
+# Запас свободного места, который приёму не отдаётся ни при каких условиях:
+# под базу, журналы и рабочие папки самого монтажа.
+DISK_RESERVE_MB = 4096
+
+
+def _open_uploads(cfg: Settings, user_id: int) -> list[Path]:
+    """Незавершённые приёмы этого пользователя, старые первыми."""
+    root = Path(cfg.work_dir)
+    mine: list[Path] = []
+    for folder in root.glob(f"{UPLOAD_PREFIX}*") if root.exists() else []:
+        try:
+            meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue  # недописанная или чужая папка — не наше дело
+        if meta.get("user_id") == user_id:
+            mine.append(folder)
+    return sorted(mine, key=lambda p: p.stat().st_mtime)
 
 
 def _job_view(job: Job, *, live: dict[str, Any] | None, secret: str, lang: str, cfg: Settings) -> dict[str, Any]:
@@ -258,6 +282,13 @@ async def upload_start(request: web.Request) -> web.Response:
         return await _fail(request, 400, "api.empty_file")
     if size > cfg.webapp_max_upload_mb * 1024 * 1024:
         return await _fail(request, 413, "api.too_big", mb=cfg.webapp_max_upload_mb)
+    if len(_open_uploads(cfg, user.id)) >= MAX_OPEN_UPLOADS:
+        return await _fail(request, 429, "api.too_many_uploads", n=MAX_OPEN_UPLOADS)
+    # Отказ до первого байта, а не на середине: пользователь с гигабайтным
+    # файлом иначе узнаёт о нехватке места через десять минут загрузки.
+    free = shutil.disk_usage(cfg.work_dir).free - DISK_RESERVE_MB * 1024 * 1024
+    if size > free:
+        return await _fail(request, 507, "api.no_space")
 
     upload_id = uuid.uuid4().hex
     folder = _upload_dir(cfg, upload_id)

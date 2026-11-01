@@ -108,6 +108,69 @@ async def test_someone_elses_upload_is_invisible(client):
     assert r.status == 404
 
 
+async def test_a_user_cannot_keep_opening_uploads(client):
+    """Приём файла занимает диск до самого конца загрузки, а брошенную папку
+    убирает только почасовая уборка. При разрешённом гигабайте на файл десяток
+    брошенных приёмов съедает весь свободный диск сервера — вместе с местом под
+    Postgres, который на той же машине. Поэтому приёмов на пользователя
+    считанное число."""
+    from src.webapp.server import MAX_OPEN_UPLOADS
+
+    ids = []
+    for _ in range(MAX_OPEN_UPLOADS):
+        r = await client.post("/api/uploads", json={"size": 1024}, headers=auth())
+        assert r.status == 200
+        ids.append((await r.json())["upload_id"])
+
+    r = await client.post("/api/uploads", json={"size": 1024}, headers=auth())
+    assert r.status == 429
+    # Чужие приёмы в счёт не идут: лимит на пользователя, а не на сервер.
+    assert (await client.post("/api/uploads", json={"size": 1024}, headers=auth(43))).status == 200
+
+
+async def test_an_upload_that_does_not_fit_the_disk_is_refused_up_front(client, monkeypatch):
+    """Отказ до первого байта, а не на середине загрузки: пользователь с
+    гигабайтным файлом иначе узнаёт о нехватке места через десять минут."""
+    import shutil
+
+    from src.webapp import server as mod
+
+    monkeypatch.setattr(
+        mod.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(0, 0, 3 * 1024 * 1024)
+    )
+    r = await client.post("/api/uploads", json={"size": 2 * 1024 * 1024}, headers=auth())
+    assert r.status == 507, "приём на диск, где места нет, разрешили"
+
+    monkeypatch.setattr(
+        mod.shutil, "disk_usage", lambda _p: shutil._ntuple_diskusage(0, 0, 50 * 1024 * 1024 * 1024)
+    )
+    assert (await client.post("/api/uploads", json={"size": 2 * 1024 * 1024}, headers=auth())).status == 200
+
+
+async def test_an_abandoned_upload_is_swept_sooner_than_a_work_folder(tmp_path, monkeypatch):
+    """Брошенная папка приёма — не папка задачи: за ней никто не придёт, а
+    держит она до гигабайта. Сутки для неё слишком долго."""
+    import os
+    import time as _time
+
+    from src.worker import tasks
+
+    monkeypatch.setattr(tasks.settings, "work_dir", tmp_path)
+    job_dir = tmp_path / "0000-job"
+    upload_dir = tmp_path / "upload-deadbeef"
+    for d in (job_dir, upload_dir):
+        d.mkdir()
+        (d / "data").write_bytes(b"x")
+    # Обеим по три часа: папка задачи обязана дожить до суток, приём — нет.
+    old = _time.time() - 3 * 3600
+    for d in (job_dir, upload_dir):
+        os.utime(d, (old, old))
+
+    assert await tasks.cleanup_old_files({}) == 1
+    assert job_dir.exists(), "уборка снесла папку живой задачи"
+    assert not upload_dir.exists(), "брошенный приём остался занимать диск"
+
+
 @pytest.mark.parametrize("upload_id", ["../../etc", "zz", "0" * 31])
 async def test_upload_ids_cannot_escape_the_work_dir(client, upload_id: str):
     r = await client.put(f"/api/uploads/{upload_id}?offset=0", data=b"x", headers=auth())

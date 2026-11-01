@@ -247,6 +247,8 @@ TEXTS: dict[str, dict[str, str]] = {
     "api.empty_file": {"ru": "Пустой файл.", "en": "The file is empty."},
     "api.too_big": {"ru": "Файл больше {mb} МБ.", "en": "The file is larger than {mb} MB."},
     "api.upload_not_found": {"ru": "Загрузка не найдена — начните заново.", "en": "Upload not found — please start again."},
+    "api.too_many_uploads": {"ru": "Больше {n} файлов разом загружать нельзя — дождитесь или начните заново.", "en": "You can't upload more than {n} files at once — wait for them or start over."},
+    "api.no_space": {"ru": "На сервере не хватает места под этот файл. Попробуйте позже или пришлите короче.", "en": "The server is out of space for this file. Try later or send a shorter one."},
     "api.bad_offset": {"ru": "Некорректный сдвиг загрузки.", "en": "Invalid upload offset."},
     "api.chunk_too_far": {"ru": "Кусок выходит за размер файла.", "en": "The chunk goes past the end of the file."},
     "api.offset_mismatch": {"ru": "Сдвиг не совпал.", "en": "Offset mismatch."},

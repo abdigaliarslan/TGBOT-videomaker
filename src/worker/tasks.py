@@ -22,7 +22,7 @@ from typing import Any, AsyncIterator
 from arq import cron, create_pool
 from arq.connections import RedisSettings
 
-from src.core.config import settings
+from src.core.config import UPLOAD_PREFIX, settings
 from src.core.logging import setup_logging
 from src.db import repo
 from src.db.models import JobStatus
@@ -424,12 +424,20 @@ async def cleanup_old_files(ctx: dict[str, Any]) -> int:
     removed = 0
     now = datetime.now(timezone.utc).timestamp()
     cutoff = now - 24 * 3600
+    # Брошенный приём файла из приложения — не папка задачи: за ним никто не
+    # придёт, а держит он до гигабайта на свободном диске в 14 ГБ. Сутки для
+    # него слишком долго. Живому приёму два часа не помеха: папка создаётся в
+    # начале загрузки, и двух часов хватает даже гигабайту на мобильной сети.
+    upload_cutoff = now - 2 * 3600
     root = Path(settings.work_dir)
     shared = _shared_caches()
     for child in root.iterdir() if root.exists() else []:
         if child.name in shared:
             continue  # не папка задачи — чистится пофайлово ниже
-        if child.is_dir() and child.stat().st_mtime < cutoff:
+        if not child.is_dir():
+            continue
+        upload = child.name.startswith(UPLOAD_PREFIX)
+        if child.stat().st_mtime < (upload_cutoff if upload else cutoff):
             shutil.rmtree(child, ignore_errors=True)
             removed += 1
     for name, ttl in shared.items():
