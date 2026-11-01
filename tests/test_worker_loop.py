@@ -105,6 +105,11 @@ def harness(tmp_path, monkeypatch):
     async def fake_metadata(*a, **k):
         return None
 
+    async def fake_clean(words, **k):
+        # Подменён, чтобы тест не ходил в сеть: смысл проверки — поток, в
+        # котором считается ГОЛОС для корректора, а не сам корректор.
+        return list(words), 0
+
     async def fake_render(plan, out, **k):
         out.write_bytes(b"\0" * 64)
 
@@ -123,6 +128,7 @@ def harness(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("src.pipeline.job.direct", fake_direct)
     monkeypatch.setattr("src.pipeline.job.make_metadata", fake_metadata)
+    monkeypatch.setattr("src.pipeline.job.clean_transcript", fake_clean)
     monkeypatch.setattr("src.pipeline.job.arender_remotion", fake_render)
     return src, tmp_path / "work", seen
 
