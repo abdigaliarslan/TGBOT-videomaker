@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.core.config import settings  # noqa: E402
 from src.core.edl import EDL  # noqa: E402
 from src.core.logging import setup_logging  # noqa: E402
+from src.core.options import JobOptions  # noqa: E402
 from src.llm.client import LLMClient  # noqa: E402
 from src.pipeline.job import process_from_edl, process_video  # noqa: E402
 
@@ -81,7 +82,8 @@ async def run(args: argparse.Namespace) -> int:
         )
     else:
         res = await process_video(
-            src, work, preset=args.preset, llm=llm, backend=args.backend, keep_work=True
+            src, work, preset=args.preset, llm=llm, backend=args.backend, keep_work=True,
+            options=JobOptions(font=args.font, accent=args.accent),
         )
     wall = round(time.perf_counter() - t0, 2)
 
@@ -122,6 +124,8 @@ def main() -> int:
     ap.add_argument("--prefix", default="phase-0", help="имя ролика и сводки (по умолч. phase-0)")
     ap.add_argument("--label", default="baseline", help="суффикс edl/words/plan (по умолч. baseline)")
     ap.add_argument("--preset", default=None, help="пресет субтитров")
+    ap.add_argument("--font", default="theme", help="шрифт субтитров (ключ из core.options.FONTS)")
+    ap.add_argument("--accent", default="theme", help="цвет выделенного слова")
     ap.add_argument("--backend", default=None, choices=["ass", "remotion"], help="рендерер")
     ap.add_argument("--no-llm", action="store_true", help="без LLM: детерминированный режиссёр")
     ap.add_argument(

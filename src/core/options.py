@@ -100,7 +100,7 @@ class JobOptions(BaseModel):
     accent: str = "theme"
     font: str = "theme"
     cut: bool = Field(default=True, description="резать затяжные паузы и заминки")
-    sfx: bool = Field(default=True, description="звуковые акценты на картинках и укрупнениях")
+    sfx: bool = Field(default=True, description="звуковые акценты: щелчок на субтитре, картинки, укрупнения")
     broll: bool = Field(default=True, description="медиа-карточки по смыслу")
     camera: bool = Field(default=True, description="смена крупности на резах")
 
