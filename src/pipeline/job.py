@@ -471,7 +471,15 @@ async def process_from_edl(
     if cfg.audio_post_enabled:
         t = time.perf_counter()
         try:
-            track = build_audio(edl, cut_path, work / "audio.wav", preset=style, cfg=cfg)
+            # `apply_cuts` обязан совпасть с тем, что уедет в `build_plan` ниже:
+            # звуковые метки живут в ВЫХОДНОМ таймлайне, и без этого аргумента
+            # они считались по нарезанному, когда ролик собирается без нарезки, —
+            # то есть уезжали на всю суммарную длину вырезанного. С щелчком на
+            # каждом блоке уезжало бы полтора десятка меток вместо двух.
+            track = build_audio(
+                edl, cut_path, work / "audio.wav",
+                preset=style, apply_cuts=cut_pauses, cfg=cfg,
+            )
             if track is not None:
                 audio_path = str(track.path)
                 audio_report = {

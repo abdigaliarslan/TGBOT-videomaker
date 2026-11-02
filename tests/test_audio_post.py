@@ -20,6 +20,7 @@ from src.pipeline.audio import measure_ebur128
 from src.pipeline.audio_post import (
     SFX_PROFILES,
     SFX_SWISH,
+    SFX_TICK,
     SFX_WHOOSH,
     build_audio,
     duck_ratio,
@@ -178,7 +179,7 @@ def test_unknown_sfx_is_not_invented(tmp_path):
 def test_plan_sfx_marks_broll_entry():
     edl = simple_edl(broll=[Broll(word_idx=4, duration=1.5, query="cat",
                                   anim=BrollAnim.POP_IN, anchor="center")])
-    got = plan_sfx(edl, preset=load_preset("glass"))
+    got = [s for s in plan_sfx(edl, preset=load_preset("glass")) if s.name != SFX_TICK]
     assert [(s.at_word_idx, s.name) for s in got] == [(4, SFX_WHOOSH)]
 
 
@@ -189,7 +190,8 @@ def test_plan_sfx_marks_only_punch_in():
         Cut(src_in=2.0, src_out=4.0, reason="keep", framing="tight"),  # ← punch-in
         Cut(src_in=4.0, src_out=6.2, reason="keep", framing="wide"),  # отъезд, молчим
     ]
-    got = plan_sfx(simple_edl(cuts=cuts), preset=load_preset("glass"))
+    got = [s for s in plan_sfx(simple_edl(cuts=cuts), preset=load_preset("glass"))
+           if s.name != SFX_TICK]
     assert [s.name for s in got] == [SFX_SWISH]
     assert got[0].at_word_idx == 4  # первое слово, начинающееся после реза на 2.0 с
 
@@ -202,13 +204,14 @@ def test_plan_sfx_keeps_events_apart():
     ]
     edl = simple_edl(cuts=cuts, broll=[Broll(word_idx=4, duration=1.5, query="cat",
                                              anim=BrollAnim.POP_IN, anchor="center")])
-    got = plan_sfx(edl, preset=load_preset("glass"))
+    got = [s for s in plan_sfx(edl, preset=load_preset("glass")) if s.name != SFX_TICK]
     assert [s.name for s in got] == [SFX_WHOOSH], "картинка важнее реза"
 
 
 def test_plan_sfx_survives_a_reel_without_cuts():
     """Ролик без единого реза — штатный случай (`cut_pauses=False`), не ошибка."""
-    assert plan_sfx(simple_edl(), preset=load_preset("glass")) == []
+    got = plan_sfx(simple_edl(), preset=load_preset("glass"))
+    assert [s for s in got if s.name != SFX_TICK] == []
 
 
 def test_plan_sfx_ignores_cut_out_events():
@@ -218,7 +221,7 @@ def test_plan_sfx_ignores_cut_out_events():
         broll=[Broll(word_idx=6, duration=1.5, query="cat",  # слово 6 = 3.0 с, вырезано
                      anim=BrollAnim.POP_IN, anchor="center")],
     )
-    assert plan_sfx(edl, preset=load_preset("glass")) == []
+    assert [s for s in plan_sfx(edl, preset=load_preset("glass")) if s.name != SFX_TICK] == []
 
 
 def test_swish_quieter_than_whoosh():
@@ -226,7 +229,7 @@ def test_swish_quieter_than_whoosh():
         cuts=[Cut(src_in=0.0, src_out=2.0, reason="hook", framing="wide"),
               Cut(src_in=2.0, src_out=6.2, reason="keep", framing="tight")],
     )
-    swish = plan_sfx(edl, preset=load_preset("glass"))[0]
+    swish = [s for s in plan_sfx(edl, preset=load_preset("glass")) if s.name == SFX_SWISH][0]
     assert swish.gain_db < load_preset("glass").audio.sfx_gain_db
 
 
@@ -363,7 +366,9 @@ def test_sfx_land_on_the_output_timeline_not_the_source(tmp_path, silent_video):
     assert abs(src_time - out_time) > 1.0, "тест бессмыслен, если времена совпали"
 
     track = build_audio(edl, silent_video, tmp_path / "a.wav", cfg=cfg_with(tmp_path))
-    assert track is not None and track.sfx == 2  # whoosh на картинке + swish на укрупнении
+    assert track is not None
+    loud = [x.name for x in edl.sfx if x.name != SFX_TICK]
+    assert sorted(loud) == sorted([SFX_WHOOSH, SFX_SWISH]), "картинка и укрупнение"
     hit = loudest_moment(track.path)
     assert hit == pytest.approx(out_time, abs=0.12), (
         f"эффект ударил на {hit:.2f} c; выходное время {out_time:.2f}, исходное {src_time:.2f}"
@@ -388,7 +393,7 @@ def test_broken_sfx_file_costs_only_the_effect(tmp_path, silent_video):
     track = build_audio(edl, silent_video, tmp_path / "a.wav", cfg=cfg)
     assert track is not None, "битый эффект унёс весь звуковой пост"
     # штатный эффект пересобирается поверх мусора, а не пропадает вместе с этапом
-    assert track.sfx == 1
+    assert [x.name for x in edl.sfx if x.name != SFX_TICK] == [SFX_WHOOSH]
     hit = loudest_moment(track.path)
     assert hit == pytest.approx(edl.words[6].start, abs=0.12)
 
@@ -514,7 +519,8 @@ def test_whoosh_lands_on_the_picture(tmp_path, silent_video):
                                   anim=BrollAnim.POP_IN, anchor="center")])
     expected = edl.words[6].start  # без резов выходное время равно исходному
     track = build_audio(edl, silent_video, tmp_path / "a.wav", cfg=cfg_with(tmp_path))
-    assert track is not None and track.sfx == 1
+    assert track is not None
+    assert [x.name for x in edl.sfx if x.name != SFX_TICK] == [SFX_WHOOSH]
     hit = loudest_moment(track.path)
     assert hit == pytest.approx(expected, abs=0.12), (
         f"whoosh ударил на {hit:.2f} c вместо {expected:.2f} c"
@@ -554,7 +560,8 @@ def test_swish_lands_on_the_cut_not_on_the_first_word(tmp_path, silent_video):
     assert word_at - cut_at > 0.4, "тест бессмыслен, если рез и слово совпали"
 
     track = build_audio(edl, silent_video, tmp_path / "a.wav", cfg=cfg_with(tmp_path))
-    assert track is not None and track.sfx == 1
+    assert track is not None
+    assert [x.name for x in edl.sfx if x.name != SFX_TICK] == [SFX_SWISH]
     hit = loudest_moment(track.path)
     assert hit == pytest.approx(cut_at, abs=0.05), (
         f"swish ударил на {hit:.2f} c; рез на {cut_at:.2f}, первое слово на {word_at:.2f}"
@@ -586,7 +593,7 @@ def test_sfx_stay_on_the_source_timeline_when_cuts_are_not_applied(tmp_path, sil
                         apply_cuts=False, cfg=cfg_with(tmp_path))
     assert track is not None
     # резов в картинке нет — подчёркивать нечего, остаётся одна картинка
-    assert track.sfx == 1 and [s.name for s in edl.sfx] == [SFX_WHOOSH]
+    assert [s.name for s in edl.sfx if s.name != SFX_TICK] == [SFX_WHOOSH]
     hit = loudest_moment(track.path)
     assert hit == pytest.approx(ws[10].start, abs=0.12), (
         f"эффект ударил на {hit:.2f} c вместо исходных {ws[10].start:.2f}"
@@ -603,7 +610,8 @@ def test_whoosh_on_the_very_first_word_still_lands_on_the_picture(tmp_path, sile
     edl = simple_edl(broll=[Broll(word_idx=0, duration=1.5, query="cat",
                                   anim=BrollAnim.POP_IN, anchor="center")])
     track = build_audio(edl, silent_video, tmp_path / "a.wav", cfg=cfg_with(tmp_path))
-    assert track is not None and track.sfx == 1
+    assert track is not None
+    assert [x.name for x in edl.sfx if x.name != SFX_TICK] == [SFX_WHOOSH]
     hit = loudest_moment(track.path)
     assert hit == pytest.approx(0.0, abs=0.12), (
         f"whoosh ударил на {hit:.2f} c, а картинка входит на 0.00 "
@@ -647,4 +655,83 @@ def test_sfx_land_in_the_edl(tmp_path, voice_video):
                                   anim=BrollAnim.POP_IN, anchor="center")])
     assert edl.sfx == []
     build_audio(edl, voice_video, tmp_path / "a.wav", cfg=cfg_with(tmp_path))
-    assert [s.name for s in edl.sfx] == [SFX_WHOOSH]
+    assert [s.name for s in edl.sfx if s.name != SFX_TICK] == [SFX_WHOOSH]
+    assert any(s.name == SFX_TICK for s in edl.sfx), "щелчки субтитров тоже обязаны попасть в лист"
+
+
+# ------------------------------------------------------------------ щелчок субтитра
+
+
+def test_every_caption_block_gets_a_tick():
+    """Звук на появлении субтитра — третий вид акцента.
+
+    Якорь — ПЕРВОЕ НЕВЫРЕЗАННОЕ слово блока, тот же примитив, которым считается
+    начало блока в `render_plan.build_plan`. Брать `block.words[0]` наивно
+    нельзя: блок с резом внутри разъехался бы с картинкой.
+    """
+    edl = simple_edl()
+    ticks = [s for s in plan_sfx(edl, preset=load_preset("glass")) if s.name == SFX_TICK]
+    assert [s.at_word_idx for s in ticks] == [b.words[0].word_idx for b in edl.captions]
+
+
+def test_the_tick_is_the_quietest_of_the_three():
+    """Щелчок звучит на каждом блоке, а картинка — пару раз за ролик. Громкость
+    редкого события на частом превращается в стрекот."""
+    glass = load_preset("glass")
+    tick = [s for s in plan_sfx(simple_edl(), preset=glass) if s.name == SFX_TICK][0]
+    assert tick.gain_db == glass.audio.caption_gain_db
+    assert tick.gain_db < glass.audio.sfx_gain_db - 6, "щелчок не тише акцентов"
+
+
+def test_the_tick_yields_to_a_picture():
+    """Приоритет: картинка > рез > щелчок. Блок, который и так подчёркнут
+    вставкой, второго звука не получает."""
+    edl = simple_edl(broll=[Broll(word_idx=3, duration=1.5, query="cat",
+                                  anim=BrollAnim.POP_IN, anchor="center")])
+    got = plan_sfx(edl, preset=load_preset("glass"))
+    assert [s.name for s in got if s.at_word_idx == 3] == [SFX_WHOOSH]
+
+
+def test_ticks_keep_their_own_distance():
+    """Порог частоты у щелчка СВОЙ и больше общего.
+
+    Общий `SFX_MIN_GAP_S = 1.0` про другое — «две метки слились в кашу». Блок
+    субтитра живёт 2-3 секунды, и порог в секунду не проредил бы ничего.
+    """
+    from src.pipeline.audio_post import CAPTION_SFX_MIN_GAP_S
+
+    ws = [Word(idx=i, text=f"w{i}", start=i * 0.3, end=i * 0.3 + 0.25) for i in range(12)]
+    edl = EDL(
+        source_duration=ws[-1].end + 0.2,
+        words=ws,
+        cuts=[],
+        captions=[CaptionBlock(words=[CaptionWord(word_idx=i) for i in g])
+                  for g in [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9], [10, 11]]],
+    )
+    ticks = [s for s in plan_sfx(edl, preset=load_preset("glass")) if s.name == SFX_TICK]
+    times = [ws[s.at_word_idx].start for s in ticks]
+    assert len(times) < len(edl.captions), "частые блоки не проредились"
+    assert all(b - a >= CAPTION_SFX_MIN_GAP_S for a, b in zip(times, times[1:]))
+
+
+def test_a_block_cut_out_of_the_reel_gets_no_tick():
+    edl = simple_edl(cuts=[Cut(src_in=0.0, src_out=1.4, reason="hook"),
+                           Cut(src_in=3.0, src_out=6.2, reason="keep")])
+    ticks = [s for s in plan_sfx(edl, preset=load_preset("glass")) if s.name == SFX_TICK]
+    kept = {w.idx for c in edl.kept_cuts for w in edl.words if c.src_in <= w.start < c.src_out}
+    assert all(s.at_word_idx in kept for s in ticks), "щелчок на вырезанном слове"
+
+
+def test_the_tick_lands_before_the_first_word(tmp_path, monkeypatch):
+    """Блок начинается НА первом слове, то есть на атаке слога — худшее место
+    для разборчивости. Щелчок сдвигается в тишину перед словом."""
+    from src.pipeline.audio_post import CAPTION_SFX_LEAD_S, SFX_PROFILES, sfx_marks
+
+    edl = simple_edl()
+    ticks = [s for s in plan_sfx(edl, preset=load_preset("glass")) if s.name == SFX_TICK]
+    marks = [m for m in sfx_marks(edl, ticks) if m.path.stem == SFX_TICK]
+    assert marks, "метки щелчка не собрались"
+    # Второй блок: первый упёрся бы в ноль и дал бы head_trim.
+    second = marks[1]
+    want = edl.words[3].start - CAPTION_SFX_LEAD_S - SFX_PROFILES[SFX_TICK].peak_at
+    assert second.at == pytest.approx(want, abs=0.002)

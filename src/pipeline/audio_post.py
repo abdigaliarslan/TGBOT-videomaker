@@ -51,6 +51,7 @@ AFORMAT = f"aformat=sample_fmts=fltp:sample_rates={SAMPLE_RATE}:channel_layouts=
 
 SFX_WHOOSH = "whoosh"
 SFX_SWISH = "swish"
+SFX_TICK = "tick"
 MUSIC_SUFFIXES = (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".flac", ".aac")
 SFX_SUFFIXES = (".flac", ".wav", ".mp3", ".m4a", ".ogg")
 # Эффекты лежат в репозитории во flac, а не в wav: сжатие тут ни при чём —
@@ -62,6 +63,14 @@ SFX_ASSET_SUFFIX = ".flac"
 SWISH_TRIM_DB = 4.0
 # Ближе этого две метки сливаются в кашу; whoosh важнее, swish уступает.
 SFX_MIN_GAP_S = 1.0
+
+# Щелчок субтитра. Порог частоты у него СВОЙ и больше общего: `SFX_MIN_GAP_S`
+# про «две метки слились в кашу», а здесь задача другая — не превратить ролик в
+# стрекот. Блок субтитра живёт 2-3 с, и порог в секунду не проредил бы ничего.
+CAPTION_SFX_MIN_GAP_S = 1.5
+# Щелчок уходит в тишину ПЕРЕД словом: блок начинается на первом слове, то есть
+# ровно на атаке слога — худшее место с точки зрения разборчивости речи.
+CAPTION_SFX_LEAD_S = 0.04
 
 # Дакинг. sidechaincompress не умеет «убавь ровно на N дБ»: он давит на
 # over_db * (1 - 1/ratio), где over_db — насколько ключ выше порога. Порог
@@ -148,6 +157,18 @@ SFX_PROFILES: dict[str, SfxProfile] = {
             Band(2600, 0.05, 0.12, 0.12),
         ),
         seeds=(2609, 8117),
+    ),
+    # Щелчок субтитра: две узкие полосы, 45 мс всего. Коротко и высоко —
+    # намеренно. Он звучит на каждом блоке, то есть раз в две-три секунды, и
+    # обязан читаться как отметка, а не как событие: длинный свуш на такой
+    # частоте превратил бы ролик в стрекот, а низкая полоса села бы прямо на
+    # форманты речи (300-2500 Гц) и съела бы разборчивость.
+    SFX_TICK: SfxProfile(
+        bands=(
+            Band(2600, 0.000, 0.008, 0.022),
+            Band(5200, 0.004, 0.006, 0.035),
+        ),
+        seeds=(3761, 9043),
     ),
 }
 
@@ -432,6 +453,28 @@ def plan_sfx(edl: EDL, *, preset: Preset, apply_cuts: bool = True) -> list[Sfx]:
             )
             accepted.sort(key=lambda item: item[0])
 
+    # Щелчки — ПОСЛЕДНИМИ, и это не стиль, а приоритет: порядок добавления в
+    # `accepted` решает, кто кому уступает. Блок, уже подчёркнутый картинкой или
+    # резом, второго звука не получает.
+    for block in edl.captions:
+        first = next(
+            (
+                (w, win)
+                for w in (by_idx.get(cw.word_idx) for cw in block.words)
+                if w is not None and (win := tl.word_window(w)) is not None
+            ),
+            None,
+        )
+        if first is None:
+            continue  # блок вырезан целиком — его нет и в кадре (`build_plan`)
+        w, win = first
+        if any(abs(win[0] - t) < CAPTION_SFX_MIN_GAP_S for t, _ in accepted):
+            continue
+        accepted.append(
+            (win[0], Sfx(at_word_idx=w.idx, name=SFX_TICK, gain_db=preset.audio.caption_gain_db))
+        )
+        accepted.sort(key=lambda item: item[0])
+
     return [s for _, s in accepted]
 
 
@@ -473,6 +516,8 @@ def sfx_marks(
         if path is None:
             continue
         lead = SFX_PROFILES[s.name].peak_at if s.name in SFX_PROFILES else 0.0
+        if s.name == SFX_TICK:
+            lead += CAPTION_SFX_LEAD_S  # в тишину перед словом, а не в атаку слога
         start = at - lead
         marks.append(
             SfxMark(
