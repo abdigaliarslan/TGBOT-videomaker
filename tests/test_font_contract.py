@@ -74,3 +74,107 @@ def test_the_caption_asks_for_the_weight_the_preset_names():
         "Captions.tsx больше не берёт вес из пресета — проверьте, что сверка "
         "с линейкой всё ещё про тот же шрифт"
     )
+
+
+# --------------------------------------------------- проводка выбора до рендера
+
+
+def _harness(tmp_path, monkeypatch):
+    """Прогон с подменёнными тяжёлыми этапами: нужен только план, что уедет в рендер."""
+    import shutil
+    from types import SimpleNamespace
+
+    from src.core.edl import EDL, CaptionBlock, CaptionWord, Cut, Word
+    from src.pipeline.asr import ASRResult
+    from src.pipeline.probe import MediaInfo
+
+    words = [Word(idx=i, text=f"сл{i}", start=i * 0.5, end=i * 0.5 + 0.4) for i in range(8)]
+    edl = EDL(
+        preset="pulse",
+        source_duration=12.0,
+        words=words,
+        cuts=[Cut(src_in=0.0, src_out=12.0, reason="keep", framing="tight")],
+        captions=[
+            CaptionBlock(words=[CaptionWord(word_idx=w.idx) for w in words[:4]]),
+            CaptionBlock(words=[CaptionWord(word_idx=w.idx) for w in words[4:]]),
+        ],
+    )
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"\0" * 1024)
+    info = MediaInfo(
+        path="—", duration=12.0, width=1080, height=1920, fps=30.0, has_audio=True,
+        audio_channels=2, audio_rate=48000, rotation=0, video_codec="h264", bitrate=0,
+    )
+    seen: dict[str, object] = {}
+
+    async def fake_direct(*a, **k):
+        return edl
+
+    async def fake_metadata(*a, **k):
+        return None
+
+    async def fake_clean(ws, **k):
+        return list(ws), 0
+
+    async def fake_render(plan, out, **k):
+        seen["plan"] = plan
+        out.write_bytes(b"\0" * 64)
+
+    monkeypatch.setattr("src.pipeline.job.probe", lambda *a, **k: info)
+    monkeypatch.setattr("src.pipeline.job.is_playable", lambda *a, **k: True)
+    monkeypatch.setattr("src.pipeline.job.apply_cuts", lambda e, s, d, **k: shutil.copy2(s, d))
+    monkeypatch.setattr(
+        "src.pipeline.job.autocrop", lambda s, d, **k: (shutil.copy2(s, d), d)[1]
+    )
+    monkeypatch.setattr(
+        "src.pipeline.job.transcribe",
+        lambda *a, **k: ASRResult(words=list(words), language="ru", backend="test", model="—"),
+    )
+    monkeypatch.setattr("src.pipeline.job.direct", fake_direct)
+    monkeypatch.setattr("src.pipeline.job.make_metadata", fake_metadata)
+    monkeypatch.setattr("src.pipeline.job.clean_transcript", fake_clean)
+    monkeypatch.setattr("src.pipeline.job.measure_bg_luma", lambda *a, **k: None)
+    monkeypatch.setattr("src.pipeline.job.arender_remotion", fake_render)
+    return src, edl, seen, SimpleNamespace
+
+
+async def test_the_chosen_font_reaches_the_render_plan(tmp_path, monkeypatch):
+    """Выбор пользователя обязан доехать до плана — его читает рендерер."""
+    from src.core.config import Settings
+    from src.core.options import FONTS, JobOptions
+    from src.pipeline.job import process_video
+
+    src, _, seen, _ = _harness(tmp_path, monkeypatch)
+    cfg = Settings(_env_file=None, audio_post_enabled=False)
+    await process_video(
+        src, tmp_path / "work", preset="pulse", cfg=cfg,
+        options=JobOptions(font="serif", accent="red"),
+    )
+
+    plan = seen["plan"]
+    assert plan.preset["font"]["file"] == FONTS["serif"][1].file
+    assert plan.preset["font"]["family"] == FONTS["serif"][1].family
+    assert plan.preset["colors"]["accent"] == "#FF3B30", "цвет не должен теряться из-за шрифта"
+
+
+async def test_the_font_goes_into_the_edl_so_a_rerender_repeats_it(tmp_path, monkeypatch):
+    """Инвариант 4: сохранённый лист обязан дать то же видео.
+
+    Перерендер получает РОВНО лист — опции задачи до него не доезжают. Шрифт,
+    оставшийся только в `jobs.options`, при смене темы молча сменился бы на
+    шрифт темы, и ролик вышел бы другим.
+    """
+    from src.core.config import Settings
+    from src.core.options import FONTS, JobOptions
+    from src.pipeline.job import process_from_edl, process_video
+
+    src, edl, seen, _ = _harness(tmp_path, monkeypatch)
+    cfg = Settings(_env_file=None, audio_post_enabled=False)
+    await process_video(
+        src, tmp_path / "work", preset="pulse", cfg=cfg, options=JobOptions(font="narrow")
+    )
+    assert edl.font == "narrow", "шрифт не записан в монтажный лист"
+
+    seen.clear()
+    await process_from_edl(src, tmp_path / "again", edl, cfg=cfg)
+    assert seen["plan"].preset["font"]["file"] == FONTS["narrow"][1].file

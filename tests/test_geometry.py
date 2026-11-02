@@ -43,7 +43,7 @@ from src.core.geometry import (
     sized_words,
     space_width,
 )
-from src.core.preset import load_preset
+from src.core.preset import available, load_preset
 from src.core.render_plan import (
     PlanBlock,
     PlanWord,
@@ -51,6 +51,16 @@ from src.core.render_plan import (
     title_card_words,
     wrap_block,
 )
+
+# Темы перечисляются НЕ руками. Список был зашит как ["glass", "bold", "pulse"],
+# и четвёртая тема оказалась бы невидимой для всех этих проверок разом: файл в
+# папке пресетов — это данные, которые рендерятся в бою, а сторожил бы их никто.
+# Пары «темы без второго регистра» и «темы без титра» тоже выводятся из данных,
+# а не перечисляются: добавленная тема сама попадёт в нужный список.
+ALL_PRESETS = available()
+WITHOUT_QUIET = [n for n in ALL_PRESETS if not load_preset(n).caption.quiet.enabled]
+WITHOUT_CARD = [n for n in ALL_PRESETS if not load_preset(n).caption.title_card.enabled]
+
 
 REPO = Path(__file__).resolve().parents[1]
 FRAME = (1080, 1920)
@@ -463,7 +473,7 @@ def test_line_box_is_never_shorter_than_the_strut():
     assert line_box_height([big], preset) > strut
 
 
-@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
+@pytest.mark.parametrize("name", ALL_PRESETS)
 def test_shipped_presets_keep_the_simple_line_box(name: str):
     """У всех поставляемых тем строчный бокс — ровно `max(кегль)·межстрочие`.
 
@@ -1169,7 +1179,7 @@ def test_caption_rect_matches_the_chromium_box():
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
+@pytest.mark.parametrize("name", ALL_PRESETS)
 def test_the_production_block_rect_matches_chromium(name: str):
     """Тот же DoD, но на ПРОИЗВОДСТВЕННОМ пути: `wrap_block` + `_rect_of_lines`.
 

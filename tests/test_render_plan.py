@@ -30,7 +30,7 @@ from src.core.geometry import (
     metrics_for,
     space_width,
 )
-from src.core.preset import Preset, hex_to_rgb, load_preset
+from src.core.preset import Preset, available, hex_to_rgb, load_preset
 from src.core.render_plan import (
     PlanWord,
     RenderPlan,
@@ -42,6 +42,16 @@ from src.core.render_plan import (
     wrap_block,
     wrap_words,
 )
+
+
+# Темы перечисляются НЕ руками. Список был зашит как ["glass", "bold", "pulse"],
+# и четвёртая тема оказалась бы невидимой для всех этих проверок разом: файл в
+# папке пресетов — это данные, которые рендерятся в бою, а сторожил бы их никто.
+# Пары «темы без второго регистра» и «темы без титра» тоже выводятся из данных,
+# а не перечисляются: добавленная тема сама попадёт в нужный список.
+ALL_PRESETS = available()
+WITHOUT_QUIET = [n for n in ALL_PRESETS if not load_preset(n).caption.quiet.enabled]
+WITHOUT_CARD = [n for n in ALL_PRESETS if not load_preset(n).caption.title_card.enabled]
 
 
 def cfg() -> Settings:
@@ -428,7 +438,7 @@ def test_missing_font_metrics_do_not_break_the_plan():
     assert all(w.size is None for b in plan.blocks for w in b.words)
 
 
-@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
+@pytest.mark.parametrize("name", ALL_PRESETS)
 def test_fallback_line_limit_follows_the_preset(name: str):
     """Запасной лимит по символам считается от кегля и регистра, а не константой.
 
@@ -547,7 +557,7 @@ def ruler_of(preset: Preset) -> _Ruler:
     )
 
 
-@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
+@pytest.mark.parametrize("name", ALL_PRESETS)
 def test_wrapped_text_never_leaves_the_caption_rect(name: str):
     """DoD Ф5: тридцать блоков, ни один не вылезает за отведённую ширину.
 
@@ -583,7 +593,7 @@ def test_wrapped_text_never_leaves_the_caption_rect(name: str):
             assert width <= ruler.budget + 0.5, (name, [w.text for w in line], width)
 
 
-@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
+@pytest.mark.parametrize("name", ALL_PRESETS)
 def test_words_in_a_line_never_overlap(name: str):
     """DoD Ф5: слова разъезжаются на настоящий пробел, а не наезжают друг на друга.
 
@@ -649,7 +659,7 @@ def test_words_in_a_line_never_overlap(name: str):
     assert seen >= 30, "проверять надо хотя бы тридцать строк"
 
 
-@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
+@pytest.mark.parametrize("name", ALL_PRESETS)
 def test_block_rect_holds_every_line(name: str):
     """Прямоугольник блока накрывает текст целиком — и по ширине, и по ВЫСОТЕ.
 
@@ -1003,7 +1013,7 @@ def test_the_panel_flag_reaches_the_plan_and_only_the_marked_block():
     assert marked.blocks[0].rect == plain.blocks[0].rect
 
 
-@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
+@pytest.mark.parametrize("name", ALL_PRESETS)
 def test_contrast_rule_has_a_lever_on_every_background(name: str):
     """У правила Ф9 обязан быть рычаг на ЛЮБОЙ яркости фона, а не только на краях.
 
@@ -1234,7 +1244,7 @@ def test_the_picture_yields_to_every_register_the_block_might_take():
     assert picture.y == pytest.approx(at_top.rect.y + at_top.rect.height + gap, abs=1.0)
 
 
-@pytest.mark.parametrize("name", ["glass", "bold"])
+@pytest.mark.parametrize("name", WITHOUT_QUIET)
 def test_themes_without_a_second_register_render_as_before(name: str):
     """Регистр — ДАННЫЕ темы: у glass и bold его нет, и верх у них прежний.
 
@@ -1466,7 +1476,7 @@ def _measure_in_chromium(request: dict) -> dict:
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", ["glass", "bold", "pulse"])
+@pytest.mark.parametrize("name", ALL_PRESETS)
 def test_chromium_draws_the_block_the_plan_promised(name: str):
     """DoD Ф5 целиком: тот же Chromium и тот же шрифт, что в рендере, — допуск 2 px.
 
@@ -1772,7 +1782,7 @@ def test_the_card_text_lives_in_the_edl_and_survives_a_rebuild():
     assert [b.title_card for b in bare.blocks] == [False]
 
 
-@pytest.mark.parametrize("name", ["glass", "bold"])
+@pytest.mark.parametrize("name", WITHOUT_CARD)
 def test_themes_without_a_card_never_draw_one(name: str):
     """Титр — ДАННЫЕ темы: у glass и bold его нет, и заголовок их не меняет.
 

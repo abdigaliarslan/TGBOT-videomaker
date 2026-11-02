@@ -17,7 +17,7 @@ from typing import Any, Awaitable, Callable
 
 from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, validate_edl
-from src.core.options import JobOptions, apply_accent
+from src.core.options import JobOptions, apply_accent, apply_font
 from src.core.preset import load_preset
 from src.core.render_plan import build_plan
 from src.core.track import load_track
@@ -230,7 +230,12 @@ async def process_video(
         if errors:
             raise JobError("Не удалось собрать монтажный лист: " + "; ".join(errors[:3]), "edl_invalid")
         edl_from_llm = bool(llm and llm.ready and any(u.prompt == "direct" for u in llm.usages))
-        style = apply_accent(load_preset(preset or edl.preset), options.accent)
+        # Шрифт — в ЛИСТ, а не только в стиль: перерендер получает ровно лист,
+        # и выбор, оставшийся в опциях задачи, до него бы не доехал (инвариант 4).
+        edl.font = options.font
+        style = apply_font(
+            apply_accent(load_preset(preset or edl.preset), options.accent), options.font
+        )
 
         if not options.camera:
             # Движение камеры выключено: один план на весь ролик. Правится EDL, а
@@ -456,7 +461,11 @@ async def process_from_edl(
         raise JobError("Нарезка оборвалась — файл повреждён.", "cut_broken")
     mark("cut", t)
 
-    style = load_preset(edl.preset)
+    # Шрифт берётся из ЛИСТА: здесь нет ни опций задачи, ни пользователя — только
+    # он сам. Цвет выделения в лист не писался и остаётся цветом темы; это
+    # известное расхождение, и `rerender_job` его закрывает своим путём (там
+    # опции задачи есть).
+    style = apply_font(load_preset(edl.preset), edl.font or "theme")
     audio_path: str | None = None
     audio_report: dict[str, Any] | None = None
     if cfg.audio_post_enabled:

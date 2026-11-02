@@ -26,7 +26,7 @@ from src.core.config import CLAIMED_PREFIX, UPLOAD_PREFIX, settings
 from src.core.logging import setup_logging
 from src.db import repo
 from src.db.models import JobStatus
-from src.core.options import JobOptions, apply_accent
+from src.core.options import JobOptions, apply_accent, apply_font
 from src.llm.client import LLMClient, Usage
 from src.pipeline.job import STAGE_KEYS_BY_TITLE, JobError, process_video
 from src.storage.s3 import RESULTS, SOURCES, storage
@@ -276,10 +276,15 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
         # Тяжёлое — в рабочий поток, по той же причине, что и в `process_video`:
         # loop обязан дышать, иначе воркер не слышит SIGTERM от выкладки.
         info = await asyncio.to_thread(probe, src_path)
-        # Перерендер меняет тему, а выбранный пользователем цвет выделения
-        # сохраняет: он выбирал цвет, а не «цвет конкретной темы».
+        # Перерендер меняет ТЕМУ, а выбранные пользователем цвет выделения и
+        # шрифт сохраняет: он выбирал цвет и шрифт, а не «цвет конкретной темы».
+        # Шрифт берётся из листа, если он там есть, и из опций задачи иначе: лист
+        # пишется этим же выбором (`process_video`), а у листов, сохранённых до
+        # появления поля, его нет вовсе.
         options = JobOptions.from_stored(job.options)
-        style = apply_accent(load_preset(preset), options.accent)
+        style = apply_font(
+            apply_accent(load_preset(preset), options.accent), edl.font or options.font
+        )
         # Нарезка — решение пользователя, и перерендер обязан его повторить: без
         # этого ролик, смонтированный без вырезания пауз, при смене темы
         # нарезался бы, а субтитры и звук разъехались бы с картинкой.
