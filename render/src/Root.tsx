@@ -14,7 +14,17 @@ const useCaptionFont = (fontUrl: string | null | undefined) => {
       continueRender(handle);
       return;
     }
-    const face = new FontFace("ReelbotCaption", `url(${staticFile(fontUrl)})`);
+    // Диапазон весов, а не умолчание: без дескриптора лицо регистрируется как
+    // `normal` (400), а Captions.tsx просит вес пресета — пара, на которой
+    // Chromium вправе нарисовать синтетический жир. Замер показал, что на
+    // нынешней сборке он ширину не меняет (объявленные 400 и 100 против
+    // запрошенных 800 дали те же пиксели), то есть активной ошибки не было.
+    // Объявление всё равно обязано совпадать с линейкой `render/measure.mjs`:
+    // сверка 2 px верна ровно настолько, насколько рендер объявляет шрифт так
+    // же, как страница замера. Сторожит `tests/test_font_contract.py`.
+    const face = new FontFace("ReelbotCaption", `url(${staticFile(fontUrl)})`, {
+      weight: "1 1000",
+    });
     face
       .load()
       .then((loaded) => {

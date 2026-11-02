@@ -1073,24 +1073,37 @@ def test_python_predicts_chromium_line_width():
 
 
 @pytest.mark.slow
-def test_python_predicts_chromium_for_every_bundled_font():
-    """Тот же тест для второго шрифта и второго пресета: капсом, крупнее, плотнее.
+@pytest.mark.parametrize(
+    "ttf", sorted(p.name for p in (REPO / "assets" / "fonts").glob("*.ttf"))
+)
+@pytest.mark.parametrize("preset_name", ["bold", "glass"])
+def test_python_predicts_chromium_for_every_bundled_font(ttf: str, preset_name: str):
+    """Каждый шрифт из assets/fonts — в ОБОИХ регистрах.
 
-    Метрики выгружаются на каждый TTF из assets/fonts, и каждая выгрузка должна
-    быть проверена — иначе второй файл это непроверенные данные, которые молча
-    врут, когда пресет на него переключат.
+    Метрики выгружаются на каждый TTF, и каждая выгрузка обязана быть
+    проверена: иначе файл в папке — это непроверенные данные, которые молча
+    врут, когда на него переключат тему.
+
+    Регистра ДВА, и это не перестраховка. Раньше тест брал числа одной темы
+    `bold`, а у неё `uppercase: true` — то есть весь текст уходил в браузер
+    капсом, и строчные метрики не проверял никто. Проверено порчей файла:
+    сдвиг ширины строчной «о» на 4 % тест не замечал, сдвиг прописной «О» на
+    6 % — ловил. Между тем темы `glass` и `pulse` рисуют именно строчные.
+
+    `bold` даёт капс, крупный кегль и плотный трекинг; `glass` — строчные,
+    мельче и свободнее. Вместе они накрывают оба набора глифов и оба знака
+    letter-spacing.
     """
-    bold = load_preset("bold")
-    for ttf in sorted((REPO / "assets" / "fonts").glob("*.ttf")):
-        items = _baseline_lines(
-            bold.font.size,
-            bold.animation.accent_scale,
-            bold.animation.shout_scale,
-            uppercase=bold.font.uppercase,
-        )
-        _assert_matches_chromium(
-            ttf.name, bold.font.weight, bold.font.size, bold.font.letter_spacing, items
-        )
+    preset = load_preset(preset_name)
+    items = _baseline_lines(
+        preset.font.size,
+        preset.animation.accent_scale,
+        preset.animation.shout_scale,
+        uppercase=preset.font.uppercase,
+    )
+    _assert_matches_chromium(
+        ttf, preset.font.weight, preset.font.size, preset.font.letter_spacing, items
+    )
 
 
 @pytest.mark.slow
