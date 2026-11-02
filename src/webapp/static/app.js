@@ -130,6 +130,7 @@ const state = {
   boot: null,
   preset: null,
   accent: "theme",
+  font: "theme",
   options: {},
   file: null,
   fileInfo: "",
@@ -243,6 +244,32 @@ function initTheme() {
 
 // ------------------------------------------------------------------ превью субтитров
 
+// Шрифты превью объявляются по списку из /api/bootstrap: их несколько, и
+// зашитый в css один означал бы, что чип выбора показывает чужой шрифт.
+// Диапазон весов — тот же, что в рендере и в линейке замеров: один файл
+// закрывает весь диапазон, и браузер не синтезирует жирность.
+function declareFonts() {
+  const faces = new Map();
+  for (const f of state.boot.fonts || []) if (f.file && f.family) faces.set(f.file, f.family);
+  for (const p of state.boot.presets || []) if (p.font_file && p.font) faces.set(p.font_file, p.font);
+  const css = [...faces].map(([file, family]) => `@font-face{font-family:"${family}";` +
+    `src:url("/fonts/${file}") format("truetype");font-weight:1 1000;font-display:swap;}`).join("\n");
+  const tag = document.getElementById("font-faces") || el("style", { id: "font-faces" });
+  tag.textContent = css;
+  if (!tag.parentNode) document.head.appendChild(tag);
+}
+
+function activeThemeFamily() {
+  const p = (state.boot.presets || []).find((x) => x.name === state.preset);
+  return (p && p.font) || "Montserrat ExtraBold";
+}
+
+// Шрифт, которым рисуется превью: выбранный, а иначе — шрифт темы.
+function activeFamily() {
+  const chosen = (state.boot.fonts || []).find((f) => f.key === state.font);
+  return (chosen && chosen.family) || activeThemeFamily();
+}
+
 const preview = {
   timer: null,
   paused: false,
@@ -272,6 +299,7 @@ const preview = {
     box.replaceChildren();
     box.style.color = p ? p.colors.text : "#fdfaf2";
     box.style.letterSpacing = p ? `${p.letter_spacing}em` : "";
+    box.style.setProperty("--cap-font", `"${activeFamily()}"`);
     // Движение берётся у темы, а не зашито в стили: иначе превью обещает одно,
     // а рендер делает другое — ровно так и было, пока слово в ролике включалось
     // за кадр, а здесь плавно проявлялось.
@@ -327,7 +355,14 @@ function renderPresets() {
       role: "tab",
       "aria-selected": p.name === state.preset ? "true" : "false",
       text: p.title,
-      onclick: () => { state.preset = p.name; haptic(); renderPresets(); renderAccents(); preview.render(); },
+      onclick: () => {
+        state.preset = p.name;
+        haptic();
+        renderPresets();
+        renderAccents();
+        renderFonts();
+        preview.render();
+      },
     })));
 }
 
@@ -351,6 +386,26 @@ function renderAccents() {
       el("i", { class: "chip__dot", style: `background:${a.color || (p ? p.colors.accent : "#F3D28F")}` }),
       a.title,
     ])));
+}
+
+function renderFonts() {
+  const box = $("#font-chips");
+  box.replaceChildren(...(state.boot.fonts || []).map((f) =>
+    el("button", {
+      class: `chip${f.key === state.font ? " is-active" : ""}`,
+      type: "button",
+      // Подпись рисуется САМИМ шрифтом: название «Антиква» ничего не говорит,
+      // пока не видно букв.
+      style: `font-family:"${f.family || activeThemeFamily()}"`,
+      onclick: () => {
+        state.font = f.key;
+        haptic();
+        renderFonts();
+        preview.render();
+        const active = box.querySelector(".chip.is-active");
+        if (active) active.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
+      },
+    }, [f.title])));
 }
 
 function renderOptions() {
@@ -393,6 +448,8 @@ function initEdit() {
   $("#preview-play").addEventListener("click", () => { preview.toggle(); haptic(); });
   $("#chips-left").addEventListener("click", () => $("#accent-chips").scrollBy({ left: -160 }));
   $("#chips-right").addEventListener("click", () => $("#accent-chips").scrollBy({ left: 160 }));
+  $("#font-left").addEventListener("click", () => $("#font-chips").scrollBy({ left: -160 }));
+  $("#font-right").addEventListener("click", () => $("#font-chips").scrollBy({ left: 160 }));
   $("#requirements").addEventListener("click", () => {
     const l = state.boot.limits;
     popup(tr("req.title"), [
@@ -521,7 +578,10 @@ async function uploadAndStart(file) {
   renderCta(tr("cta.checking"), 1);
   const res = await api(`/api/uploads/${id}/finish`, {
     method: "POST",
-    body: { preset: state.preset, options: { ...state.options, accent: state.accent } },
+    body: {
+      preset: state.preset,
+      options: { ...state.options, accent: state.accent, font: state.font },
+    },
   });
   return res.job;
 }
@@ -766,10 +826,16 @@ async function main() {
   applyStaticTexts();
   state.preset = b.presets.some((p) => p.name === b.user.preset) ? b.user.preset : (b.presets[0] || {}).name;
   state.options = { ...b.defaults };
-  state.accent = b.defaults.accent || "theme";
+  // Запомненный выбор важнее умолчания: тема уже так и работает (`user.preset`),
+  // а цвет со шрифтом до сих пор сбрасывались на каждом открытии приложения.
+  const saved = (b.user && b.user.settings) || {};
+  state.accent = saved.accent || b.defaults.accent || "theme";
+  state.font = saved.font || b.defaults.font || "theme";
 
+  declareFonts();
   renderPresets();
   renderAccents();
+  renderFonts();
   renderOptions();
   renderBalance();
   initEdit();

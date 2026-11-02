@@ -400,3 +400,59 @@ async def test_a_dead_tunnel_restarts_the_bot_and_a_stopped_one_does_not(monkeyp
     await t.start(timeout_s=5)
     await t.stop()
     assert kills == []
+
+
+# ------------------------------------------------------------------ шрифты
+
+
+@pytest.fixture
+async def booted(tmp_path, monkeypatch):
+    """Клиент с ботом-двойником: `/api/bootstrap` спрашивает у бота его имя."""
+    from types import SimpleNamespace
+
+    from src.db import repo
+    from src.webapp.server import create_app
+
+    async def no_user(_user_id):
+        return None
+
+    async def me():
+        return SimpleNamespace(username="bot", first_name="Бот")
+
+    monkeypatch.setattr(repo, "get_user", no_user)
+    cfg = Settings(_env_file=None, bot_token=TOKEN, work_dir=tmp_path, webapp_chunk_mb=1,
+                   webapp_max_upload_mb=5)
+    app = create_app(bot=SimpleNamespace(me=me), cfg=cfg)  # type: ignore[arg-type]
+    async with TestClient(TestServer(app)) as c:
+        yield c
+
+
+async def test_bootstrap_offers_the_font_library(booted):
+    """Приложение рисует чипы по тому, что пришло; без этого массива выбора нет."""
+    from src.core.options import FONTS
+
+    r = await booted.get("/api/bootstrap", headers=auth())
+    assert r.status == 200
+    fonts = (await r.json())["fonts"]
+    assert [f["key"] for f in fonts] == list(FONTS)
+    theme, *rest = fonts
+    assert theme["key"] == "theme" and theme["file"] is None, "«как в теме» идёт первым"
+    assert all(f["title"] and f["file"] and f["family"] for f in rest)
+
+
+async def test_the_font_route_serves_the_whole_library(client):
+    """Раньше список собирался только из пресетов. Шрифт, который не назвала ни
+    одна тема, браузер бы не получил — и чип выбора показывал бы не тот шрифт."""
+    from src.core.options import FONTS
+
+    for key, (_, choice) in FONTS.items():
+        if choice is None:
+            continue
+        r = await client.get(f"/fonts/{choice.file}")
+        assert r.status == 200, f"{key}: шрифт не отдаётся приложению"
+        assert (await r.read())[:4] in (b"\x00\x01\x00\x00", b"true", b"OTTO")
+
+
+async def test_the_font_route_still_refuses_anything_else(client):
+    for name in ("../../etc/passwd", "secret.env", "Unknown-Bold.ttf"):
+        assert (await client.get(f"/fonts/{name}")).status == 404

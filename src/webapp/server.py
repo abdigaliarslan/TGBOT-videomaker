@@ -33,7 +33,7 @@ from aiohttp import web
 
 from src.core.config import CLAIMED_PREFIX, UPLOAD_PREFIX, Settings
 from src.core.i18n import LANGS, error_text, lang_of, stage_title, t, videos_word
-from src.core.options import ACCENTS, JobOptions
+from src.core.options import ACCENTS, FONTS, JobOptions
 from src.core.preset import available, load_preset
 from src.db import repo
 from src.db.models import Job, JobStatus
@@ -308,6 +308,8 @@ async def bootstrap(request: web.Request) -> web.Response:
                 "balance": user.balance,
                 "videos_done": user.videos_done,
                 "preset": user.preset,
+                # Запомненные цвет и шрифт. Приложение берёт их вместо умолчаний.
+                "settings": user.settings or {},
                 "lang": lang,
             },
             "bot_username": me.username,
@@ -316,6 +318,17 @@ async def bootstrap(request: web.Request) -> web.Response:
             "accents": [
                 {"key": k, "title": titles.get(lang, titles["ru"]), "color": color}
                 for k, (titles, color) in ACCENTS.items()
+            ],
+            # Шрифты той же формы, что и цвета: ключ, подпись и то, чем рисовать
+            # превью. `file` у «как в теме» пустой — шрифт берётся у выбранной темы.
+            "fonts": [
+                {
+                    "key": k,
+                    "title": titles.get(lang, titles["ru"]),
+                    "family": choice.family if choice else None,
+                    "file": choice.file if choice else None,
+                }
+                for k, (titles, choice) in FONTS.items()
             ],
             "packages": [{"videos": v, "stars": s} for v, s in cfg.star_packages.items()],
             "limits": {
@@ -494,6 +507,10 @@ async def upload_finish(request: web.Request) -> web.Response:
             await storage.upload(data_path, key, content_type="video/mp4")
             await repo.update_job(job.id, source_key=key, source_duration=info.duration, preset=preset)
             await repo.set_user_preset(user.id, preset)
+            # Цвет и шрифт запоминаются между роликами, как и тема. Раньше
+            # приложение каждый раз подставляло умолчание, и выбранная антиква
+            # на следующем ролике молча становилась гротеском.
+            await repo.set_user_settings(user.id, accent=options.accent, font=options.font)
 
             status_id: int | None = None
             try:
@@ -665,7 +682,10 @@ async def font(request: web.Request) -> web.StreamResponse:
     """Шрифт темы для превью. Отдаём только файлы, которые назвал какой-то пресет."""
     cfg = request.app[CFG_KEY]
     name = request.match_info["name"]
-    allowed = set()
+    # Разрешены и шрифты тем, и вся библиотека выбора: раньше список собирался
+    # только из пресетов, и шрифт, которого не назвала ни одна тема, браузер бы
+    # не получил — чип выбора показывал бы превью чужим шрифтом.
+    allowed = {choice.file for _, choice in FONTS.values() if choice}
     for preset in available():
         try:
             allowed.add(load_preset(preset).font.file)

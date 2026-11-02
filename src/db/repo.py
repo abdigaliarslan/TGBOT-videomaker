@@ -8,8 +8,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
-from sqlalchemy import and_, func, or_, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import and_, cast, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.core.config import Settings, settings as default_settings
@@ -157,6 +157,27 @@ async def user_ids_with_chosen_lang() -> list[tuple[int, str]]:
 async def set_user_preset(user_id: int, preset: str) -> None:
     async with session() as s:
         await s.execute(update(User).where(User.id == user_id).values(preset=preset))
+
+
+async def set_user_settings(user_id: int, **values: Any) -> None:
+    """Запоминает выбор пользователя между роликами: цвет выделения, шрифт.
+
+    Слияние делает БАЗА (`settings || :patch`), а не Python. Прочитать-слить-
+    записать значило бы потерять запись, если два ролика ставятся одновременно:
+    из приложения и из чата. Один UPDATE такой гонки не имеет.
+
+    Тема сюда не кладётся — у неё своя колонка `users.preset` с историей.
+    """
+    if not values:
+        return
+    async with session() as s:
+        await s.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(settings=func.coalesce(User.settings, text("'{}'::jsonb")).op("||")(
+                cast(values, JSONB)
+            ))
+        )
 
 
 async def bump_videos_done(user_id: int) -> None:

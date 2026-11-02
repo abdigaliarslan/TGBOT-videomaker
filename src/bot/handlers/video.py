@@ -15,6 +15,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from src.bot.keyboards import app_keyboard, result_keyboard
 from src.core.config import settings
+from src.core.options import JobOptions
 from src.core.i18n import error_text, lang_of, stage_title, t
 from src.core.preset import available
 from src.db import repo
@@ -127,6 +128,10 @@ async def on_video(message: Message, bot: Bot) -> None:
             source_size=getattr(media, "file_size", None),
             preset=db_user.preset,
             chat_id=message.chat.id,
+            # Выбор, сделанный в приложении, действует и на ролик из чата: входа
+            # два, а пользователь один. Тему чат и так брал из профиля, а цвет со
+            # шрифтом до сих пор молча сбрасывались на умолчание.
+            options=JobOptions.model_validate(db_user.settings or {}).model_dump(),
             charge=not db_user.is_admin,
         )
     except repo.InsufficientBalance:
