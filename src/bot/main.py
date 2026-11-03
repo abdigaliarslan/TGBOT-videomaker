@@ -97,6 +97,41 @@ async def start_webapp(bot: Bot):
     return runner, tunnel
 
 
+# Сколько ждать Telegram на старте. Первый же вызов к нему — `get_me`, и
+# раньше любой его сбой означал выход процесса с ошибкой.
+GET_ME_DELAYS = (3, 6, 12, 24)
+
+
+async def _get_me_persistently(bot: Bot):
+    """`get_me` с повторами: короткий сбой Telegram не должен ронять процесс.
+
+    3 ноября 2026 сеть сервера перестала доходить до api.telegram.org, и бот
+    встал в петлю: `get_me` → TelegramServerError → выход с кодом 1 → systemd
+    поднимает заново, раз в две минуты. Цена петли выше, чем кажется: Mini App
+    живёт в ЭТОМ же процессе и поднимается ПОСЛЕ `get_me`, а адрес туннеля
+    выдаётся на каждом запуске новый — то есть кнопка в чате у всех
+    пользователей протухала каждые две минуты.
+
+    Повторы ограничены: если Telegram не отвечает и через минуту, выходим и
+    отдаём дело systemd — бесконечно держать процесс, который ничего не может,
+    смысла нет.
+    """
+    last: Exception | None = None
+    for attempt, delay in enumerate((*GET_ME_DELAYS, 0), start=1):
+        try:
+            return await bot.get_me()
+        except Exception as e:  # noqa: BLE001 — сеть, таймаут, 5xx — причина одна
+            last = e
+            if not delay:
+                break
+            log.warning(
+                "Telegram не ответил на get_me (попытка %d): %s — повтор через %d с",
+                attempt, e, delay,
+            )
+            await asyncio.sleep(delay)
+    raise SystemExit(f"Telegram недоступен: {last}")
+
+
 async def main() -> None:
     setup_logging(settings.log_level)
     if not settings.bot_token:
@@ -106,7 +141,7 @@ async def main() -> None:
     await storage.ensure_bucket_async()
 
     bot = make_bot()
-    me = await bot.get_me()
+    me = await _get_me_persistently(bot)
     log.info("бот @%s запущен", me.username)
 
     dp = Dispatcher()

@@ -120,3 +120,63 @@ async def test_file_over_cloud_limit_goes_to_the_app_without_charging(monkeypatc
     )
     await video.on_video(msg, Boom())
     assert replies and "20 МБ" in replies[0]
+
+
+# ------------------------------------------------------------------ старт бота
+
+
+async def test_get_me_survives_a_short_telegram_outage(monkeypatch):
+    """Короткий сбой Telegram не должен ронять процесс.
+
+    3 ноября 2026 сеть сервера перестала доходить до api.telegram.org: `get_me`
+    падал, процесс выходил с кодом 1, systemd поднимал заново — раз в две
+    минуты. Mini App живёт в этом же процессе и стартует ПОСЛЕ `get_me`, а
+    адрес туннеля на каждом запуске новый, поэтому кнопка в чате у всех
+    пользователей протухала с той же частотой.
+    """
+    import asyncio
+
+    from src.bot import main as bot_main
+
+    slept: list[float] = []
+
+    async def no_sleep(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    tries = {"n": 0}
+
+    class Flaky:
+        async def get_me(self):
+            tries["n"] += 1
+            if tries["n"] < 3:
+                raise RuntimeError("Gateway Timeout")
+            return SimpleNamespace(username="bot")
+
+    me = await bot_main._get_me_persistently(Flaky())
+    assert me.username == "bot"
+    assert tries["n"] == 3
+    assert slept == [3, 6], "повторы идут с нарастающей паузой"
+
+
+async def test_a_long_telegram_outage_ends_the_process(monkeypatch):
+    """Если Telegram не ответил и через минуту — выходим, а не висим молча.
+
+    Процесс, который ничего не может, держать смысла нет: дальше дело systemd.
+    """
+    import asyncio
+
+    from src.bot import main as bot_main
+
+    async def no_sleep(_sec):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    class Dead:
+        async def get_me(self):
+            raise RuntimeError("Gateway Timeout")
+
+    with pytest.raises(SystemExit) as e:
+        await bot_main._get_me_persistently(Dead())
+    assert "Telegram недоступен" in str(e.value)
