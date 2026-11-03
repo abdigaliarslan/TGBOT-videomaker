@@ -400,6 +400,20 @@ function declareFonts() {
   const tag = document.getElementById("font-faces") || el("style", { id: "font-faces" });
   tag.textContent = css;
   if (!tag.parentNode) document.head.appendChild(tag);
+
+  // Просим файлы СРАЗУ, не дожидаясь, пока их потребует текст на экране.
+  //
+  // `@font-face` грузится лениво: пока лента выбора не нарисована, ни один
+  // файл не запрошен. А рисуется она на шаге 2 — и первые секунды все
+  // восемнадцать образцов показываются одним системным шрифтом, то есть
+  // выглядят одинаково (замерено: ширина «Аа» у всех 25.2 px, через две
+  // секунды — от 20.7 до 37.4). Здесь же загрузка начинается на первом
+  // экране и идёт, пока человек выбирает видео.
+  if (document.fonts && document.fonts.load) {
+    for (const family of new Set(faces.values())) {
+      document.fonts.load(`21px "${family}"`).catch(() => { /* нет файла — останется запасной */ });
+    }
+  }
 }
 
 function activePreset() {

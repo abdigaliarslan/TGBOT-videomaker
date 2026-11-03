@@ -400,7 +400,9 @@ svg { flex: none; }
   background: var(--card); border: 1px solid var(--line);
   display: inline-flex; align-items: center; gap: 10px; white-space: nowrap;
 }
-.chip__aa { font-family: var(--chip-font), system-ui, sans-serif; font-size: 21px; line-height: 1; }
+/* Образец крупнее подписи: на 21 px «Аа» у восемнадцати шрифтов различается
+   слабо — характер начертания виден только на кегле от 26. */
+.chip__aa { font-family: var(--chip-font), system-ui, sans-serif; font-size: 26px; line-height: 1; }
 .chip__name { font-size: 14px; font-weight: 600; color: var(--muted); }
 .chip:active { transform: scale(0.97); }
 .chip.is-active { background: var(--pill); color: var(--pill-text); border-color: var(--pill); }

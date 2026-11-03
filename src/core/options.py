@@ -58,6 +58,16 @@ class FontChoice(BaseModel):
 # Библиотека шрифтов субтитра. Ключ хранится в задаче, значение — подписи и сам
 # шрифт. `None` значит «как задумано темой».
 #
+# Порядок записей — порядок чипов в приложении, и выстроен он по КОНТРАСТУ
+# соседей, а не по времени добавления. На экран телефона помещается два с
+# половиной чипа, и пока порядок был хронологическим, первыми человек видел
+# два ОДИНАКОВЫХ образца: «как в теме» на большинстве тем это Montserrat, и
+# сразу за ним «Гротеск» — тот же Montserrat. Лента выглядела так, будто
+# шрифты не отличаются друг от друга.
+#
+# Ключи при перестановке не меняются, поэтому выбор, сохранённый в старых
+# задачах и в `users.settings`, остаётся прежним.
+#
 # Добавить шрифт — это четыре шага, и пропуск любого ломает молча:
 #   1. `python tools/font_instance.py <url|файл> <вес> --name <Имя>` (нарезать
 #      статическое начертание: выгрузка метрик читает дефолтный инстанс, а у
@@ -65,12 +75,12 @@ class FontChoice(BaseModel):
 #   2. `python tools/font_metrics.py assets/fonts/<Имя>.ttf` и коммит метрик;
 #   3. строка здесь;
 #   4. прогон `pytest -m slow -k bundled` — сверка раскладки с Chromium.
+#
+# Здесь же заведены и начертания тем: тема несёт свой шрифт, но запирать его
+# внутри темы незачем — антиква журнала с движением Pulse это другой ролик, и
+# выбирается он здесь.
 FONTS: dict[str, tuple[dict[str, str], FontChoice | None]] = {
     "theme": ({"ru": "Как в теме", "en": "Theme default"}, None),
-    "grotesk": (
-        {"ru": "Гротеск", "en": "Grotesque"},
-        FontChoice(family="Montserrat ExtraBold", file="Montserrat-ExtraBold.ttf", weight=800),
-    ),
     "serif": (
         {"ru": "Антиква", "en": "Serif"},
         FontChoice(
@@ -79,68 +89,69 @@ FONTS: dict[str, tuple[dict[str, str], FontChoice | None]] = {
             weight=800,
         ),
     ),
-    "neutral": (
-        {"ru": "Нейтральный", "en": "Neutral"},
-        FontChoice(family="Golos Text", file="GolosText-Bold.ttf", weight=700),
+    "mono": (
+        {"ru": "Моноширинный", "en": "Monospace"},
+        FontChoice(family="JetBrains Mono", file="JetBrainsMono-Bold.ttf", weight=700),
     ),
     "display": (
         {"ru": "Характерный", "en": "Display"},
         FontChoice(family="Unbounded ExtraBold", file="Unbounded-ExtraBold.ttf", weight=800),
     ),
-    "narrow": (
-        {"ru": "Узкий", "en": "Condensed"},
-        FontChoice(family="Oswald SemiBold", file="Oswald-SemiBold.ttf", weight=600),
-    ),
-    # Начертания тем, пришедших с Widescreen по Chisel. Каждое заведено и сюда:
-    # тема несёт свой шрифт, но запирать шрифт внутри темы незачем — антиква
-    # журнала с движением Pulse это другой ролик, и выбирается он здесь.
-    "black": (
-        {"ru": "Чёрный", "en": "Black"},
-        FontChoice(family="Montserrat Black", file="Montserrat-Black.ttf", weight=900),
-    ),
-    "geometric": (
-        {"ru": "Геометрический", "en": "Geometric"},
-        FontChoice(family="Jost SemiBold", file="Jost-SemiBold.ttf", weight=600),
-    ),
-    "light": (
-        {"ru": "Лёгкий", "en": "Light"},
-        FontChoice(family="Jost Light", file="Jost-Light.ttf", weight=300),
-    ),
     "slab": (
         {"ru": "Брусковый", "en": "Slab"},
         FontChoice(family="Bitter ExtraBold", file="Bitter-ExtraBold.ttf", weight=800),
     ),
-    "mono": (
-        {"ru": "Моноширинный", "en": "Monospace"},
-        FontChoice(family="JetBrains Mono", file="JetBrainsMono-Bold.ttf", weight=700),
-    ),
-    "didone": (
-        {"ru": "Дидон", "en": "Didone"},
-        FontChoice(family="Prata", file="Prata-Regular.ttf", weight=400),
-    ),
-    "magazine": (
-        {"ru": "Журнальный", "en": "Magazine"},
-        FontChoice(family="Oranienbaum", file="Oranienbaum-Regular.ttf", weight=400),
-    ),
-    "festive": (
-        {"ru": "Торжественный", "en": "Festive"},
-        FontChoice(family="Yeseva One", file="YesevaOne-Regular.ttf", weight=400),
+    "narrow": (
+        {"ru": "Узкий", "en": "Condensed"},
+        FontChoice(family="Oswald SemiBold", file="Oswald-SemiBold.ttf", weight=600),
     ),
     "elegant": (
         {"ru": "Изящный", "en": "Elegant"},
         FontChoice(family="Cormorant SemiBold", file="Cormorant-SemiBold.ttf", weight=600),
     ),
-    "modern": (
-        {"ru": "Модерн", "en": "Art nouveau"},
-        FontChoice(family="Philosopher", file="Philosopher-Bold.ttf", weight=700),
+    "black": (
+        {"ru": "Чёрный", "en": "Black"},
+        FontChoice(family="Montserrat Black", file="Montserrat-Black.ttf", weight=900),
     ),
     "wide": (
         {"ru": "Широкий", "en": "Wide"},
         FontChoice(family="Tenor Sans", file="TenorSans-Regular.ttf", weight=400),
     ),
+    "festive": (
+        {"ru": "Торжественный", "en": "Festive"},
+        FontChoice(family="Yeseva One", file="YesevaOne-Regular.ttf", weight=400),
+    ),
+    "magazine": (
+        {"ru": "Журнальный", "en": "Magazine"},
+        FontChoice(family="Oranienbaum", file="Oranienbaum-Regular.ttf", weight=400),
+    ),
+    "geometric": (
+        {"ru": "Геометрический", "en": "Geometric"},
+        FontChoice(family="Jost SemiBold", file="Jost-SemiBold.ttf", weight=600),
+    ),
     "roman": (
         {"ru": "Римский", "en": "Roman"},
         FontChoice(family="Forum", file="Forum-Regular.ttf", weight=400),
+    ),
+    "didone": (
+        {"ru": "Дидон", "en": "Didone"},
+        FontChoice(family="Prata", file="Prata-Regular.ttf", weight=400),
+    ),
+    "modern": (
+        {"ru": "Модерн", "en": "Art nouveau"},
+        FontChoice(family="Philosopher", file="Philosopher-Bold.ttf", weight=700),
+    ),
+    "light": (
+        {"ru": "Лёгкий", "en": "Light"},
+        FontChoice(family="Jost Light", file="Jost-Light.ttf", weight=300),
+    ),
+    "grotesk": (
+        {"ru": "Гротеск", "en": "Grotesque"},
+        FontChoice(family="Montserrat ExtraBold", file="Montserrat-ExtraBold.ttf", weight=800),
+    ),
+    "neutral": (
+        {"ru": "Нейтральный", "en": "Neutral"},
+        FontChoice(family="Golos Text", file="GolosText-Bold.ttf", weight=700),
     ),
 }
 
