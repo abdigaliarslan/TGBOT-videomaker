@@ -256,7 +256,7 @@ async def test_a_job_that_is_no_longer_queued_is_not_built_twice(monkeypatch, tm
             source_local_path=None, source_key=None, status=JobStatus.FAILED,
         )
 
-    async def refuse(job_id):
+    async def refuse(job_id, *, resume=False):
         return False  # UPDATE ... WHERE status = QUEUED не нашёл строки
 
     monkeypatch.setattr(tasks, "settings", SimpleNamespace(work_dir=tmp_path, debug=False))
@@ -273,7 +273,7 @@ async def test_a_job_that_is_no_longer_queued_is_not_built_twice(monkeypatch, tm
 # --------------------------------------------------------------------- пульс
 
 
-async def _took_it(job_id):
+async def _took_it(job_id, *, resume=False):
     return True
 
 
@@ -337,3 +337,54 @@ async def test_the_pulse_is_renewed_before_it_expires(monkeypatch):
         await asyncio.sleep(0.05)
         assert await redis.exists(key), "пульс поставили один раз и забыли"
     assert not await redis.exists(tasks.heartbeat_key("job-1"))
+
+
+# ------------------------------------------------------- прерванный выкладкой
+
+
+async def test_a_job_cancelled_by_a_restart_keeps_its_pulse_for_the_next_worker():
+    """Выкладка шлёт воркеру SIGTERM, arq отменяет задачу и ставит её заново.
+    Снятый пульс отдал бы её сторожу, пока новый воркер ещё поднимается."""
+    import asyncio
+
+    redis = FakeRedis()
+    with pytest.raises(asyncio.CancelledError):
+        async with tasks.heartbeat(redis, "job-1"):
+            raise asyncio.CancelledError
+
+    value, ttl = redis.keys[tasks.heartbeat_key("job-1")]
+    assert ttl == tasks.RESTART_GRACE
+    assert tasks.RESTART_GRACE > tasks.JOB_HEARTBEAT_TTL
+
+
+def test_a_cancelled_job_gets_another_try():
+    """Обычная ошибка arq не повторяет, повтор бывает только после отмены. С
+    одной попыткой задача, прерванная выкладкой, висела до сторожа на том же
+    проценте, а потом приходил отказ."""
+    for pool in (tasks.WorkerSettings, tasks.GpuWorkerSettings):
+        assert pool.max_tries > 1, pool.__name__
+
+
+async def test_the_retry_after_a_restart_takes_over_the_running_job(monkeypatch, tmp_path):
+    """Первая попытка оставила задачу RUNNING — повтор обязан её подхватить,
+    а не пропустить как «уже не в очереди»."""
+    calls = []
+
+    async def fake_get_job(job_id):
+        return SimpleNamespace(
+            id=uuid.uuid4(), user_id=42, preset="pulse", options=None,
+            source_local_path=None, source_key=None, status=JobStatus.RUNNING,
+        )
+
+    async def take(job_id, *, resume=False):
+        calls.append(resume)
+        return False
+
+    monkeypatch.setattr(tasks, "settings", SimpleNamespace(work_dir=tmp_path, debug=False))
+    monkeypatch.setattr(tasks.repo, "get_job", fake_get_job)
+    monkeypatch.setattr(tasks.repo, "mark_running", take)
+
+    await tasks.process_job({"redis": FakeRedis(), "job_try": 1}, "job-1")
+    await tasks.process_job({"redis": FakeRedis(), "job_try": 2}, "job-1")
+
+    assert calls == [False, True]

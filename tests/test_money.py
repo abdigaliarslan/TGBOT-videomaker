@@ -184,6 +184,17 @@ async def test_a_job_is_taken_into_work_only_from_the_queue(user):
     assert await repo.mark_running(job.id) is False, "взяли в работу задачу, уже бывшую в работе"
 
 
+async def test_a_job_cut_short_by_a_restart_is_resumed_but_not_a_reaped_one(user):
+    """Повтор после выкладки подхватывает задачу, оставшуюся RUNNING, но не ту,
+    которую сторож уже снял и вернул: та ушла бы пользователю бесплатно."""
+    job = await repo.create_job(1001, **job_args())
+    await repo.mark_running(job.id)
+    assert await repo.mark_running(job.id, resume=True) is True
+
+    await repo.fail_if_still(job.id, "воркер умер", code="worker_lost", expect=JobStatus.RUNNING)
+    assert await repo.mark_running(job.id, resume=True) is False
+
+
 async def test_the_verdict_only_lands_on_the_status_it_expected(user):
     job = await repo.create_job(1001, **job_args())
     await repo.mark_running(job.id)

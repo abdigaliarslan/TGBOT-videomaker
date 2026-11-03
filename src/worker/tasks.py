@@ -58,6 +58,11 @@ def progress_key(job_id: str) -> str:
 # вытеснением тяжёлых этапов в поток, и ровный такт ему никто не гарантирует.
 JOB_HEARTBEAT_TTL = 120
 JOB_HEARTBEAT_EVERY = 30
+# Пульс задачи, которую отменил SIGTERM: arq поставит её заново, и новый воркер
+# подхватит её, когда поднимется. Старый воркер дожидается своих потоков
+# (распознавание, ffmpeg), новый грузит модели — на выкладке это полминуты, а
+# запас взят с лихвой. Не пришёл никто — сторож снимет задачу после этого срока.
+RESTART_GRACE = 10 * 60
 
 
 def heartbeat_key(job_id: str) -> str:
@@ -85,14 +90,21 @@ async def heartbeat(redis: Any, job_id: str) -> AsyncIterator[None]:
                 log.warning("пульс задачи %s не поставлен: %s", job_id, e)
 
     task = asyncio.create_task(beat())
+    cancelled = False
     try:
         yield
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
         with suppress(Exception):
-            await redis.delete(key)
+            if cancelled:
+                await redis.set(key, "1", ex=RESTART_GRACE)
+            else:
+                await redis.delete(key)
 
 
 async def fetch_source(job: Any, dst: Path) -> Path:
@@ -119,7 +131,10 @@ async def process_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
     if job is None:
         raise RuntimeError(f"задача {job_id} не найдена в БД")
 
-    if not await repo.mark_running(job.id):
+    # Вторая попытка бывает только после отмены: выкладка перезапустила воркер
+    # посреди ролика. Прошлая попытка оставила задачу RUNNING — её и подхватываем.
+    resume = ctx.get("job_try", 1) > 1
+    if not await repo.mark_running(job.id, resume=resume):
         # В работу берётся только задача из очереди. Сюда попадает та, которую
         # arq вернул в очередь после смерти воркера (ключ `in-progress` живёт
         # `job_timeout`) и которую сторож уже освободил, вернув ролик на баланс.
@@ -540,7 +555,11 @@ class WorkerSettings:
     max_jobs = settings.max_concurrent_jobs
     job_timeout = 3 * 3600
     keep_result = 3600
-    max_tries = 1  # ретраить полный монтаж бессмысленно и дорого
+    # Упавший монтаж arq не повторяет при любом `max_tries`: повтор бывает только
+    # после отмены, то есть когда выкладка перезапустила воркер посреди ролика.
+    # С одной попыткой такая задача висела на своём проценте до сторожа, а потом
+    # приходил отказ. Три — чтобы пережить и две выкладки подряд.
+    max_tries = 3
     # arq читает это как атрибут-значение, а не как метод.
     redis_settings = redis_settings()
 

@@ -251,7 +251,7 @@ async def update_job(job_id: uuid.UUID | str, **values: Any) -> None:
         await s.execute(update(Job).where(Job.id == uuid.UUID(str(job_id))).values(**values))
 
 
-async def mark_running(job_id: uuid.UUID | str) -> bool:
+async def mark_running(job_id: uuid.UUID | str, *, resume: bool = False) -> bool:
     """Берёт задачу в работу. False — её там быть не должно.
 
     Переход разрешён только из очереди. arq возвращает задачу в очередь, если
@@ -259,12 +259,17 @@ async def mark_running(job_id: uuid.UUID | str) -> bool:
     него задача снова на виду. Если сторож её к тому времени освободил и вернул
     ролик на баланс, второй прогон отдал бы видео бесплатно. Условие в WHERE —
     единственное место, где это можно отсечь без гонки.
+
+    `resume` — повтор arq после отмены (выкладка перезапустила воркер): прошлая
+    попытка оставила задачу RUNNING, и подхватить её можно оттуда же. FAILED и
+    DONE не подхватываются и так.
     """
+    allowed = [JobStatus.QUEUED, JobStatus.RUNNING] if resume else [JobStatus.QUEUED]
     async with session() as s:
         got = (
             await s.execute(
                 update(Job)
-                .where(Job.id == uuid.UUID(str(job_id)), Job.status == JobStatus.QUEUED)
+                .where(Job.id == uuid.UUID(str(job_id)), Job.status.in_(allowed))
                 .values(
                     status=JobStatus.RUNNING,
                     started_at=datetime.now(timezone.utc),
