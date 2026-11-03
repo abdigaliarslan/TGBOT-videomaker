@@ -375,7 +375,7 @@ def _caption(job, lang: str | None = None) -> str:
         if saved > 0.5:
             parts.append(t("video.caption_saved", lang, n=f"{saved:.0f}"))
     parts.append(t("video.caption_style", lang, preset=job.preset))
-    return " · ".join(parts)
+    return " · ".join(parts) + "\n" + t("video.caption_rebuild", lang)
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("rerender:"))
@@ -443,7 +443,9 @@ async def _watch_rerender(bot: Bot, chat_id: int, message_id: int, job_id: str, 
                     video=FSInputFile(dst, filename=f"reel-{preset}.mp4"),
                     thumbnail=await video_thumbnail(dst, dims := await video_dims(dst)),
                     **dims,
-                    caption=t("video.caption_style", lang, preset=preset),
+                    caption=t("video.caption_style", lang, preset=preset)
+                    + "\n"
+                    + t("video.caption_rebuild", lang),
                     supports_streaming=True,
                     reply_markup=result_keyboard(job_id, preset, lang),
                 )

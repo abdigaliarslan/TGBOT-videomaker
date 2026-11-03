@@ -1,0 +1,84 @@
+{
+  "name": "deco_line",
+  "title": "Deco Line",
+  "order": 17,
+  "font": {
+    "family": "Tenor Sans",
+    "file": "TenorSans-Regular.ttf",
+    "weight": 400,
+    "size": 61,
+    "uppercase": true,
+    "letter_spacing": 0.2
+  },
+  "colors": {
+    "active": "#FDFAF2",
+    "past": "#FDFAF2",
+    "ghost": "#FDFAF2",
+    "past_opacity": 1.0,
+    "ghost_opacity": 0.0,
+    "accent": "#E6C87A",
+    "shout": "#F0E0B0",
+    "outline": "#05070A",
+    "shadow": "#000000"
+  },
+  "panel": {
+    "enabled": false,
+    "color": "#0B0F14",
+    "opacity": 0.0,
+    "blur": 0,
+    "radius": 0,
+    "padding_x": 0,
+    "padding_y": 0,
+    "border_color": "#FFFFFF",
+    "border_opacity": 0.0,
+    "border_width": 0,
+    "glass_color": "#FFFFFF",
+    "glass_opacity": 0.0
+  },
+  "caption": {
+    "position": "bottom",
+    "margin": 340,
+    "line_height": 1.5,
+    "align": "center",
+    "max_lines": 3,
+    "min_word_scale": 0.5,
+    "fill_max_scale": 1.25,
+    "pinned": true
+  },
+  "geometry": {
+    "max_line_width_ratio": 0.86
+  },
+  "contrast": {
+    "enabled": false,
+    "min_ratio": 4.5,
+    "luma_dark": 0.2,
+    "luma_light": 0.8,
+    "panel_opacity_dark": 0.0,
+    "panel_opacity_light": 0.0,
+    "text_dark": "#FDFAF2",
+    "text_light": "#FDFAF2"
+  },
+  "animation": {
+    "pop_scale": 1.0,
+    "pop_ms": 200,
+    "block_in_ms": 220,
+    "block_out_ms": 160,
+    "block_gap_ms": 80,
+    "block_in_zoom": 0.0,
+    "block_shift_px": 0,
+    "block_leave_px": 20,
+    "block_leave_scale": 1.0,
+    "accent_scale": 1.2,
+    "shout_scale": 1.35,
+    "shout_rotate": 0.0,
+    "word_in_ms": 220,
+    "word_rise_px": 0
+  },
+  "grade": {
+    "enabled": true,
+    "contrast": 1.08,
+    "saturation": 1.02,
+    "gamma": 0.98,
+    "vignette": 0.24
+  }
+}

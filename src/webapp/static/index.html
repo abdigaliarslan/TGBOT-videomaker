@@ -32,29 +32,20 @@
             <svg viewBox="0 0 24 24" width="16" height="16" class="i-play"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
           </button>
           <div class="preview__caption" id="preview-caption"></div>
+          <div class="preview__tag" id="preview-tag"></div>
         </div>
 
-        <div class="tabs" id="preset-tabs" role="tablist"></div>
-
-        <div class="chips">
-          <button class="chips__arrow chips__arrow--left" id="chips-left" type="button" data-i18n-aria="back">
-            <svg viewBox="0 0 24 24" width="18" height="18"><path d="m15 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-          <div class="chips__track" id="accent-chips"></div>
-          <button class="chips__arrow chips__arrow--right" id="chips-right" type="button" data-i18n-aria="forward">
-            <svg viewBox="0 0 24 24" width="18" height="18"><path d="m9 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
+        <div class="section-head">
+          <h2 data-i18n="edit.style">Стиль субтитров</h2>
+          <span class="section-head__count" id="style-count"></span>
         </div>
+        <div class="strip strip--styles"><div class="strip__track" id="preset-tabs" role="tablist"></div></div>
 
-        <div class="chips">
-          <button class="chips__arrow chips__arrow--left" id="font-left" type="button" data-i18n-aria="back">
-            <svg viewBox="0 0 24 24" width="18" height="18"><path d="m15 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-          <div class="chips__track" id="font-chips"></div>
-          <button class="chips__arrow chips__arrow--right" id="font-right" type="button" data-i18n-aria="forward">
-            <svg viewBox="0 0 24 24" width="18" height="18"><path d="m9 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-        </div>
+        <div class="section-head"><h2 data-i18n="edit.font">Шрифт</h2></div>
+        <div class="strip"><div class="strip__track" id="font-chips"></div></div>
+
+        <div class="section-head"><h2 data-i18n="edit.color">Цвет выделения</h2></div>
+        <div class="strip"><div class="strip__track strip__track--swatches" id="accent-chips"></div></div>
 
         <div class="section-head">
           <h2 data-i18n="edit.video">Видео</h2>
@@ -66,6 +57,9 @@
 
         <label class="dropzone" id="dropzone">
           <input type="file" id="file-input" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi" hidden />
+          <span class="dropzone__thumb" id="drop-thumb" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22"><rect x="3" y="6" width="18" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>
+          </span>
           <div class="dropzone__text">
             <strong id="drop-title" data-i18n="edit.upload">Загрузите видео</strong>
             <span id="drop-sub">.mp4, .mov, .m4v, .webm, .mkv, .avi</span>
@@ -76,28 +70,29 @@
           </span>
         </label>
 
-        <div class="toggle-row">
-          <span class="badge-new">NEW</span>
-          <span class="toggle-row__label" data-i18n="opt.cut">Нарезать видео</span>
-          <button class="help" type="button" data-help="cut">?</button>
-          <label class="switch"><input type="checkbox" data-option="cut" /><span></span></label>
-        </div>
-
         <div class="section-head"><h2 data-i18n="edit.params">Параметры</h2></div>
-        <div class="toggle-row">
-          <span class="toggle-row__label" data-i18n="opt.sfx">Звуковые эффекты</span>
-          <button class="help" type="button" data-help="sfx">?</button>
-          <label class="switch"><input type="checkbox" data-option="sfx" /><span></span></label>
-        </div>
-        <div class="toggle-row">
-          <span class="toggle-row__label" data-i18n="opt.broll">Медиа-карточки</span>
-          <button class="help" type="button" data-help="broll">?</button>
-          <label class="switch"><input type="checkbox" data-option="broll" /><span></span></label>
-        </div>
-        <div class="toggle-row">
-          <span class="toggle-row__label" data-i18n="opt.camera">Движение камеры</span>
-          <button class="help" type="button" data-help="camera">?</button>
-          <label class="switch"><input type="checkbox" data-option="camera" /><span></span></label>
+        <div class="card options">
+          <div class="toggle-row">
+            <span class="toggle-row__label" data-i18n="opt.cut">Нарезать видео</span>
+            <span class="badge-new">NEW</span>
+            <button class="help" type="button" data-help="cut">?</button>
+            <label class="switch"><input type="checkbox" data-option="cut" /><span></span></label>
+          </div>
+          <div class="toggle-row">
+            <span class="toggle-row__label" data-i18n="opt.sfx">Звуковые эффекты</span>
+            <button class="help" type="button" data-help="sfx">?</button>
+            <label class="switch"><input type="checkbox" data-option="sfx" /><span></span></label>
+          </div>
+          <div class="toggle-row">
+            <span class="toggle-row__label" data-i18n="opt.broll">Медиа-карточки</span>
+            <button class="help" type="button" data-help="broll">?</button>
+            <label class="switch"><input type="checkbox" data-option="broll" /><span></span></label>
+          </div>
+          <div class="toggle-row">
+            <span class="toggle-row__label" data-i18n="opt.camera">Движение камеры</span>
+            <button class="help" type="button" data-help="camera">?</button>
+            <label class="switch"><input type="checkbox" data-option="camera" /><span></span></label>
+          </div>
         </div>
 
         <button class="cta" id="cta" type="button">

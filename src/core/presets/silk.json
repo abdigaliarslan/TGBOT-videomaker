@@ -1,0 +1,111 @@
+{
+  "name": "silk",
+  "title": "Silk",
+  "order": 12,
+  "font": {
+    "family": "Prata",
+    "file": "Prata-Regular.ttf",
+    "weight": 400,
+    "size": 64,
+    "uppercase": false,
+    "letter_spacing": 0.005
+  },
+  "colors": {
+    "active": "#FDFAF2",
+    "past": "#FDFAF2",
+    "ghost": "#FDFAF2",
+    "past_opacity": 1.0,
+    "ghost_opacity": 0.0,
+    "accent": "#E7B49C",
+    "shout": "#E1808E",
+    "outline": "#05070A",
+    "shadow": "#000000"
+  },
+  "panel": {
+    "enabled": false,
+    "color": "#0B0F14",
+    "opacity": 0.0,
+    "blur": 0,
+    "radius": 0,
+    "padding_x": 0,
+    "padding_y": 0,
+    "border_color": "#FFFFFF",
+    "border_opacity": 0.0,
+    "border_width": 0,
+    "glass_color": "#FFFFFF",
+    "glass_opacity": 0.0
+  },
+  "caption": {
+    "position": "bottom",
+    "margin": 380,
+    "line_height": 1.12,
+    "align": "center",
+    "max_lines": 2,
+    "min_word_scale": 0.4,
+    "fill_max_scale": 2.1,
+    "pinned": true,
+    "quiet": {
+      "enabled": true,
+      "position": "top",
+      "font_size": 36,
+      "margin": 140,
+      "line_height": 1.2,
+      "align": "left",
+      "edge": "left",
+      "edge_ratio": 0.18,
+      "max_lines": 4,
+      "max_line_width_ratio": 0.3,
+      "panel": false
+    },
+    "title_card": {
+      "enabled": true,
+      "start": 0.2,
+      "duration": 1.1,
+      "word_step": 0.1,
+      "font_size": 57,
+      "margin": 332,
+      "accent_scale": 4.25,
+      "line_height": 0.5,
+      "max_lines": 2,
+      "max_line_width_ratio": 1.0,
+      "panel": false
+    }
+  },
+  "geometry": {
+    "max_line_width_ratio": 0.76
+  },
+  "contrast": {
+    "enabled": false,
+    "min_ratio": 4.5,
+    "luma_dark": 0.2,
+    "luma_light": 0.8,
+    "panel_opacity_dark": 0.0,
+    "panel_opacity_light": 0.0,
+    "text_dark": "#FDFAF2",
+    "text_light": "#FDFAF2"
+  },
+  "animation": {
+    "pop_scale": 1.0,
+    "pop_ms": 240,
+    "block_in_ms": 260,
+    "block_out_ms": 180,
+    "block_gap_ms": 0,
+    "block_in_zoom": 0.02,
+    "block_shift_px": 14,
+    "block_leave_px": 40,
+    "block_leave_scale": 0.97,
+    "accent_scale": 2.1,
+    "shout_scale": 2.3,
+    "shout_rotate": 0.0,
+    "word_in_ms": 240,
+    "word_rise_px": 10,
+    "broll_overshoot": 0.02
+  },
+  "grade": {
+    "enabled": true,
+    "contrast": 1.08,
+    "saturation": 1.06,
+    "gamma": 0.98,
+    "vignette": 0.2
+  }
+}

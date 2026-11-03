@@ -1,0 +1,84 @@
+{
+  "name": "boardwalk",
+  "title": "Boardwalk",
+  "order": 16,
+  "font": {
+    "family": "Bitter ExtraBold",
+    "file": "Bitter-ExtraBold.ttf",
+    "weight": 800,
+    "size": 74,
+    "uppercase": true,
+    "letter_spacing": -0.005
+  },
+  "colors": {
+    "active": "#FDFAF2",
+    "past": "#FDFAF2",
+    "ghost": "#FDFAF2",
+    "past_opacity": 1.0,
+    "ghost_opacity": 0.0,
+    "accent": "#FF8A1F",
+    "shout": "#FFD60A",
+    "outline": "#05070A",
+    "shadow": "#000000"
+  },
+  "panel": {
+    "enabled": false,
+    "color": "#0B0F14",
+    "opacity": 0.0,
+    "blur": 0,
+    "radius": 0,
+    "padding_x": 0,
+    "padding_y": 0,
+    "border_color": "#FFFFFF",
+    "border_opacity": 0.0,
+    "border_width": 0,
+    "glass_color": "#FFFFFF",
+    "glass_opacity": 0.0
+  },
+  "caption": {
+    "position": "bottom",
+    "margin": 360,
+    "line_height": 1.04,
+    "align": "center",
+    "max_lines": 2,
+    "min_word_scale": 0.4,
+    "fill_max_scale": 1.8,
+    "pinned": true
+  },
+  "geometry": {
+    "max_line_width_ratio": 0.78
+  },
+  "contrast": {
+    "enabled": false,
+    "min_ratio": 4.5,
+    "luma_dark": 0.2,
+    "luma_light": 0.8,
+    "panel_opacity_dark": 0.0,
+    "panel_opacity_light": 0.0,
+    "text_dark": "#FDFAF2",
+    "text_light": "#FDFAF2"
+  },
+  "animation": {
+    "pop_scale": 1.08,
+    "pop_ms": 170,
+    "block_in_ms": 150,
+    "block_out_ms": 90,
+    "block_gap_ms": 40,
+    "block_in_zoom": 0.04,
+    "block_shift_px": 20,
+    "block_leave_px": 46,
+    "block_leave_scale": 0.94,
+    "accent_scale": 1.9,
+    "shout_scale": 2.2,
+    "shout_rotate": -5.0,
+    "word_in_ms": 120,
+    "word_rise_px": 12
+  },
+  "grade": {
+    "enabled": true,
+    "contrast": 1.1,
+    "saturation": 1.2,
+    "gamma": 0.97,
+    "vignette": 0.34
+  }
+}

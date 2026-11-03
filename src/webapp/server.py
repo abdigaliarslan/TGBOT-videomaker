@@ -32,6 +32,7 @@ from aiogram.types import LabeledPrice
 from aiohttp import web
 
 from src.core.config import CLAIMED_PREFIX, UPLOAD_PREFIX, Settings
+from src.core.geometry import load_metrics
 from src.core.i18n import LANGS, error_text, lang_of, stage_title, t, videos_word
 from src.core.options import ACCENTS, FONTS, JobOptions
 from src.core.preset import available, load_preset
@@ -262,6 +263,23 @@ async def _db_user(request: web.Request):
 # ------------------------------------------------------------------ API
 
 
+def cap_em(file: str | None) -> float | None:
+    """Высота прописных в долях em — из тех же метрик, что считают кадр.
+
+    Нужна приложению, чтобы показать выбранный шрифт тем кеглем, которым его
+    покажет ролик: `options.apply_font` нормирует кегль именно по ней. Второй
+    источник правды тут разошёлся бы молча, поэтому число не переписывается в
+    каталог руками, а читается из выгрузки.
+    """
+    if not file:
+        return None
+    try:
+        m = load_metrics(file)
+    except Exception:  # noqa: BLE001 — без метрик приложение просто не масштабирует
+        return None
+    return round(m.cap_height / m.units_per_em, 4) if m.units_per_em else None
+
+
 async def bootstrap(request: web.Request) -> web.Response:
     """Всё, что приложению нужно для первого экрана, одним запросом."""
     cfg = request.app[CFG_KEY]
@@ -271,33 +289,54 @@ async def bootstrap(request: web.Request) -> web.Response:
     request[LANG_KEY] = lang
     me = await bot.me()
 
-    presets = []
-    # Тема по умолчанию — первой: это первая вкладка, которую видит пользователь.
-    names = sorted(available(), key=lambda n: (n != cfg.default_preset, n))
-    for name in names:
+    loaded = []
+    for name in available():
         try:
-            p = load_preset(name)
+            loaded.append((name, load_preset(name)))
         except Exception:  # noqa: BLE001 — битый пресет не должен ронять приложение
             continue
-        presets.append(
-            {
-                "name": name,
-                "title": p.title or name,
-                "font": p.font.family,
-                "font_file": p.font.file,
-                "letter_spacing": p.font.letter_spacing,
-                "uppercase": p.font.uppercase,
-                "colors": {"text": p.colors.active, "accent": p.colors.accent},
-                # Числа движения — чтобы превью показывало ту тему, которую
-                # выбрали, а не одно и то же для всех. Подъём приводится к
-                # ДОЛЕ кегля: превью рисуется своим шрифтом в своём масштабе,
-                # и пиксели кадра 1920 там ничего не значат.
-                "motion": {
-                    "word_in_ms": p.animation.word_in_ms,
-                    "word_rise_em": round(p.animation.word_rise_px / max(1, p.font.size), 3),
-                },
-            }
-        )
+    # Тема по умолчанию — первой: это первая плитка, которую видит пользователь.
+    # Дальше порядок задаёт сама тема (`order`), а не алфавит: тем семнадцать, и
+    # алфавит перемешал бы наборные с выверенными по эталону.
+    loaded.sort(key=lambda item: (item[0] != cfg.default_preset, item[1].order, item[0]))
+    presets = [
+        {
+            "name": name,
+            "title": p.title or name,
+            "font": p.font.family,
+            "font_file": p.font.file,
+            "letter_spacing": p.font.letter_spacing,
+            "uppercase": p.font.uppercase,
+            # Числа раскладки: превью рисует ТЕМУ, а не одну композицию на всех
+            # — кегль, межстрочие, место в кадре, плашку и во сколько раз
+            # крупнее выделенное слово. Пиксели тут кадровые (высота 1920), и
+            # приложение пересчитывает их в свои само.
+            "size": p.font.size,
+            "cap_em": cap_em(p.font.file),
+            "line_height": p.caption.line_height,
+            "position": p.caption.position,
+            "margin": p.caption.margin,
+            "accent_scale": p.animation.accent_scale,
+            "colors": {"text": p.colors.active, "accent": p.colors.accent},
+            "panel": {
+                "enabled": p.panel.enabled,
+                "color": p.panel.color,
+                "opacity": p.panel.opacity,
+                "radius": p.panel.radius,
+                "padding_x": p.panel.padding_x,
+                "padding_y": p.panel.padding_y,
+            },
+            # Числа движения — чтобы превью показывало ту тему, которую
+            # выбрали, а не одно и то же для всех. Подъём приводится к
+            # ДОЛЕ кегля: превью рисуется своим шрифтом в своём масштабе,
+            # и пиксели кадра 1920 там ничего не значат.
+            "motion": {
+                "word_in_ms": p.animation.word_in_ms,
+                "word_rise_em": round(p.animation.word_rise_px / max(1, p.font.size), 3),
+            },
+        }
+        for name, p in loaded
+    ]
     return web.json_response(
         {
             "user": {
@@ -320,13 +359,17 @@ async def bootstrap(request: web.Request) -> web.Response:
                 for k, (titles, color) in ACCENTS.items()
             ],
             # Шрифты той же формы, что и цвета: ключ, подпись и то, чем рисовать
-            # превью. `file` у «как в теме» пустой — шрифт берётся у выбранной темы.
+            # превью. `file` у «как в теме» пустой — шрифт берётся у выбранной
+            # темы. `cap_em` — высота прописных: по ней приложение пересчитывает
+            # кегль превью ровно так же, как это делает `options.apply_font` в
+            # пайплайне, иначе превью обещало бы не тот размер.
             "fonts": [
                 {
                     "key": k,
                     "title": titles.get(lang, titles["ru"]),
                     "family": choice.family if choice else None,
                     "file": choice.file if choice else None,
+                    "cap_em": cap_em(choice.file) if choice else None,
                 }
                 for k, (titles, choice) in FONTS.items()
             ],

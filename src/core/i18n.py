@@ -193,7 +193,12 @@ TEXTS: dict[str, dict[str, str]] = {
     "video.caption_durations": {"ru": "{src} с → {res} с", "en": "{src} s → {res} s"},
     "video.caption_saved": {"ru": "вырезано {n} с пауз", "en": "{n} s of pauses cut"},
     "video.caption_style": {"ru": "стиль: {preset}", "en": "style: {preset}"},
-    "video.rebuild_button": {"ru": "Пересобрать в «{title}»", "en": "Rebuild in “{title}”"},
+    # Что делают кнопки под роликом, сказано один раз в подписи: названий тем
+    # шестнадцать, и «Пересобрать в „X“» на каждой кнопке — это стена текста.
+    "video.caption_rebuild": {
+        "ru": "Тот же монтаж другим стилем:",
+        "en": "The same edit in another style:",
+    },
     "rerender.no_edl": {"ru": "Исходный монтаж не сохранился", "en": "The original edit wasn't saved"},
     "rerender.purged": {
         "ru": "Исходник удалён по сроку хранения — пересобрать уже нельзя. Пришлите видео заново.",

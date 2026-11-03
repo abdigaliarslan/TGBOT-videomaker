@@ -663,6 +663,11 @@ class Preset(BaseModel):
 
     name: str
     title: str = ""
+    # Место темы в ленте выбора. Тем стало много, и алфавит ставил бы рядом
+    # вещи, которые рядом не стоят: сначала идут четыре выверенные по эталону,
+    # потом наборные. Умолчание большое, чтобы тема без поля встала в конец, а
+    # не влезла в начало.
+    order: int = 100
     font: FontSpec = Field(default_factory=FontSpec)
     colors: Colors = Field(default_factory=Colors)
     panel: Panel = Field(default_factory=Panel)

@@ -1,6 +1,7 @@
 {
   "name": "pulse",
   "title": "Pulse",
+  "order": 0,
   "font": {
     "family": "Montserrat ExtraBold",
     "file": "Montserrat-ExtraBold.ttf",

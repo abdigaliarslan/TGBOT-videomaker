@@ -1,0 +1,84 @@
+{
+  "name": "feather",
+  "title": "Feather",
+  "order": 19,
+  "font": {
+    "family": "Jost Light",
+    "file": "Jost-Light.ttf",
+    "weight": 300,
+    "size": 71,
+    "uppercase": false,
+    "letter_spacing": 0.03
+  },
+  "colors": {
+    "active": "#FDFAF2",
+    "past": "#FDFAF2",
+    "ghost": "#FDFAF2",
+    "past_opacity": 1.0,
+    "ghost_opacity": 0.0,
+    "accent": "#BFE3FF",
+    "shout": "#8FD0FF",
+    "outline": "#05070A",
+    "shadow": "#000000"
+  },
+  "panel": {
+    "enabled": false,
+    "color": "#0B0F14",
+    "opacity": 0.0,
+    "blur": 0,
+    "radius": 0,
+    "padding_x": 0,
+    "padding_y": 0,
+    "border_color": "#FFFFFF",
+    "border_opacity": 0.0,
+    "border_width": 0,
+    "glass_color": "#FFFFFF",
+    "glass_opacity": 0.0
+  },
+  "caption": {
+    "position": "bottom",
+    "margin": 380,
+    "line_height": 1.3,
+    "align": "center",
+    "max_lines": 3,
+    "min_word_scale": 0.45,
+    "fill_max_scale": 1.5,
+    "pinned": true
+  },
+  "geometry": {
+    "max_line_width_ratio": 0.78
+  },
+  "contrast": {
+    "enabled": false,
+    "min_ratio": 4.5,
+    "luma_dark": 0.2,
+    "luma_light": 0.8,
+    "panel_opacity_dark": 0.0,
+    "panel_opacity_light": 0.0,
+    "text_dark": "#FDFAF2",
+    "text_light": "#FDFAF2"
+  },
+  "animation": {
+    "pop_scale": 1.0,
+    "pop_ms": 260,
+    "block_in_ms": 300,
+    "block_out_ms": 220,
+    "block_gap_ms": 100,
+    "block_in_zoom": 0.0,
+    "block_shift_px": 12,
+    "block_leave_px": 28,
+    "block_leave_scale": 0.98,
+    "accent_scale": 1.45,
+    "shout_scale": 1.6,
+    "shout_rotate": 0.0,
+    "word_in_ms": 260,
+    "word_rise_px": 18
+  },
+  "grade": {
+    "enabled": true,
+    "contrast": 1.08,
+    "saturation": 1.06,
+    "gamma": 0.98,
+    "vignette": 0.16
+  }
+}

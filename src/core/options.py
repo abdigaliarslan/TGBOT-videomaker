@@ -91,6 +91,57 @@ FONTS: dict[str, tuple[dict[str, str], FontChoice | None]] = {
         {"ru": "Узкий", "en": "Condensed"},
         FontChoice(family="Oswald SemiBold", file="Oswald-SemiBold.ttf", weight=600),
     ),
+    # Начертания тем, пришедших с Widescreen по Chisel. Каждое заведено и сюда:
+    # тема несёт свой шрифт, но запирать шрифт внутри темы незачем — антиква
+    # журнала с движением Pulse это другой ролик, и выбирается он здесь.
+    "black": (
+        {"ru": "Чёрный", "en": "Black"},
+        FontChoice(family="Montserrat Black", file="Montserrat-Black.ttf", weight=900),
+    ),
+    "geometric": (
+        {"ru": "Геометрический", "en": "Geometric"},
+        FontChoice(family="Jost SemiBold", file="Jost-SemiBold.ttf", weight=600),
+    ),
+    "light": (
+        {"ru": "Лёгкий", "en": "Light"},
+        FontChoice(family="Jost Light", file="Jost-Light.ttf", weight=300),
+    ),
+    "slab": (
+        {"ru": "Брусковый", "en": "Slab"},
+        FontChoice(family="Bitter ExtraBold", file="Bitter-ExtraBold.ttf", weight=800),
+    ),
+    "mono": (
+        {"ru": "Моноширинный", "en": "Monospace"},
+        FontChoice(family="JetBrains Mono", file="JetBrainsMono-Bold.ttf", weight=700),
+    ),
+    "didone": (
+        {"ru": "Дидон", "en": "Didone"},
+        FontChoice(family="Prata", file="Prata-Regular.ttf", weight=400),
+    ),
+    "magazine": (
+        {"ru": "Журнальный", "en": "Magazine"},
+        FontChoice(family="Oranienbaum", file="Oranienbaum-Regular.ttf", weight=400),
+    ),
+    "festive": (
+        {"ru": "Торжественный", "en": "Festive"},
+        FontChoice(family="Yeseva One", file="YesevaOne-Regular.ttf", weight=400),
+    ),
+    "elegant": (
+        {"ru": "Изящный", "en": "Elegant"},
+        FontChoice(family="Cormorant SemiBold", file="Cormorant-SemiBold.ttf", weight=600),
+    ),
+    "modern": (
+        {"ru": "Модерн", "en": "Art nouveau"},
+        FontChoice(family="Philosopher", file="Philosopher-Bold.ttf", weight=700),
+    ),
+    "wide": (
+        {"ru": "Широкий", "en": "Wide"},
+        FontChoice(family="Tenor Sans", file="TenorSans-Regular.ttf", weight=400),
+    ),
+    "roman": (
+        {"ru": "Римский", "en": "Roman"},
+        FontChoice(family="Forum", file="Forum-Regular.ttf", weight=400),
+    ),
 }
 
 

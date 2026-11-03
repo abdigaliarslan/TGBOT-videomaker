@@ -1,6 +1,7 @@
 {
   "name": "bold",
   "title": "Bold",
+  "order": 2,
   "font": {
     "family": "Montserrat ExtraBold",
     "file": "Montserrat-ExtraBold.ttf",

@@ -13,6 +13,7 @@ const I18N = {
     "preview.s1": ["это", "пример", "субтитров", "в", "стиле"],
     "preview.s2": ["паузы", "уже", "вырезаны"],
     "preview.s3": ["и", "кадр", "по центру", "лица"],
+    "edit.style": "Стиль субтитров", "edit.font": "Шрифт", "edit.color": "Цвет выделения",
     "edit.video": "Видео", "edit.requirements": "Требования к видео", "edit.upload": "Загрузите видео",
     "edit.params": "Параметры", "edit.untitled": "Видео",
     "opt.cut": "Нарезать видео", "opt.sfx": "Звуковые эффекты", "opt.broll": "Медиа-карточки", "opt.camera": "Движение камеры",
@@ -60,6 +61,7 @@ const I18N = {
     "preview.s1": ["this", "is", "captions", "in", "style"],
     "preview.s2": ["pauses", "are", "gone"],
     "preview.s3": ["and", "the frame", "follows", "the face"],
+    "edit.style": "Caption style", "edit.font": "Typeface", "edit.color": "Highlight colour",
     "edit.video": "Video", "edit.requirements": "Video requirements", "edit.upload": "Upload a video",
     "edit.params": "Settings", "edit.untitled": "Video",
     "opt.cut": "Cut the video", "opt.sfx": "Sound effects", "opt.broll": "Media cards", "opt.camera": "Camera movement",
@@ -208,6 +210,15 @@ function el(tag, attrs = {}, children = []) {
   return node;
 }
 
+// «#0B0F14» → «11, 15, 20»: плашка превью красится той же непрозрачностью, что
+// в кадре, а значит цвет нужен разобранный.
+function hexToRgb(hex) {
+  let v = String(hex || "#000000").replace("#", "");
+  if (v.length === 3) v = [...v].map((c) => c + c).join("");
+  const n = parseInt(v, 16) || 0;
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255].join(", ");
+}
+
 function fmtSize(bytes) {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 ** 3).toFixed(1)} ${tr("size.gb")}`;
   return `${Math.max(1, Math.round(bytes / 1024 / 1024))} ${tr("size.mb")}`;
@@ -259,15 +270,29 @@ function declareFonts() {
   if (!tag.parentNode) document.head.appendChild(tag);
 }
 
+function activePreset() {
+  return (state.boot.presets || []).find((x) => x.name === state.preset) || null;
+}
+
 function activeThemeFamily() {
-  const p = (state.boot.presets || []).find((x) => x.name === state.preset);
+  const p = activePreset();
   return (p && p.font) || "Montserrat ExtraBold";
 }
 
 // Шрифт, которым рисуется превью: выбранный, а иначе — шрифт темы.
+function activeFont() {
+  return (state.boot.fonts || []).find((f) => f.key === state.font && f.family) || null;
+}
 function activeFamily() {
-  const chosen = (state.boot.fonts || []).find((f) => f.key === state.font);
+  const chosen = activeFont();
   return (chosen && chosen.family) || activeThemeFamily();
+}
+
+// Цвет выделения: выбранный, а иначе — задуманный темой.
+function activeAccent() {
+  const chosen = (state.boot.accents || []).find((a) => a.key === state.accent);
+  const p = activePreset();
+  return (chosen && chosen.color) || (p ? p.colors.accent : "#F3D28F");
 }
 
 const preview = {
@@ -275,7 +300,7 @@ const preview = {
   paused: false,
   step: 0,
   script() {
-    const title = (state.boot && state.boot.presets.find((p) => p.name === state.preset) || {}).title || "Glass";
+    const title = (activePreset() || {}).title || "Glass";
     const [a1, a2, big1, a3, a4] = tr("preview.s1");
     const [b1, b2, big2] = tr("preview.s2");
     const [c1, c2, big3, c3] = tr("preview.s3");
@@ -285,40 +310,83 @@ const preview = {
       { small: [c1, c2], big: big3, after: [c3] },
     ];
   },
+  // Кегль превью — не вкус, а пересчёт: пиксели кадра 1920 в пиксели карточки.
+  // Поэтому мелкая тема (Widescreen, 46 px) здесь и выглядит мелкой, а крупная
+  // (Heavyweight, 109) занимает полкадра — как и будет в ролике.
+  //
+  // Смена шрифта двигает кегль ровно так же, как `core.options.apply_font`:
+  // по высоте прописных. Иначе превью обещало бы один размер, а ролик дал
+  // другой — у Cormorant прописная 0.625 em против 0.800 у Prata.
+  size(p) {
+    const k = ($("#preview").clientHeight || 620) / 1920;
+    const font = activeFont();
+    const ratio = font && font.cap_em && p.cap_em ? p.cap_em / font.cap_em : 1;
+    return { k, base: p.size * ratio * k };
+  },
+  place(box, p, k) {
+    box.style.top = "auto";
+    box.style.bottom = "auto";
+    box.style.transform = "none";
+    if (p.position === "bottom") box.style.bottom = `${Math.round(p.margin * k)}px`;
+    else if (p.position === "top") box.style.top = `${Math.round(p.margin * k)}px`;
+    else { box.style.top = "50%"; box.style.transform = "translateY(-50%)"; }
+  },
   render() {
     const box = $("#preview-caption");
-    const p = state.boot && state.boot.presets.find((x) => x.name === state.preset);
-    const accentKey = state.accent;
-    const accent = (state.boot.accents.find((a) => a.key === accentKey) || {}).color || (p ? p.colors.accent : "#F3D28F");
-    const upper = p && p.uppercase;
-    const tx = (w) => (upper ? w.toUpperCase() : w);
+    const p = activePreset();
+    if (!p) return;
+    const accent = activeAccent();
+    const tx = (w) => (p.uppercase ? w.toUpperCase() : w);
     const scenes = this.script();
     const scene = scenes[Math.floor(this.step / 10) % scenes.length];
     const shown = this.step % 10; // 0..9: слова загораются по одному, потом блок гаснет
+    const { k, base } = this.size(p);
 
     box.replaceChildren();
-    box.style.color = p ? p.colors.text : "#fdfaf2";
-    box.style.letterSpacing = p ? `${p.letter_spacing}em` : "";
+    box.style.color = p.colors.text;
+    box.style.fontSize = `${base}px`;
+    box.style.lineHeight = p.line_height;
+    box.style.letterSpacing = `${p.letter_spacing}em`;
     box.style.setProperty("--cap-font", `"${activeFamily()}"`);
+    this.place(box, p, k);
     // Движение берётся у темы, а не зашито в стили: иначе превью обещает одно,
     // а рендер делает другое — ровно так и было, пока слово в ролике включалось
     // за кадр, а здесь плавно проявлялось.
-    const motion = (p && p.motion) || {};
+    const motion = p.motion || {};
     box.style.setProperty("--cap-in", `${motion.word_in_ms || 0}ms`);
     box.style.setProperty("--cap-rise", `${motion.word_rise_em || 0}em`);
+
     let i = 0;
-    const word = (w, cls, color) => {
+    const word = (w, size, color) => {
       const on = shown >= 1 && i < shown && shown < 9;
       i += 1;
-      return el("span", { class: `cap-word ${cls}${on ? " on" : ""}`, text: tx(w), style: color ? `color:${color}` : null });
+      return el("span", {
+        class: `cap-word${on ? " on" : ""}`,
+        text: tx(w),
+        style: `font-size:${size}px${color ? `;color:${color}` : ""}`,
+      });
     };
-    box.append(el("div", { class: "cap-line" }, scene.small.map((w) => word(w, "cap-small"))));
-    box.append(el("div", { class: "cap-line" }, [word(scene.big, "cap-big", accent)]));
-    if (scene.after.length) box.append(el("div", { class: "cap-line" }, scene.after.map((w) => word(w, "cap-small"))));
+    // Плашка — та же, что у блока в кадре: цвет, непрозрачность, радиус и
+    // паддинги темы. У тем, где она приходит только над светлым фоном
+    // (`opacity: 0`), в превью её и нет — фон карточки тёмный.
+    const plate = el("div", { class: "cap-plate" });
+    const panel = p.panel || {};
+    if (panel.enabled && panel.opacity > 0) {
+      plate.style.background = `rgba(${hexToRgb(panel.color)}, ${panel.opacity})`;
+      plate.style.padding = `${Math.round(panel.padding_y * k)}px ${Math.round(panel.padding_x * k)}px`;
+      plate.style.borderRadius = `${Math.round(panel.radius * k)}px`;
+    }
+    plate.append(el("div", { class: "cap-line" }, scene.small.map((w) => word(w, base))));
+    plate.append(el("div", { class: "cap-line" }, [word(scene.big, base * (p.accent_scale || 1), accent)]));
+    if (scene.after.length) {
+      plate.append(el("div", { class: "cap-line" }, scene.after.map((w) => word(w, base))));
+    }
+    box.append(plate);
+
     // Строка ужимается под ширину превью, как в рендере (С1): слово «СУБТИТРОВ»
     // капсом в Bold иначе вылезает за края карточки.
-    const room = box.clientWidth;
-    for (const line of box.children) {
+    const room = box.clientWidth - (plate.offsetWidth - plate.clientWidth);
+    for (const line of plate.children) {
       const over = line.scrollWidth / room;
       if (room > 0 && over > 1) {
         for (const w of line.children) {
@@ -327,6 +395,7 @@ const preview = {
         }
       }
     }
+    $("#preview-tag").textContent = `${p.title} · ${activeFamily()}`;
   },
   tick() {
     this.step += 1;
@@ -346,15 +415,30 @@ const preview = {
 
 // ------------------------------------------------------------------ экран «Монтаж»
 
+// Лента перерисовывается целиком, поэтому к активному элементу прокручиваемся
+// уже ПОСЛЕ замены: старый узел к этому моменту не в документе.
+//
+// Двигаем САМУ ленту, а не зовём scrollIntoView: тот бы потянул и страницу по
+// вертикали, а на открытии приложения это прыжок экрана ещё до первого
+// касания.
+function scrollToActive(box, behavior = "smooth") {
+  const active = box.querySelector(".is-active");
+  if (!active) return;
+  const a = active.getBoundingClientRect();
+  const b = box.getBoundingClientRect();
+  box.scrollBy({ left: a.left - b.left - (b.width - a.width) / 2, behavior });
+}
+
 function renderPresets() {
   const box = $("#preset-tabs");
+  $("#style-count").textContent = state.boot.presets.length;
   box.replaceChildren(...state.boot.presets.map((p) =>
     el("button", {
-      class: `tab${p.name === state.preset ? " is-active" : ""}`,
+      class: `style-card${p.name === state.preset ? " is-active" : ""}`,
       type: "button",
       role: "tab",
+      title: `${p.title} · ${p.font}`,
       "aria-selected": p.name === state.preset ? "true" : "false",
-      text: p.title,
       onclick: () => {
         state.preset = p.name;
         haptic();
@@ -362,8 +446,27 @@ function renderPresets() {
         renderAccents();
         renderFonts();
         preview.render();
+        scrollToActive(box);
       },
-    })));
+    }, [
+      // Плитка — это образец: название темы набрано ЕЁ шрифтом и её регистром,
+      // под ним полоска её акцентного цвета. Семнадцать одинаковых пилюль с
+      // подписями ничего не говорили бы о том, чем темы отличаются.
+      el("span", {
+        class: "style-card__name",
+        text: p.uppercase ? p.title.toUpperCase() : p.title,
+        style: `font-family:"${p.font}", system-ui, sans-serif;letter-spacing:${p.letter_spacing}em`,
+      }),
+      el("i", { class: "style-card__bar", style: `background:${p.colors.accent}` }),
+    ])));
+  // Длинное название ужимается, а не обрезается многоточием: «MODERNI…» и
+  // «HEAVYWEIG…» — это уже не образец шрифта, ради которого плитка и нужна.
+  for (const name of box.querySelectorAll(".style-card__name")) {
+    const over = name.scrollWidth / name.clientWidth;
+    if (name.clientWidth > 0 && over > 1) {
+      name.style.fontSize = `${Math.max(11, Math.floor(18 / over))}px`;
+    }
+  }
 }
 
 function renderAccents() {
@@ -371,20 +474,19 @@ function renderAccents() {
   const box = $("#accent-chips");
   box.replaceChildren(...state.boot.accents.map((a) =>
     el("button", {
-      class: `chip${a.key === state.accent ? " is-active" : ""}`,
+      class: `swatch${a.key === state.accent ? " is-active" : ""}`,
       type: "button",
+      title: a.title,
       onclick: () => {
         state.accent = a.key;
         haptic();
         renderAccents();
         preview.render();
-        // Чипы перерисованы — прокручиваем к НОВОМУ активному, старый уже вне документа.
-        const active = box.querySelector(".chip.is-active");
-        if (active) active.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
+        scrollToActive(box);
       },
     }, [
-      el("i", { class: "chip__dot", style: `background:${a.color || (p ? p.colors.accent : "#F3D28F")}` }),
-      a.title,
+      el("i", { class: "swatch__dot", style: `background:${a.color || (p ? p.colors.accent : "#F3D28F")}` }),
+      el("span", { class: "swatch__name", text: a.title }),
     ])));
 }
 
@@ -394,18 +496,22 @@ function renderFonts() {
     el("button", {
       class: `chip${f.key === state.font ? " is-active" : ""}`,
       type: "button",
-      // Подпись рисуется САМИМ шрифтом: название «Антиква» ничего не говорит,
-      // пока не видно букв.
-      style: `font-family:"${f.family || activeThemeFamily()}"`,
+      title: f.family || activeThemeFamily(),
+      // Образец рисуется САМИМ шрифтом: название «Антиква» ничего не говорит,
+      // пока не видно букв. Подпись при этом остаётся интерфейсным шрифтом —
+      // иначе «Моноширинный», набранный Cormorant, читается как ещё один образец.
+      style: `--chip-font:"${f.family || activeThemeFamily()}"`,
       onclick: () => {
         state.font = f.key;
         haptic();
         renderFonts();
         preview.render();
-        const active = box.querySelector(".chip.is-active");
-        if (active) active.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
+        scrollToActive(box);
       },
-    }, [f.title])));
+    }, [
+      el("span", { class: "chip__aa", text: "Аа" }),
+      el("span", { class: "chip__name", text: f.title }),
+    ])));
 }
 
 function renderOptions() {
@@ -416,6 +522,7 @@ function setFile(file) {
   state.file = file;
   const zone = $("#dropzone");
   zone.classList.toggle("has-file", !!file);
+  $("#drop-thumb").style.backgroundImage = "";
   if (!file) {
     $("#drop-title").textContent = tr("edit.upload");
     $("#drop-sub").textContent = ".mp4, .mov, .m4v, .webm, .mkv, .avi";
@@ -426,30 +533,44 @@ function setFile(file) {
   $("#drop-title").textContent = file.name || tr("edit.untitled");
   $("#drop-sub").textContent = fmtSize(file.size);
   // Длительность читаем браузером до загрузки: слишком длинное видео лучше
-  // отбить сразу, а не после минуты заливки по мобильной сети.
+  // отбить сразу, а не после минуты заливки по мобильной сети. Заодно снимаем
+  // кадр на обложку: имя файла вроде `IMG_4821.mov` не говорит, то ли это видео.
   const url = URL.createObjectURL(file);
   const probe = document.createElement("video");
   probe.preload = "metadata";
+  probe.muted = true;
+  probe.playsInline = true;
+  const done = () => URL.revokeObjectURL(url);
   probe.onloadedmetadata = () => {
     const d = probe.duration;
-    URL.revokeObjectURL(url);
-    if (state.file !== file) return;
+    if (state.file !== file) { done(); return; }
     $("#drop-sub").textContent = `${fmtSize(file.size)} · ${fmtDuration(d)}`;
     const lim = state.boot.limits;
     if (isFinite(d) && d > lim.max_minutes * 60 + 1) toast(tr("file.too_long", { max: lim.max_minutes }));
     else if (isFinite(d) && d < lim.min_seconds) toast(tr("file.too_short", { min: lim.min_seconds }));
+    try { probe.currentTime = Math.min(0.5, (isFinite(d) ? d : 1) / 2); } catch (_) { done(); }
   };
-  probe.onerror = () => URL.revokeObjectURL(url);
+  probe.onseeked = () => {
+    try {
+      const side = Math.min(probe.videoWidth, probe.videoHeight);
+      if (side && state.file === file) {
+        const c = document.createElement("canvas");
+        c.width = c.height = 108;
+        c.getContext("2d").drawImage(
+          probe, (probe.videoWidth - side) / 2, (probe.videoHeight - side) / 2, side, side, 0, 0, 108, 108,
+        );
+        $("#drop-thumb").style.backgroundImage = `url(${c.toDataURL("image/jpeg", 0.72)})`;
+      }
+    } catch (_) { /* кодек не отдаёт кадр в canvas — остаётся иконка */ }
+    done();
+  };
+  probe.onerror = done;
   probe.src = url;
   renderCta();
 }
 
 function initEdit() {
   $("#preview-play").addEventListener("click", () => { preview.toggle(); haptic(); });
-  $("#chips-left").addEventListener("click", () => $("#accent-chips").scrollBy({ left: -160 }));
-  $("#chips-right").addEventListener("click", () => $("#accent-chips").scrollBy({ left: 160 }));
-  $("#font-left").addEventListener("click", () => $("#font-chips").scrollBy({ left: -160 }));
-  $("#font-right").addEventListener("click", () => $("#font-chips").scrollBy({ left: 160 }));
   $("#requirements").addEventListener("click", () => {
     const l = state.boot.limits;
     popup(tr("req.title"), [
@@ -742,9 +863,11 @@ async function setLanguage(code) {
   rerenderAll();
   try {
     await api("/api/language", { method: "POST", body: { lang: code } });
-    // Названия цветов и стадий приходят с сервера на языке пользователя — перечитываем.
+    // Названия цветов, шрифтов и стадий приходят с сервера на языке
+    // пользователя — перечитываем.
     const fresh = await api("/api/bootstrap");
     state.boot.accents = fresh.accents;
+    state.boot.fonts = fresh.fonts;
     state.boot.user = fresh.user;
     rerenderAll();
     loadJobs();
@@ -759,6 +882,7 @@ function rerenderAll() {
   applyStaticTexts();
   renderPresets();
   renderAccents();
+  renderFonts();
   renderBalance();
   preview.render();
   if (state.file) setFile(state.file); else setFile(null);
@@ -836,6 +960,11 @@ async function main() {
   renderPresets();
   renderAccents();
   renderFonts();
+  // Запомненная тема может быть семнадцатой в ленте: без подкрутки человек
+  // видел бы начало списка и ни одной выбранной плитки.
+  for (const id of ["#preset-tabs", "#font-chips", "#accent-chips"]) {
+    scrollToActive($(id), "instant");
+  }
   renderOptions();
   renderBalance();
   initEdit();

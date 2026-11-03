@@ -1,0 +1,85 @@
+{
+  "name": "heavyweight",
+  "title": "Heavyweight",
+  "order": 13,
+  "font": {
+    "family": "Montserrat Black",
+    "file": "Montserrat-Black.ttf",
+    "weight": 900,
+    "size": 109,
+    "uppercase": true,
+    "letter_spacing": -0.03
+  },
+  "colors": {
+    "active": "#FFFFFF",
+    "past": "#FFFFFF",
+    "ghost": "#FFFFFF",
+    "past_opacity": 0.5,
+    "ghost_opacity": 0.18,
+    "accent": "#FFE600",
+    "shout": "#FF2D2D",
+    "outline": "#05070A",
+    "shadow": "#000000"
+  },
+  "panel": {
+    "enabled": false,
+    "color": "#0B0F14",
+    "opacity": 0.0,
+    "blur": 0,
+    "radius": 0,
+    "padding_x": 0,
+    "padding_y": 0,
+    "border_color": "#FFFFFF",
+    "border_opacity": 0.0,
+    "border_width": 0,
+    "glass_color": "#FFFFFF",
+    "glass_opacity": 0.0
+  },
+  "caption": {
+    "position": "center",
+    "margin": 0,
+    "line_height": 0.96,
+    "align": "center",
+    "max_lines": 3,
+    "min_word_scale": 0.4,
+    "fill_max_scale": 1.0,
+    "pinned": false
+  },
+  "geometry": {
+    "max_line_width_ratio": 0.84
+  },
+  "contrast": {
+    "enabled": true,
+    "min_ratio": 4.5,
+    "luma_dark": 0.2,
+    "luma_light": 0.8,
+    "panel_opacity_dark": 0.0,
+    "panel_opacity_light": 0.0,
+    "text_dark": "#FFFFFF",
+    "text_light": "#000000"
+  },
+  "animation": {
+    "pop_scale": 1.1,
+    "pop_ms": 120,
+    "spring_damping": 10.0,
+    "spring_stiffness": 250.0,
+    "spring_mass": 0.6,
+    "block_in_ms": 110,
+    "block_out_ms": 90,
+    "block_in_zoom": 0.05,
+    "block_shift_px": 18,
+    "block_leave_px": 40,
+    "accent_scale": 1.24,
+    "shout_scale": 1.5,
+    "shout_rotate": -6.0,
+    "word_in_ms": 100,
+    "word_rise_px": 0
+  },
+  "grade": {
+    "enabled": true,
+    "contrast": 1.12,
+    "saturation": 1.1,
+    "gamma": 0.98,
+    "vignette": 0.0
+  }
+}

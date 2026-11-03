@@ -1,6 +1,7 @@
 {
   "name": "glass",
   "title": "Glass",
+  "order": 1,
   "font": {
     "family": "Montserrat ExtraBold",
     "file": "Montserrat-ExtraBold.ttf",

@@ -1,0 +1,84 @@
+{
+  "name": "widescreen",
+  "title": "Widescreen",
+  "order": 10,
+  "font": {
+    "family": "Golos Text",
+    "file": "GolosText-Bold.ttf",
+    "weight": 700,
+    "size": 46,
+    "uppercase": true,
+    "letter_spacing": 0.07
+  },
+  "colors": {
+    "active": "#FDFAF2",
+    "past": "#FDFAF2",
+    "ghost": "#FDFAF2",
+    "past_opacity": 1.0,
+    "ghost_opacity": 0.0,
+    "accent": "#F0C27B",
+    "shout": "#FF8A5B",
+    "outline": "#05070A",
+    "shadow": "#000000"
+  },
+  "panel": {
+    "enabled": true,
+    "color": "#0B0F14",
+    "opacity": 0.0,
+    "blur": 0,
+    "radius": 8,
+    "padding_x": 26,
+    "padding_y": 14,
+    "border_color": "#FFFFFF",
+    "border_opacity": 0.0,
+    "border_width": 0,
+    "glass_color": "#FFFFFF",
+    "glass_opacity": 0.0
+  },
+  "caption": {
+    "position": "bottom",
+    "margin": 190,
+    "line_height": 1.35,
+    "align": "center",
+    "max_lines": 2,
+    "min_word_scale": 0.5,
+    "fill_max_scale": 1.0,
+    "pinned": true
+  },
+  "geometry": {
+    "max_line_width_ratio": 0.82
+  },
+  "contrast": {
+    "enabled": true,
+    "min_ratio": 4.5,
+    "luma_dark": 0.2,
+    "luma_light": 0.8,
+    "panel_opacity_dark": 0.0,
+    "panel_opacity_light": 0.78,
+    "text_dark": "#FDFAF2",
+    "text_light": "#FDFAF2"
+  },
+  "animation": {
+    "pop_scale": 1.0,
+    "pop_ms": 120,
+    "block_in_ms": 160,
+    "block_out_ms": 120,
+    "block_gap_ms": 0,
+    "block_in_zoom": 0.0,
+    "block_shift_px": 0,
+    "block_leave_px": 0,
+    "block_leave_scale": 1.0,
+    "accent_scale": 1.0,
+    "shout_scale": 1.0,
+    "shout_rotate": 0.0,
+    "word_in_ms": 90,
+    "word_rise_px": 0
+  },
+  "grade": {
+    "enabled": true,
+    "contrast": 1.08,
+    "saturation": 1.12,
+    "gamma": 0.98,
+    "vignette": 0.26
+  }
+}

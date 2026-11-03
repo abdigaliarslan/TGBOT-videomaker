@@ -407,7 +407,14 @@ async def test_a_dead_tunnel_restarts_the_bot_and_a_stopped_one_does_not(monkeyp
 
 @pytest.fixture
 async def booted(tmp_path, monkeypatch):
-    """Клиент с ботом-двойником: `/api/bootstrap` спрашивает у бота его имя."""
+    """Клиент с ботом-двойником: `/api/bootstrap` спрашивает у бота его имя.
+
+    База тоже двойник, и это не экономия: `upsert_user` держит движок
+    SQLAlchemy глобально, привязанным к тому циклу событий, в котором его
+    создали. Второй тест с этой фикстурой получал «Future attached to a
+    different loop» и 500 — то есть проверки бутстрапа работали, пока он был
+    ровно один. Постгрес нужен денежным тестам, а не этим.
+    """
     from types import SimpleNamespace
 
     from src.db import repo
@@ -416,10 +423,18 @@ async def booted(tmp_path, monkeypatch):
     async def no_user(_user_id):
         return None
 
+    async def upsert(user_id, **fields):
+        return SimpleNamespace(
+            id=user_id, balance=3, videos_done=1, preset="pulse", settings={}, lang=None,
+            username=fields.get("username"), first_name=fields.get("first_name"),
+            language_code=fields.get("language_code"), is_admin=fields.get("is_admin", False),
+        )
+
     async def me():
         return SimpleNamespace(username="bot", first_name="Бот")
 
     monkeypatch.setattr(repo, "get_user", no_user)
+    monkeypatch.setattr(repo, "upsert_user", upsert)
     cfg = Settings(_env_file=None, bot_token=TOKEN, work_dir=tmp_path, webapp_chunk_mb=1,
                    webapp_max_upload_mb=5)
     app = create_app(bot=SimpleNamespace(me=me), cfg=cfg)  # type: ignore[arg-type]
@@ -456,3 +471,57 @@ async def test_the_font_route_serves_the_whole_library(client):
 async def test_the_font_route_still_refuses_anything_else(client):
     for name in ("../../etc/passwd", "secret.env", "Unknown-Bold.ttf"):
         assert (await client.get(f"/fonts/{name}")).status == 404
+
+
+# ------------------------------------------------------------------ темы
+
+
+async def test_bootstrap_describes_every_theme_the_way_the_preview_draws_it(booted):
+    """Превью рисует тему ЭТИМИ числами, а не своими.
+
+    Пока их не было, картинка в приложении показывала одну композицию на все
+    темы: один кегль, одно место в кадре, одно выделение. Тем стало
+    семнадцать, и расхождение превью с роликом перестало быть мелочью —
+    человек выбирает по картинке. Числа обязаны быть числами ТЕМЫ, иначе
+    приложение обещает не то, что соберёт воркер.
+    """
+    from src.core.geometry import load_metrics
+    from src.core.preset import available, load_preset
+
+    data = await (await booted.get("/api/bootstrap", headers=auth())).json()
+    assert {p["name"] for p in data["presets"]} == set(available())
+    for item in data["presets"]:
+        p = load_preset(item["name"])
+        assert item["size"] == p.font.size, item["name"]
+        assert item["uppercase"] == p.font.uppercase, item["name"]
+        assert item["letter_spacing"] == p.font.letter_spacing, item["name"]
+        assert item["line_height"] == p.caption.line_height, item["name"]
+        assert item["position"] == p.caption.position, item["name"]
+        assert item["margin"] == p.caption.margin, item["name"]
+        assert item["accent_scale"] == p.animation.accent_scale, item["name"]
+        assert item["panel"]["enabled"] == p.panel.enabled, item["name"]
+        assert item["panel"]["opacity"] == p.panel.opacity, item["name"]
+        # Высота прописных — из выгруженных метрик, а не из числа, переписанного
+        # руками: по ней приложение пересчитывает кегль при смене шрифта ровно
+        # так же, как это делает `options.apply_font` в пайплайне.
+        m = load_metrics(p.font.file)
+        assert item["cap_em"] == pytest.approx(m.cap_height / m.units_per_em, abs=1e-4)
+
+
+async def test_themes_come_in_one_order_for_the_app_and_the_chat(booted):
+    """Порядок тем — свойство данных (`order`), и он один на оба входа.
+
+    В чате и в приложении список один и тот же; разойдись они, «третья слева»
+    значило бы разное. Тема по умолчанию при этом всегда первая — с неё
+    начинает тот, кто ничего не выбирал.
+    """
+    from src.bot.keyboards import _titles
+    from src.core.preset import load_preset
+
+    data = await (await booted.get("/api/bootstrap", headers=auth())).json()
+    names = [p["name"] for p in data["presets"]]
+    assert names[0] == Settings(_env_file=None, bot_token=TOKEN).default_preset
+    assert names[1:] == [n for n, _ in _titles() if n != names[0]]
+    assert [load_preset(n).order for n in names[1:]] == sorted(
+        load_preset(n).order for n in names[1:]
+    )

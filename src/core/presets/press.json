@@ -1,6 +1,7 @@
 {
   "name": "press",
   "title": "Press",
+  "order": 3,
   "font": {
     "family": "Playfair Display ExtraBold",
     "file": "PlayfairDisplay-ExtraBold.ttf",
