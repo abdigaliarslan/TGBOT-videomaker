@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import hmac
 import json
@@ -24,6 +25,7 @@ import re
 import shutil
 import time
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -721,6 +723,23 @@ async def media(request: web.Request) -> web.StreamResponse:
     return web.FileResponse(cache, headers={"Cache-Control": "private, max-age=3600"})
 
 
+@lru_cache(maxsize=32)
+def _gzipped_font(path: Path, mtime_ns: int) -> bytes:
+    """Сжатый шрифт, посчитанный один раз на файл.
+
+    Приложение объявляет ВСЕ начертания библиотеки, и каждое из них рисуется
+    на первом же экране — плитка темы её шрифтом, чип выбора образцом «Аа», —
+    поэтому браузер честно тянет все восемнадцать. Это 3.1 МБ в TTF и 1.5 МБ в
+    gzip: шрифт сжимается вдвое, и на мобильной сети это разница между «экран
+    собрался» и «экран собирается».
+
+    `mtime_ns` в ключе кеша не декорация: подменённый на диске файл обязан
+    отдаться заново, а не остаться в памяти процесса до перезапуска.
+    """
+    del mtime_ns
+    return gzip.compress(path.read_bytes(), 9)
+
+
 async def font(request: web.Request) -> web.StreamResponse:
     """Шрифт темы для превью. Отдаём только файлы, которые назвал какой-то пресет."""
     cfg = request.app[CFG_KEY]
@@ -737,7 +756,14 @@ async def font(request: web.Request) -> web.StreamResponse:
     path = Path(cfg.fonts_dir) / name
     if name not in allowed or not path.is_file():
         return _json_error(404, t("api.font_not_found", _browser_lang(request)))
-    return web.FileResponse(path, headers={"Cache-Control": "public, max-age=86400"})
+    headers = {"Cache-Control": "public, max-age=86400"}
+    if "gzip" in request.headers.get("Accept-Encoding", "").lower():
+        return web.Response(
+            body=_gzipped_font(path, path.stat().st_mtime_ns),
+            headers={**headers, "Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+            content_type="font/ttf",
+        )
+    return web.FileResponse(path, headers=headers)
 
 
 async def index(request: web.Request) -> web.StreamResponse:

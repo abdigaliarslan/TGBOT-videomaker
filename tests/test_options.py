@@ -120,6 +120,20 @@ def test_every_catalogued_font_is_actually_in_the_repository():
             "ASS ищет шрифт по имени семейства и возьмёт не тот файл"
         )
 
+    # Темы называют шрифт сами, мимо каталога: у `press` это было записано
+    # руками. Проверка та же и по той же причине — libass ищет по семейству, а
+    # не по файлу, и опечатка даёт валидный mp4 чужим шрифтом.
+    from src.core.preset import available, load_preset
+
+    for name in available():
+        font = load_preset(name).font
+        ttf = REPO_ROOT / "assets" / "fonts" / (font.file or "")
+        assert font.file and ttf.exists(), f"{name}: нет файла {font.file!r}"
+        assert load_metrics(font.file).family == font.family, (
+            f"{name}: тема просит семейство {font.family!r}, "
+            f"а в файле {load_metrics(font.file).family!r}"
+        )
+
 
 def test_the_font_and_the_accent_compose():
     """Пользователь выбирает и шрифт, и цвет — одно не должно затирать другое."""

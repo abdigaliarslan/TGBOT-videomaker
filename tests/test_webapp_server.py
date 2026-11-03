@@ -473,6 +473,29 @@ async def test_the_font_route_still_refuses_anything_else(client):
         assert (await client.get(f"/fonts/{name}")).status == 404
 
 
+async def test_fonts_travel_compressed(client):
+    """Библиотека выбора — восемнадцать начертаний, и все рисуются на первом
+    экране: плитка темы её шрифтом, чип образцом «Аа». В TTF это 3.1 МБ на
+    открытие, в gzip — вдвое меньше. Распакованное обязано совпасть с файлом
+    байт в байт: раскладку Python считает по ЭТОМУ файлу."""
+    import gzip
+
+    from src.core.config import REPO_ROOT
+
+    name = "Forum-Regular.ttf"
+    r = await client.get(f"/fonts/{name}", headers={"Accept-Encoding": "gzip"})
+    assert r.status == 200
+    # aiohttp распаковывает сам, поэтому сжатие видно по заголовку, а не по телу.
+    assert r.headers.get("Content-Encoding") == "gzip"
+    body = await r.read()
+    raw = (REPO_ROOT / "assets" / "fonts" / name).read_bytes()
+    assert body == raw
+    assert len(gzip.compress(raw, 9)) < len(raw) * 0.75, "сжатие не окупается — проверить формат"
+
+    plain = await client.get(f"/fonts/{name}", headers={"Accept-Encoding": "identity"})
+    assert plain.status == 200 and await plain.read() == raw
+
+
 # ------------------------------------------------------------------ темы
 
 
