@@ -11,12 +11,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Две выкладки одновременно перезапускали бы службы друг другу посреди работы.
-# Новая ждёт старую, а не обрывает её: оборванный rsync оставит код наполовину.
-concurrency:
-  group: deploy-prod
-  cancel-in-progress: false
-
 jobs:
   test:
     runs-on: ubuntu-24.04
@@ -114,6 +108,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: production
+    # Очередь на уровне ВЫКЛАДКИ, а не всего workflow. Две выкладки
+    # одновременно перезапускали бы службы друг другу посреди работы; новая
+    # ждёт старую, а не обрывает её — оборванный rsync оставит код наполовину.
+    #
+    # Раньше это стояло на workflow целиком, и очередь отменяла прогоны ТЕСТОВ:
+    # GitHub держит в ожидании только один прогон, и пуш, пришедший через
+    # четыре минуты после предыдущего, отменял его вместе с результатами.
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 

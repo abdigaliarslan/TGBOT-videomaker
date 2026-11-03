@@ -1398,6 +1398,7 @@ async function setLanguage(code) {
 
 function rerenderAll() {
   applyStaticTexts();
+  sidebarTitles();
   renderUser();
   renderLanguages();
   renderThemeSeg();
@@ -1423,7 +1424,6 @@ function renderHeader() {
   const step = $("#page-step");
   step.hidden = state.screen !== "edit";
   step.textContent = tr("step", { n: state.step });
-  $("#back").hidden = !canGoBack();
   document.title = `${tr(TITLES[state.screen] || "nav.home")} · ${(state.boot && state.boot.bot_name) || "Reels"}`;
 }
 
@@ -1438,9 +1438,13 @@ function goBack() {
   go(prev || "home", { push: false });
 }
 
+// Две кнопки «назад» — Telegram и своя в шапке — живут от одного условия:
+// иначе открытый лист «Истории» закрывался одной и не закрывался другой.
 function syncBackButton() {
+  const back = canGoBack();
+  $("#back").hidden = !back;
   if (!tg || !tg.BackButton) return;
-  if (canGoBack()) tg.BackButton.show(); else tg.BackButton.hide();
+  if (back) tg.BackButton.show(); else tg.BackButton.hide();
 }
 
 function renderScreen(screen) {
@@ -1495,7 +1499,12 @@ function initSidebar() {
     try { localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0"); } catch (_) { /* не критично */ }
     haptic();
   });
-  // В свёрнутой панели подписи спрятаны — пусть живут во всплывающей подсказке.
+  sidebarTitles();
+}
+
+// В свёрнутой панели подписи спрятаны — пусть живут во всплывающей подсказке.
+// Отдельно, потому что язык меняется на ходу, и подсказки должны идти за ним.
+function sidebarTitles() {
   for (const b of $$(".side-nav__item")) {
     const label = b.querySelector("[data-i18n]");
     if (label) b.title = label.textContent;
