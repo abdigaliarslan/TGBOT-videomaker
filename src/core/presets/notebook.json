@@ -71,7 +71,7 @@
     "accent_scale": 1.15,
     "shout_scale": 1.3,
     "shout_rotate": 0.0,
-    "word_in_ms": 60,
+    "word_in_ms": 90,
     "word_rise_px": 0
   },
   "grade": {

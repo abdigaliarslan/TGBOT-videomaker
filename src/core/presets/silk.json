@@ -99,7 +99,7 @@
     "shout_rotate": 0.0,
     "word_in_ms": 240,
     "word_rise_px": 10,
-    "broll_overshoot": 0.02
+    "broll_overshoot": 0.03
   },
   "grade": {
     "enabled": true,
