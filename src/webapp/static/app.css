@@ -83,7 +83,9 @@ svg { flex: none; }
 }
 .topbar__title { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; }
 .topbar h1 {
-  font-family: var(--display); font-weight: 800; font-size: 24px; letter-spacing: -0.02em;
+  /* Кегль тянется за шириной: «Приглашайте друзей» рядом с кнопкой «назад»
+     и аватаром на 390 px в 24 px не помещался и обрезался многоточием. */
+  font-family: var(--display); font-weight: 800; font-size: clamp(18px, 5.4vw, 24px); letter-spacing: -0.02em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .topbar__step { font-size: 13px; font-weight: 700; color: var(--muted); white-space: nowrap; }
@@ -668,10 +670,17 @@ svg { flex: none; }
   .sheet__panel { border-radius: 24px; }
 }
 
+/* Обёртка колонки живёт ТОЛЬКО ради широкого экрана (медиазапрос ниже). На
+   телефоне у неё нет ни одного правила, и она просто обжимает превью по
+   высоте — а липнуть элемент может лишь внутри своего родителя. Из-за этого
+   превью ужималось при прокрутке, но уезжало за верх экрана: худшее из двух.
+   `display: contents` убирает её бокс, не меняя ни пикселя рисунка. */
+.design__stage { display: contents; }
+
 /* Оформление в две колонки: кадр слева прилип, выбор справа листается. */
 @media (min-width: 980px) {
   .design { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 28px; align-items: start; }
-  .design__stage { position: sticky; top: 96px; }
+  .design__stage { display: block; position: sticky; top: 96px; }
   .preview-wrap { --prev-h: min(calc(100vh - 140px), 560px); position: static; margin: 0; padding: 0; height: auto; background: none; }
   .preview-wrap.is-compact { height: auto; }
   .preview-wrap.is-compact .preview { transform: none; }
