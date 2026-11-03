@@ -34,6 +34,14 @@ _LEGACY = {
 
 
 def legacy_action(text: str | None) -> str | None:
+    # Кнопки НЫНЕШНЕЙ клавиатуры сюда не попадают, даже если их слова совпадают
+    # со старыми («Начать монтаж», «Баланс»). Это не перестраховка: иначе всё
+    # держалось бы на порядке роутеров, и перестановка молча заменяла бы ответ
+    # на «кнопки обновились» вместе со снятием самой клавиатуры.
+    from src.bot.handlers import menu
+
+    if menu.action_for(text) is not None:
+        return None
     low = (text or "").lower()
     for label, action in _LEGACY.items():
         if label in low:

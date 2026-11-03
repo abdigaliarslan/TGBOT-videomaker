@@ -113,7 +113,55 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
     },
     "btn.open_app": {"ru": "Открыть приложение", "en": "Open the app"},
-    "btn.menu": {"ru": "Монтаж", "en": "Editor"},
+    "btn.menu": {"ru": "Приложение ✨", "en": "App ✨"},
+    # Нижняя клавиатура. Эмодзи — часть подписи: по ним кнопку узнают быстрее,
+    # чем по словам, а на десктопе без цветного шрифта они рисуются контуром.
+    "kb.start": {"ru": "▶️ Начать монтаж", "en": "▶️ Start editing"},
+    "kb.balance": {"ru": "💳 Баланс", "en": "💳 Balance"},
+    "kb.videos": {"ru": "📹 Мои ролики", "en": "📹 My reels"},
+    "kb.referral": {"ru": "🎁 Реф. программа", "en": "🎁 Referrals"},
+    "kb.support": {"ru": "🎧 Поддержка", "en": "🎧 Support"},
+    "kb.ready": {
+        "ru": "Кнопки внизу — для быстрых действий.",
+        "en": "The buttons below are your shortcuts.",
+    },
+    "menu.videos": {
+        "ru": "Ваши ролики и прогресс монтажа — в приложении.",
+        "en": "Your reels and editing progress live in the app.",
+    },
+    "menu.referral": {
+        "ru": (
+            "🎁 Приглашайте друзей — получаете {percent}% их покупок роликами.\n\n"
+            "Ваша ссылка:\n{link}\n\n"
+            "Бонус приходит в тот момент, когда друг оплачивает пакет."
+        ),
+        "en": (
+            "🎁 Invite friends — you get {percent}% of their purchases in reels.\n\n"
+            "Your link:\n{link}\n\n"
+            "The bonus arrives the moment a friend pays for a package."
+        ),
+    },
+    "menu.referral_off": {
+        "ru": "Программа приглашений сейчас выключена.",
+        "en": "The referral programme is switched off right now.",
+    },
+    "menu.referral_share": {"ru": "Отправить другу", "en": "Share with a friend"},
+    "menu.support": {
+        "ru": "Вопрос или что-то сломалось — напишите {contact}.",
+        "en": "A question or something broken — write to {contact}.",
+    },
+    "menu.support_unset": {
+        "ru": (
+            "Контакт поддержки пока не настроен.\n"
+            "Владельцу: задайте SUPPORT_CONTACT в .env или откройте бота с аккаунта "
+            "из ADMIN_IDS, у которого есть @username."
+        ),
+        "en": (
+            "The support contact isn't set up yet.\n"
+            "Owner: set SUPPORT_CONTACT in .env, or open the bot from an ADMIN_IDS "
+            "account that has a @username."
+        ),
+    },
     "help.text": {
         "ru": (
             "Как это работает:\n\n"
@@ -148,6 +196,10 @@ TEXTS: dict[str, dict[str, str]] = {
     },
     "preset.unknown": {"ru": "Такого стиля нет", "en": "No such style"},
     "preset.picked": {"ru": "Стиль: {title}", "en": "Style: {title}"},
+    "ref.bonus": {
+        "ru": "🎁 Друг, которого вы пригласили, оплатил пакет. Ваш бонус: +{share}. На балансе: {balance}.",
+        "en": "🎁 A friend you invited bought a package. Your bonus: +{share}. Balance: {balance}.",
+    },
     "stats.empty": {"ru": "Пока ничего не смонтировано. Пришлите видео.", "en": "Nothing edited yet. Send me a video."},
     "stats.done": {"ru": "Готовых роликов: {n}", "en": "Reels done: {n}"},
     "stats.style": {"ru": "Стиль: {preset}", "en": "Style: {preset}"},

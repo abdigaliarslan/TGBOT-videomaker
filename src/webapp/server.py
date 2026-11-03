@@ -25,6 +25,7 @@ import re
 import shutil
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ from src.core.geometry import load_metrics
 from src.core.i18n import LANGS, error_text, lang_of, stage_title, t, videos_word
 from src.core.options import ACCENTS, FONTS, JobOptions
 from src.core.preset import available, load_preset
+from src.core.referral import code_of
 from src.db import repo
 from src.db.models import Job, JobStatus
 from src.storage.s3 import SOURCES, storage
@@ -384,8 +386,80 @@ async def bootstrap(request: web.Request) -> web.Response:
             },
             "defaults": JobOptions().model_dump(),
             "retention_days": cfg.storage_retention_days,
+            # Приглашения. Ссылку собирает приложение из имени бота и кода: так
+            # она одна и та же в чате, в «Поделиться» и в поле для копирования.
+            "referral": (
+                {"code": code_of(user.id), "percent": cfg.referral_percent, "credit": user.ref_credit}
+                if cfg.referral_percent > 0
+                else None
+            ),
         }
     )
+
+
+def _day_start(request: web.Request, now: datetime | None = None) -> datetime:
+    """Начало СЕГОДНЯ у пользователя, а не на сервере.
+
+    «+2 сегодня» на экране приглашений считается от полуночи человека: сервер
+    живёт в UTC, и у пользователя из Владивостока «сегодня» иначе начиналось
+    бы в десять утра. Смещение — как отдаёт `Date.getTimezoneOffset()` (минуты,
+    со знаком «UTC минус местное»); мусор и всё за пределами суток — ноль.
+    """
+    try:
+        offset = int(request.query.get("tz", "0"))
+    except ValueError:
+        offset = 0
+    if abs(offset) > 24 * 60:
+        offset = 0
+    now = now or datetime.now(timezone.utc)
+    local = now - timedelta(minutes=offset)
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight + timedelta(minutes=offset)
+
+
+async def referrals(request: web.Request) -> web.Response:
+    """Экран «Приглашения»: сводка за всё время и сегодня, список приглашённых."""
+    cfg = request.app[CFG_KEY]
+    user: WebAppUser = request[USER_KEY]
+    if cfg.referral_percent <= 0:
+        return _json_error(404, "referrals off")
+    since = _day_start(request)
+    try:
+        days = int(request.query.get("days", "0"))
+    except ValueError:
+        days = 0
+    window = since - timedelta(days=days - 1) if days > 0 else None
+    stats = await repo.referral_stats(user.id, since=since)
+    friends = await repo.referral_friends(user.id, since=window)
+    return web.json_response(
+        {
+            "stats": stats,
+            "friends": [
+                {
+                    # Только имя: ни @username, ни id. Пригласившему достаточно
+                    # узнать своего, а чужой контакт ему отдавать незачем.
+                    "name": f["name"] or "",
+                    "joined_at": f["joined_at"].isoformat() if f["joined_at"] else None,
+                    "earned": f["earned"],
+                    "paid": f["paid"],
+                }
+                for f in friends
+            ],
+        }
+    )
+
+
+async def payments_history(request: web.Request) -> web.Response:
+    """История в «Тарифах»: покупки и бонусы за приглашённых, свежие сверху."""
+    user: WebAppUser = request[USER_KEY]
+    paid = await repo.user_payments(user.id)
+    bonuses = await repo.referral_bonuses(user.id)
+    items = [
+        {"kind": "payment", "at": p.created_at.isoformat(), "videos": p.videos, "stars": p.stars}
+        for p in paid
+    ] + [{"kind": "bonus", "at": at.isoformat(), "share": share} for at, share in bonuses]
+    items.sort(key=lambda x: x["at"], reverse=True)
+    return web.json_response({"items": items[:50]})
 
 
 async def upload_start(request: web.Request) -> web.Response:
@@ -808,6 +882,8 @@ def create_app(bot: Bot, cfg: Settings) -> web.Application:
     app.router.add_post("/api/jobs/{job_id}/send", job_send)
     app.router.add_post("/api/invoice", invoice)
     app.router.add_post("/api/language", set_language)
+    app.router.add_get("/api/referrals", referrals)
+    app.router.add_get("/api/payments", payments_history)
     return app
 
 

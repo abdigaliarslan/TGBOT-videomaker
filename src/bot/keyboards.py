@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardMarkup, WebAppInfo
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from src.core.config import settings
 from src.core.i18n import LANG_NAMES, LANGS, t
 from src.core.preset import available, load_preset
 
@@ -93,6 +99,39 @@ def app_keyboard(section: str | None = None, lang: str | None = None) -> InlineK
     kb = InlineKeyboardBuilder()
     kb.button(text=t("btn.open_app", lang), web_app=WebAppInfo(url=url))
     return kb.as_markup()
+
+
+# Подписи кнопок нижней клавиатуры: действие → ключ перевода. Порядок задаёт
+# раскладку — первая кнопка во всю ширину, остальные парами.
+MAIN_BUTTONS: tuple[tuple[str, ...], ...] = (
+    ("start",),
+    ("balance", "videos"),
+    ("referral", "support"),
+)
+
+
+def main_keyboard(lang: str | None = None) -> ReplyKeyboardMarkup:
+    """Постоянная клавиатура под полем ввода: пять кнопок, 1 / 2 / 2.
+
+    Первая кнопка открывает Mini App НАПРЯМУЮ только при постоянном адресе
+    (`WEBAPP_URL`). С туннелем адрес новый на каждом запуске, а эту клавиатуру
+    Telegram хранит у пользователя, пока её не заменят, — вшитый адрес туннеля
+    назавтра вёл бы в никуда и кнопка молча не открывала бы ничего. Поэтому с
+    туннелем кнопка обычная: бот отвечает на неё инлайн-кнопкой со СВЕЖИМ
+    адресом, и это один лишний тап против неработающей кнопки.
+    """
+    url = _webapp_url
+    direct = url and settings.webapp_url.strip()
+    rows = [
+        [
+            KeyboardButton(text=t(f"kb.{name}", lang), web_app=WebAppInfo(url=url))
+            if name == "start" and direct
+            else KeyboardButton(text=t(f"kb.{name}", lang))
+            for name in row
+        ]
+        for row in MAIN_BUTTONS
+    ]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
 def welcome_keyboard(lang: str) -> InlineKeyboardMarkup:

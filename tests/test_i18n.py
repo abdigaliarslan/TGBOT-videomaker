@@ -88,7 +88,9 @@ def test_the_app_dictionary_has_the_same_keys_in_both_languages():
     script = (
         "const src = require('fs').readFileSync(process.argv[1], 'utf8');"
         "const start = src.indexOf('const I18N = {');"
-        "const end = src.indexOf('\\nconst LANG_NAMES');"
+        # Конец словаря — первая закрывающая скобка в начале строки после него:
+        # имя соседнего объявления меняется вместе с файлом, а эта форма — нет.
+        "const end = src.indexOf('\\n};', start) + 3;"
         "const I18N = eval('(' + src.slice(start + 'const I18N = '.length, end).trim().replace(/;$/, '') + ')');"
         "console.log(JSON.stringify({ru: Object.keys(I18N.ru), en: Object.keys(I18N.en)}));"
     )

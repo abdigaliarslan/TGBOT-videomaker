@@ -80,6 +80,17 @@ class User(Base):
     # «токен»: пакеты в STAR_PACKAGES продаются роликами, и пользователю честнее
     # видеть то же число, за которое он платил.
     balance: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    # Кто пригласил. Ставится один раз — по ссылке `?start=r…`, пока человек
+    # ещё ничего не купил (`repo.attach_referrer`), — и дальше не меняется:
+    # иначе бонус с одной и той же покупки можно было бы переписать на себя.
+    referrer_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    referred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Набежавшая доля ролика от покупок приглашённых, в СОТЫХ ролика. Пакеты
+    # продаются по 1 и 5 роликов, и 10 % от них — дробь: копится здесь, а на
+    # баланс уходит целыми роликами. Без копилки бонус с мелких пакетов терялся бы.
+    ref_credit: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
@@ -204,4 +215,8 @@ class Payment(Base):
     stars: Mapped[int] = mapped_column(Integer, nullable=False)
     videos: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Сколько сотых ролика с этой оплаты ушло пригласившему. Записано в момент
+    # оплаты, а не пересчитывается по текущему проценту: смена процента не
+    # должна переписывать прошлое на экране «Приглашения».
+    ref_bonus: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

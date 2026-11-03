@@ -15,9 +15,10 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 
-from src.bot.handlers import common, fallback, payments, video
+from src.bot.handlers import common, fallback, menu, payments, video
 from src.bot.keyboards import set_webapp_url
 from src.core.config import settings
+from src.core.i18n import DEFAULT_LANG, t
 from src.core.logging import setup_logging
 from src.db import repo
 from src.storage.s3 import storage
@@ -84,7 +85,9 @@ async def start_webapp(bot: Bot):
         # Кнопка меню общая для всех чатов: адрес туннеля меняется на каждом
         # запуске, и старые чаты подхватывают свежий без единого сообщения.
         await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(text="Монтаж", web_app=WebAppInfo(url=url))
+            menu_button=MenuButtonWebApp(
+                text=t("btn.menu", DEFAULT_LANG), web_app=WebAppInfo(url=url)
+            )
         )
         log.info("Mini App: %s", url)
         # Кнопки в чатах, где у пользователя своя подпись, хранят старый адрес —
@@ -154,6 +157,11 @@ async def main() -> None:
     dp.include_router(payments.router)
     dp.include_router(common.router)
     dp.include_router(video.router)
+    # До fallback: кнопки нижней клавиатуры шлют обычный текст, а тот ловит всё.
+    dp.include_router(menu.router)
+    # Клавиатуру один раз довозим тем, у кого её ещё нет: прежняя версия
+    # бота свою сняла, а новая приходит только вместе с сообщением.
+    dp.message.middleware(menu.KeyboardOnce())
     # Последним: подбирает текст, который не взял никто, включая старые кнопки.
     dp.include_router(fallback.router)
 

@@ -418,10 +418,30 @@ async def refund_job(job_id: uuid.UUID | str) -> bool:
 
 
 async def credit_payment(
-    user_id: int, *, charge_id: str, stars: int, videos: int, payload: str
+    user_id: int,
+    *,
+    charge_id: str,
+    stars: int,
+    videos: int,
+    payload: str,
+    referral_percent: int | None = None,
 ) -> bool:
-    """Зачисляет оплату. False — этот платёж уже зачислен (повторный апдейт)."""
+    """Зачисляет оплату. False — этот платёж уже зачислен (повторный апдейт).
+
+    Бонус пригласившему — в той же транзакции и под той же защитой от повтора:
+    повторный апдейт об оплате не зачисляет ни пакет, ни бонус. Бонус копится в
+    сотых ролика (`users.ref_credit`), а на баланс переходят целые ролики —
+    оба поля считаются одним UPDATE из старого значения копилки, так что
+    одновременные оплаты двух приглашённых не теряют долю друг друга.
+    """
+    from src.core.referral import share_of
+
+    percent = default_settings.referral_percent if referral_percent is None else referral_percent
     async with session() as s:
+        referrer = (
+            await s.execute(select(User.referrer_id).where(User.id == user_id))
+        ).scalar_one_or_none()
+        bonus = share_of(videos, percent) if referrer is not None else 0
         inserted = (
             await s.execute(
                 pg_insert(Payment)
@@ -431,6 +451,7 @@ async def credit_payment(
                     stars=stars,
                     videos=videos,
                     payload=payload[:128],
+                    ref_bonus=bonus,
                     created_at=datetime.now(timezone.utc),
                 )
                 .on_conflict_do_nothing(index_elements=[Payment.telegram_charge_id])
@@ -440,7 +461,156 @@ async def credit_payment(
         if inserted is None:
             return False
         await s.execute(update(User).where(User.id == user_id).values(balance=User.balance + videos))
+        if bonus:
+            pot = User.ref_credit + bonus
+            await s.execute(
+                update(User)
+                .where(User.id == referrer)
+                .values(balance=User.balance + pot // 100, ref_credit=pot % 100)
+            )
         return True
+
+
+# ------------------------------------------------------------------ приглашения
+
+
+async def attach_referrer(user_id: int, referrer_id: int) -> bool:
+    """Записывает, кто пригласил. True — записано сейчас.
+
+    Пригласившим становятся один раз и только до первой покупки: иначе
+    человек, давно платящий сам, мог бы отдать бонусы со своих покупок любой
+    ссылке, по которой случайно нажал /start. Себя пригласить нельзя, и
+    пригласить того, кто пригласил тебя, — тоже: кольцо из двух аккаунтов
+    гоняло бы бонусы по кругу. Всё это — условия одного UPDATE, без окна между
+    проверкой и записью.
+    """
+    if user_id == referrer_id:
+        return False
+    async with session() as s:
+        paid = select(Payment.id).where(Payment.user_id == user_id).exists()
+        referrer_ok = (
+            select(User.id)
+            .where(
+                User.id == referrer_id,
+                or_(User.referrer_id.is_(None), User.referrer_id != user_id),
+            )
+            .exists()
+        )
+        done = (
+            await s.execute(
+                update(User)
+                .where(User.id == user_id, User.referrer_id.is_(None), ~paid, referrer_ok)
+                .values(referrer_id=referrer_id, referred_at=datetime.now(timezone.utc))
+                .returning(User.id)
+            )
+        ).scalar_one_or_none()
+        return done is not None
+
+
+async def referral_stats(user_id: int, *, since: datetime) -> dict[str, int]:
+    """Сводка для экрана «Приглашения»: всего и с `since` (начало суток).
+
+    `paid` — сколько приглашённых купили хоть раз; `earned` — сколько сотых
+    ролика пришло пригласившему. «Сегодня» у оплат — по дате оплаты, а не по
+    дате прихода друга.
+    """
+    async with session() as s:
+        friends = select(User.id).where(User.referrer_id == user_id).scalar_subquery()
+        joined = (
+            await s.execute(
+                select(
+                    func.count(User.id),
+                    func.count(User.id).filter(User.referred_at >= since),
+                ).where(User.referrer_id == user_id)
+            )
+        ).one()
+        paid = (
+            await s.execute(
+                select(
+                    func.count(func.distinct(Payment.user_id)),
+                    func.count(func.distinct(Payment.user_id)).filter(Payment.created_at >= since),
+                    func.coalesce(func.sum(Payment.ref_bonus), 0),
+                    func.coalesce(func.sum(Payment.ref_bonus).filter(Payment.created_at >= since), 0),
+                ).where(Payment.user_id.in_(friends))
+            )
+        ).one()
+    return {
+        "invited": int(joined[0]),
+        "invited_today": int(joined[1]),
+        "paid": int(paid[0]),
+        "paid_today": int(paid[1]),
+        "earned": int(paid[2]),
+        "earned_today": int(paid[3]),
+    }
+
+
+async def referral_friends(user_id: int, *, since: datetime | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    """Приглашённые, свежие сверху: имя, когда пришёл, сколько принёс."""
+    async with session() as s:
+        bonus = (
+            select(Payment.user_id, func.sum(Payment.ref_bonus).label("earned"), func.count(Payment.id).label("payments"))
+            .group_by(Payment.user_id)
+            .subquery()
+        )
+        q = (
+            select(User.first_name, User.referred_at, bonus.c.earned, bonus.c.payments)
+            .outerjoin(bonus, bonus.c.user_id == User.id)
+            .where(User.referrer_id == user_id)
+            .order_by(User.referred_at.desc().nulls_last())
+            .limit(limit)
+        )
+        if since is not None:
+            q = q.where(User.referred_at >= since)
+        rows = (await s.execute(q)).all()
+    return [
+        {
+            "name": r.first_name,
+            "joined_at": r.referred_at,
+            "earned": int(r.earned or 0),
+            "paid": bool(r.payments),
+        }
+        for r in rows
+    ]
+
+
+async def user_payments(user_id: int, limit: int = 50) -> list[Payment]:
+    """Оплаты пользователя, свежие сверху — для истории в «Тарифах»."""
+    async with session() as s:
+        q = (
+            select(Payment)
+            .where(Payment.user_id == user_id)
+            .order_by(Payment.created_at.desc())
+            .limit(limit)
+        )
+        return list((await s.execute(q)).scalars())
+
+
+async def referral_bonuses(user_id: int, limit: int = 50) -> list[tuple[datetime, int]]:
+    """Бонусы, пришедшие пользователю с оплат приглашённых: когда и сколько сотых."""
+    async with session() as s:
+        friends = select(User.id).where(User.referrer_id == user_id).scalar_subquery()
+        q = (
+            select(Payment.created_at, Payment.ref_bonus)
+            .where(Payment.user_id.in_(friends), Payment.ref_bonus > 0)
+            .order_by(Payment.created_at.desc())
+            .limit(limit)
+        )
+        return [(r[0], int(r[1])) for r in (await s.execute(q)).all()]
+
+
+async def payment_bonus(charge_id: str) -> tuple[int, int] | None:
+    """(пригласивший, сотые ролика) по оплате — чтобы бот сказал ему спасибо."""
+    async with session() as s:
+        row = (
+            await s.execute(
+                select(User.referrer_id, Payment.ref_bonus)
+                .join(User, User.id == Payment.user_id)
+                .where(Payment.telegram_charge_id == charge_id)
+            )
+        ).one_or_none()
+    if row is None or row[0] is None or not row[1]:
+        return None
+    return int(row[0]), int(row[1])
 
 
 async def jobs_with_expired_files(cutoff: datetime, limit: int = 500) -> list[Job]:

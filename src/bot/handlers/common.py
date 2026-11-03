@@ -6,13 +6,14 @@ import contextlib
 import logging
 
 from aiogram import Bot, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message, User
 
 from src.bot.keyboards import language_keyboard, presets_keyboard, webapp_url, welcome_keyboard
 from src.core.config import settings
 from src.core.i18n import DEFAULT_LANG, LANGS, lang_of, t, videos_word
 from src.core.preset import available, load_preset
+from src.core.referral import parse_code
 from src.db import repo
 
 log = logging.getLogger(__name__)
@@ -84,16 +85,27 @@ async def refresh_menu_buttons(bot: Bot) -> int:
 
 
 @router.message(CommandStart())
-async def on_start(message: Message) -> None:
+async def on_start(message: Message, command: CommandObject | None = None) -> None:
     user = message.from_user
     if user is None:
         return
     db_user = await _upsert(user)
+    # `?start=r…` — пришёл по приглашению. Привязка молчаливая: правила
+    # (один раз, до первой покупки, не себя) живут в `attach_referrer`, а
+    # человеку, пришедшему по ссылке, нечего сообщать — он просто открыл бота.
+    referrer = parse_code(command.args if command else None)
+    if referrer is not None and settings.referral_percent > 0:
+        with contextlib.suppress(Exception):  # приглашение не повод ронять приветствие
+            if await repo.attach_referrer(user.id, referrer):
+                log.info("приглашение: %s пришёл от %s", user.id, referrer)
     if db_user.lang not in LANGS:
         # Первый запуск: сначала язык, приветствие — уже на нём.
         await message.answer(t("lang.pick", lang_of(db_user)), reply_markup=language_keyboard())
         return
     await message.answer(welcome_text(db_user.lang), reply_markup=welcome_keyboard(db_user.lang))
+    from src.bot.handlers import menu  # круговой импорт: menu тянет common
+
+    await menu.show_keyboard(message, db_user.lang)
 
 
 @router.message(Command("language"))
@@ -122,6 +134,11 @@ async def on_language_pick(callback: CallbackQuery, bot: Bot) -> None:
         with contextlib.suppress(Exception):
             await callback.message.edit_text(welcome_text(lang), reply_markup=welcome_keyboard(lang))
         await apply_menu_button(bot, callback.message.chat.id, lang)
+        # Клавиатура приезжает на выбранном языке — своим сообщением:
+        # у отредактированного разметка инлайновая, и реплай к ней не прицепить.
+        from src.bot.handlers import menu  # круговой импорт: menu тянет common
+
+        await menu.show_keyboard(callback.message, lang)
 
 
 @router.message(Command("help"))

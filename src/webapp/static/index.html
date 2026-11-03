@@ -8,179 +8,358 @@
   <link rel="stylesheet" href="/static/app.css" />
 </head>
 <body>
-  <div id="app" class="app">
-    <header class="topbar">
-      <div class="brand" id="brand">…</div>
-      <div class="topbar__actions">
-        <button class="icon-btn" id="theme-toggle" type="button" data-i18n-aria="theme">
-          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M20.5 14.3A8.5 8.5 0 0 1 9.7 3.5a8.5 8.5 0 1 0 10.8 10.8Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-        </button>
-        <button class="balance-pill" id="balance-pill" type="button" data-i18n-aria="nav.balance">
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
-          <span id="balance-value">0</span>
+  <!-- Иконки один раз, дальше — <use>. Обводка 1.7, как у всех значков приложения. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 10.5 12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5H15v-6H9v6H5.5A1.5 1.5 0 0 1 4 19z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+      <symbol id="i-invite" viewBox="0 0 24 24"><circle cx="10" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 19c.8-3.3 3.3-5 6.5-5s5.7 1.7 6.5 5M19 8v6M16 11h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+      <symbol id="i-spark" viewBox="0 0 24 24"><path d="M10 3.5 11.6 8.4 16.5 10l-4.9 1.6L10 16.5 8.4 11.6 3.5 10l4.9-1.6zM18 13l.9 2.1L21 16l-2.1.9L18 19l-.9-2.1L15 16l2.1-.9z" fill="currentColor"/></symbol>
+      <symbol id="i-results" viewBox="0 0 24 24"><rect x="3.5" y="8" width="17" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M6 5h12M10.5 11.5v5l4-2.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-coins" viewBox="0 0 24 24"><circle cx="9" cy="10" r="5.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M13.2 6.3A5.5 5.5 0 1 1 11 19.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+      <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4.5 20c1-3.6 3.9-5.5 7.5-5.5s6.5 1.9 7.5 5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+      <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9.5 5v14" stroke="currentColor" stroke-width="1.7"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.3A8.5 8.5 0 0 1 9.7 3.5a8.5 8.5 0 1 0 10.8 10.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+      <symbol id="i-share" viewBox="0 0 24 24"><path d="M12 15V4M8 8l4-4 4 4M5 13v5.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-film" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7.5 5v14M16.5 5v14M3.5 9.5h4M3.5 14.5h4M16.5 9.5h4M16.5 14.5h4" stroke="currentColor" stroke-width="1.5"/></symbol>
+      <symbol id="i-scissors" viewBox="0 0 24 24"><circle cx="6.5" cy="7" r="2.6" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="6.5" cy="17" r="2.6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8.6 8.6 20 18M8.6 15.4 20 6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+      <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v6M12 7.5v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.5 5.3 3.5 8.5s-1.1 6.1-3.5 8.5c-2.4-2.4-3.5-5.3-3.5-8.5S9.6 5.9 12 3.5Z" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+      <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20 12a7.5 7.5 0 0 1-11 6.6L4.5 20l1.3-4A7.5 7.5 0 1 1 20 12Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+      <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="4" y="5.5" width="16" height="14.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></symbol>
+      <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.8 2.5 5.1 5.6.8-4 4 .9 5.6-5-2.7-5 2.7.9-5.6-4-4 5.6-.8z" fill="currentColor"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    </defs>
+  </svg>
+
+  <div id="app" class="shell">
+    <!-- ============================================================ боковая панель (широкий экран) -->
+    <aside class="sidebar">
+      <div class="sidebar__head">
+        <div class="logo" id="brand">…</div>
+        <button class="icon-btn icon-btn--ghost" id="collapse" type="button" data-i18n-aria="nav.collapse">
+          <svg width="20" height="20"><use href="#i-panel"/></svg>
         </button>
       </div>
-    </header>
+      <nav class="side-nav">
+        <button class="side-nav__item" data-nav="home" type="button"><svg width="20" height="20"><use href="#i-home"/></svg><span data-i18n="nav.home">Главная</span></button>
+        <button class="side-nav__item" data-nav="invite" type="button" data-needs="referral"><svg width="20" height="20"><use href="#i-invite"/></svg><span data-i18n="nav.invite">Приглашения</span></button>
+        <button class="side-nav__item" data-nav="edit" type="button"><svg width="20" height="20" class="spark"><use href="#i-spark"/></svg><span data-i18n="nav.edit">Монтаж</span></button>
+        <button class="side-nav__item" data-nav="videos" type="button"><svg width="20" height="20"><use href="#i-results"/></svg><span data-i18n="nav.videos">Результаты</span><i class="dot" data-active-dot hidden></i></button>
+        <button class="side-nav__item" data-nav="tariffs" type="button"><svg width="20" height="20"><use href="#i-coins"/></svg><span data-i18n="nav.tariffs">Тарифы</span><b class="count" data-balance-count>0</b></button>
+        <button class="side-nav__item" data-nav="profile" type="button"><svg width="20" height="20"><use href="#i-user"/></svg><span data-i18n="nav.profile">Профиль</span></button>
+      </nav>
 
-    <main class="screens">
-      <!-- ============================================================ Монтаж -->
-      <section class="screen" data-screen="edit">
-        <div class="preview-wrap" id="preview-wrap">
-          <div class="preview" id="preview">
-            <div class="preview__bg"></div>
-            <button class="preview__play" id="preview-play" type="button" data-i18n-aria="preview.pause">
-              <svg viewBox="0 0 24 24" width="16" height="16" class="i-pause"><path d="M7 5h3v14H7zM14 5h3v14h-3z" fill="currentColor"/></svg>
-              <svg viewBox="0 0 24 24" width="16" height="16" class="i-play"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
-            </button>
-            <div class="preview__caption" id="preview-caption"></div>
-            <div class="preview__tag" id="preview-tag"></div>
-          </div>
-        </div>
+      <button class="grad-card" type="button" data-nav="tariffs">
+        <span class="grad-card__value"><b data-balance-value>0</b> <span data-balance-unit></span></span>
+        <span class="grad-card__action"><span data-i18n="cta.topup">Пополнить баланс</span><svg width="16" height="16"><use href="#i-arrow"/></svg></span>
+      </button>
 
-        <div class="section-head">
-          <h2 data-i18n="edit.style">Стиль субтитров</h2>
-          <span class="section-head__count" id="style-count"></span>
-        </div>
-        <div class="strip strip--styles">
-          <div class="strip__track" id="preset-tabs" role="radiogroup" data-i18n-aria="edit.style"></div>
-        </div>
-
-        <div class="section-head">
-          <h2 data-i18n="edit.font">Шрифт</h2>
-          <span class="section-head__count" id="font-count"></span>
-        </div>
-        <div class="strip">
-          <div class="strip__track" id="font-chips" role="radiogroup" data-i18n-aria="edit.font"></div>
-        </div>
-
-        <div class="section-head">
-          <h2 data-i18n="edit.color">Цвет выделения</h2>
-          <span class="section-head__count" id="accent-count"></span>
-        </div>
-        <div class="strip">
-          <div class="strip__track strip__track--swatches" id="accent-chips" role="radiogroup" data-i18n-aria="edit.color"></div>
-        </div>
-
-        <div class="section-head">
-          <h2 data-i18n="edit.video">Видео</h2>
-          <button class="link-hint" id="requirements" type="button">
-            <svg viewBox="0 0 24 24" width="15" height="15"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v6M12 7.5v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-            <span data-i18n="edit.requirements">Требования к видео</span>
-          </button>
-        </div>
-
-        <label class="dropzone" id="dropzone">
-          <input type="file" id="file-input" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi" hidden />
-          <span class="dropzone__thumb" id="drop-thumb" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="22" height="22"><rect x="3" y="6" width="18" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>
-          </span>
-          <div class="dropzone__text">
-            <strong id="drop-title" data-i18n="edit.upload">Загрузите видео</strong>
-            <span id="drop-sub">.mp4, .mov, .m4v, .webm, .mkv, .avi</span>
-          </div>
-          <span class="round-btn" id="drop-action" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="20" height="20" class="i-plus"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
-            <svg viewBox="0 0 24 24" width="18" height="18" class="i-close"><path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
-          </span>
-        </label>
-
-        <div class="section-head"><h2 data-i18n="edit.params">Параметры</h2></div>
-        <div class="card options">
-          <div class="toggle-row">
-            <span class="toggle-row__label" data-i18n="opt.cut">Нарезать видео</span>
-            <span class="badge-new">NEW</span>
-            <button class="help" type="button" data-help="cut">?</button>
-            <label class="switch"><input type="checkbox" data-option="cut" /><span></span></label>
-          </div>
-          <div class="toggle-row">
-            <span class="toggle-row__label" data-i18n="opt.sfx">Звуковые эффекты</span>
-            <button class="help" type="button" data-help="sfx">?</button>
-            <label class="switch"><input type="checkbox" data-option="sfx" /><span></span></label>
-          </div>
-          <div class="toggle-row">
-            <span class="toggle-row__label" data-i18n="opt.broll">Медиа-карточки</span>
-            <button class="help" type="button" data-help="broll">?</button>
-            <label class="switch"><input type="checkbox" data-option="broll" /><span></span></label>
-          </div>
-          <div class="toggle-row">
-            <span class="toggle-row__label" data-i18n="opt.camera">Движение камеры</span>
-            <button class="help" type="button" data-help="camera">?</button>
-            <label class="switch"><input type="checkbox" data-option="camera" /><span></span></label>
-          </div>
-        </div>
-
-        <button class="cta" id="cta" type="button">
-          <span class="cta__fill" id="cta-fill"></span>
-          <span class="cta__title" id="cta-title"></span>
-          <span class="cta__sub" id="cta-sub"></span>
+      <div class="side-user">
+        <button class="side-user__who" type="button" data-nav="profile">
+          <span class="avatar" data-avatar>?</span>
+          <span class="side-user__text"><b data-user-name>…</b><span class="muted" data-user-handle></span></span>
         </button>
-        <p class="balance-line"><span data-i18n="nav.balance">Баланс</span> <b id="balance-line">0</b></p>
-      </section>
+        <button class="icon-btn" type="button" data-theme-toggle data-i18n-aria="theme">
+          <svg width="18" height="18" class="i-sun"><use href="#i-sun"/></svg>
+          <svg width="18" height="18" class="i-moon"><use href="#i-moon"/></svg>
+        </button>
+      </div>
+    </aside>
 
-      <!-- ============================================================ Ролики -->
-      <section class="screen" data-screen="videos" hidden>
-        <div class="screen-title"><h1 data-i18n="nav.videos">Ролики</h1></div>
-        <div id="jobs" class="jobs"></div>
-      </section>
-
-      <!-- ============================================================ Баланс -->
-      <section class="screen" data-screen="balance" hidden>
-        <div class="screen-title"><h1 data-i18n="nav.balance">Баланс</h1></div>
-        <div class="card balance-card">
-          <span class="muted" data-i18n="balance.on">На балансе</span>
-          <div class="balance-card__value"><b id="balance-big">0</b> <span id="balance-unit"></span></div>
-          <span class="muted" id="balance-note"></span>
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn" id="back" type="button" data-i18n-aria="back" hidden><svg width="20" height="20"><use href="#i-back"/></svg></button>
+        <div class="topbar__title">
+          <h1 id="page-title">…</h1>
+          <span class="topbar__step" id="page-step" hidden></span>
         </div>
-        <div class="section-head"><h2 data-i18n="balance.topup">Пополнить звёздами</h2></div>
-        <div id="packages" class="packages"></div>
-      </section>
+        <div class="seg seg--sm lang-seg" data-lang-seg></div>
+        <button class="avatar avatar--btn" type="button" data-nav="profile" data-avatar data-i18n-aria="nav.profile">?</button>
+      </header>
 
-      <!-- ============================================================ Профиль -->
-      <section class="screen" data-screen="profile" hidden>
-        <div class="screen-title"><h1 data-i18n="nav.profile">Профиль</h1></div>
-        <div class="card profile-card">
-          <div class="avatar" id="avatar">?</div>
-          <div>
-            <div class="profile-card__name" id="profile-name">…</div>
-            <div class="muted" id="profile-username"></div>
+      <main class="screens">
+        <!-- ============================================================ Главная -->
+        <section class="screen" data-screen="home" hidden>
+          <button class="hero" type="button" data-nav="edit">
+            <span class="hero__text">
+              <b class="hero__title"><span data-i18n="home.new">Новый ролик</span><i class="grad-dot">.</i></b>
+              <span class="hero__sub" data-i18n="home.new_sub">Загрузите видео — смонтируем за пару минут</span>
+            </span>
+            <span class="round-btn round-btn--light"><svg width="22" height="22"><use href="#i-plus"/></svg></span>
+          </button>
+
+          <div class="row-head">
+            <h2 data-i18n="home.recent">Последнее</h2>
+            <button class="link-quiet" type="button" data-nav="videos" data-i18n="home.all">Все</button>
           </div>
-        </div>
-        <div class="stats">
-          <div class="card stat"><b id="stat-done">0</b><span class="muted" data-i18n="profile.done">смонтировано</span></div>
-          <div class="card stat"><b id="stat-balance">0</b><span class="muted" data-i18n="profile.balance">на балансе</span></div>
-        </div>
-        <div class="section-head"><h2 data-i18n="profile.language">Язык интерфейса</h2></div>
-        <div class="tabs" id="lang-tabs"></div>
-        <p class="muted profile-hint" id="profile-hint"></p>
-      </section>
-    </main>
+          <div class="list" id="home-recent"></div>
 
+          <button class="card list-row list-row--card" type="button" data-nav="invite" data-needs="referral">
+            <span class="tile"><svg width="20" height="20"><use href="#i-invite"/></svg></span>
+            <span class="list-row__text"><b data-i18n="home.invite">Пригласите друга</b><span class="muted" id="home-invite-sub"></span></span>
+            <svg width="18" height="18" class="chev"><use href="#i-chevron"/></svg>
+          </button>
+        </section>
+
+        <!-- ============================================================ Приглашения -->
+        <section class="screen" data-screen="invite" hidden>
+          <p class="lead" id="invite-lead"></p>
+
+          <div class="card pad">
+            <div class="label" data-i18n="invite.your_link">Ваша ссылка</div>
+            <div class="field">
+              <span class="field__value" id="invite-link">…</span>
+              <button class="icon-btn icon-btn--sm" type="button" id="invite-copy" data-i18n-aria="invite.copy"><svg width="17" height="17"><use href="#i-copy"/></svg></button>
+              <button class="icon-btn icon-btn--sm icon-btn--light" type="button" id="invite-share" data-i18n-aria="invite.share"><svg width="17" height="17"><use href="#i-share"/></svg></button>
+            </div>
+            <ol class="steps">
+              <li data-i18n="invite.step1">Друг открывает бота по вашей ссылке</li>
+              <li data-i18n="invite.step2">Покупает пакет роликов</li>
+              <li id="invite-step3"></li>
+            </ol>
+          </div>
+
+          <div class="card pad">
+            <div class="label" data-i18n="invite.all_time">За всё время</div>
+            <div class="stats3">
+              <div><b id="ref-invited">0</b><span><span data-i18n="invite.came">Пришли</span><em id="ref-invited-today">+0</em></span></div>
+              <div><b id="ref-paid">0</b><span><span data-i18n="invite.paid">Оплатили</span><em id="ref-paid-today">+0</em></span></div>
+              <div><b id="ref-earned">+0</b><span><span data-i18n="invite.earned">Роликов</span><em id="ref-earned-today">+0</em></span></div>
+            </div>
+            <p class="muted small" id="ref-credit" hidden></p>
+          </div>
+
+          <div class="seg seg--period" id="ref-period" role="radiogroup"></div>
+
+          <div class="card pad">
+            <h3 class="card-title" data-i18n="invite.friends">Приглашённые</h3>
+            <p class="muted small" id="ref-summary"></p>
+            <div class="list list--flush" id="ref-friends"></div>
+          </div>
+        </section>
+
+        <!-- ============================================================ Монтаж -->
+        <section class="screen" data-screen="edit" hidden>
+          <!-- Шаг 1: видео и нарезка -->
+          <div class="step" data-step="1">
+            <h2 class="step__title" data-i18n="edit.s1_title">Загрузите видео для ролика</h2>
+            <p class="lead" data-i18n="edit.s1_lead">Видео, где человек говорит в камеру. Соберём из него вертикальный ролик с субтитрами.</p>
+
+            <label class="dropzone" id="dropzone">
+              <input type="file" id="file-input" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi" hidden />
+              <span class="dropzone__empty">
+                <span class="orb"><svg width="26" height="26"><use href="#i-plus"/></svg></span>
+                <b data-i18n="cta.choose">Выбрать видео</b>
+                <span class="muted" id="drop-limits"></span>
+              </span>
+              <span class="dropzone__file">
+                <span class="dropzone__thumb" id="drop-thumb"><svg width="22" height="22"><use href="#i-film"/></svg></span>
+                <span class="dropzone__text"><b id="drop-title"></b><span class="muted" id="drop-sub"></span></span>
+                <span class="round-btn" id="drop-remove" data-i18n-aria="edit.remove"><svg width="18" height="18"><use href="#i-close"/></svg></span>
+              </span>
+            </label>
+
+            <div class="under-drop">
+              <button class="link-hint" id="requirements" type="button"><svg width="15" height="15"><use href="#i-info"/></svg><span data-i18n="edit.requirements">Требования к видео</span></button>
+              <button class="link-hint link-hint--strong" id="send-in-chat" type="button"><span data-i18n="edit.in_chat">Отправить в чат с ботом</span></button>
+            </div>
+
+            <div class="card pad">
+              <div class="card-head">
+                <svg width="18" height="18"><use href="#i-scissors"/></svg>
+                <h3 data-i18n="opt.cut">Нарезка</h3>
+                <button class="help" type="button" data-help="cut">?</button>
+              </div>
+              <div class="seg seg--wide" id="cut-seg" role="radiogroup"></div>
+              <p class="muted small" id="cut-hint"></p>
+            </div>
+
+            <button class="cta" id="next" type="button">
+              <span class="cta__title" data-i18n="edit.next">Далее: оформление</span>
+              <span class="cta__sub" id="next-sub"></span>
+            </button>
+          </div>
+
+          <!-- Шаг 2: оформление -->
+          <div class="step" data-step="2" hidden>
+            <div class="design">
+              <div class="design__stage">
+                <div class="preview-wrap" id="preview-wrap">
+                  <div class="preview" id="preview">
+                    <div class="preview__bg"></div>
+                    <button class="preview__play" id="preview-play" type="button" data-i18n-aria="preview.pause">
+                      <svg viewBox="0 0 24 24" width="16" height="16" class="i-pause"><path d="M7 5h3v14H7zM14 5h3v14h-3z" fill="currentColor"/></svg>
+                      <svg viewBox="0 0 24 24" width="16" height="16" class="i-play"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+                    </button>
+                    <div class="preview__caption" id="preview-caption"></div>
+                    <div class="preview__tag" id="preview-tag"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="design__controls">
+                <div class="section-head">
+                  <h2 data-i18n="edit.style">Стиль субтитров</h2>
+                  <span class="section-head__count" id="style-count"></span>
+                </div>
+                <div class="strip strip--styles">
+                  <div class="strip__track" id="preset-tabs" role="radiogroup" data-i18n-aria="edit.style"></div>
+                </div>
+
+                <div class="section-head">
+                  <h2 data-i18n="edit.font">Шрифт</h2>
+                  <span class="section-head__count" id="font-count"></span>
+                </div>
+                <div class="strip">
+                  <div class="strip__track" id="font-chips" role="radiogroup" data-i18n-aria="edit.font"></div>
+                </div>
+
+                <div class="section-head">
+                  <h2 data-i18n="edit.color">Цвет выделения</h2>
+                  <span class="section-head__count" id="accent-count"></span>
+                </div>
+                <div class="strip">
+                  <div class="strip__track strip__track--swatches" id="accent-chips" role="radiogroup" data-i18n-aria="edit.color"></div>
+                </div>
+
+                <div class="section-head"><h2 data-i18n="edit.effects">Эффекты</h2></div>
+                <div class="card options">
+                  <div class="toggle-row">
+                    <span class="toggle-row__label" data-i18n="opt.sfx">Звуковые эффекты</span>
+                    <button class="help" type="button" data-help="sfx">?</button>
+                    <label class="switch"><input type="checkbox" data-option="sfx" /><span></span></label>
+                  </div>
+                  <div class="toggle-row">
+                    <span class="toggle-row__label" data-i18n="opt.broll">Медиа-карточки</span>
+                    <button class="help" type="button" data-help="broll">?</button>
+                    <label class="switch"><input type="checkbox" data-option="broll" /><span></span></label>
+                  </div>
+                  <div class="toggle-row">
+                    <span class="toggle-row__label" data-i18n="opt.camera">Движение камеры</span>
+                    <button class="help" type="button" data-help="camera">?</button>
+                    <label class="switch"><input type="checkbox" data-option="camera" /><span></span></label>
+                  </div>
+                </div>
+
+                <button class="cta" id="cta" type="button">
+                  <span class="cta__fill" id="cta-fill"></span>
+                  <span class="cta__title" id="cta-title"></span>
+                  <span class="cta__sub" id="cta-sub"></span>
+                </button>
+                <button class="link-quiet link-quiet--center" type="button" id="to-step1" data-i18n="edit.back_to_video">← Вернуться к видео</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============================================================ Результаты -->
+        <section class="screen" data-screen="videos" hidden>
+          <div class="chips" id="jobs-filter" role="radiogroup"></div>
+          <p class="muted small" id="jobs-retention" hidden></p>
+          <div id="jobs" class="jobs"></div>
+        </section>
+
+        <!-- ============================================================ Тарифы -->
+        <section class="screen" data-screen="tariffs" hidden>
+          <div class="card pad balance-box">
+            <div class="balance-box__head">
+              <div class="label" data-i18n="tariffs.balance">Баланс</div>
+              <button class="link-hint" type="button" id="history-open"><svg width="15" height="15"><use href="#i-clock"/></svg><span data-i18n="tariffs.history">История</span></button>
+            </div>
+            <div class="balance-box__value"><b class="grad-text" data-balance-value>0</b> <span class="muted" data-balance-unit></span></div>
+            <p class="muted small" id="balance-note"></p>
+          </div>
+
+          <div class="label label--out" data-i18n="tariffs.package">Пакет</div>
+          <div class="card packages" id="packages" role="radiogroup"></div>
+
+          <div class="label label--out" data-i18n="tariffs.method">Способ оплаты</div>
+          <div class="card pay-method">
+            <span class="radio is-on"></span>
+            <span class="pay-method__name"><svg width="18" height="18" class="star"><use href="#i-star"/></svg>Telegram Stars</span>
+            <span class="muted" id="pay-method-price"></span>
+          </div>
+
+          <button class="cta" id="pay" type="button">
+            <span class="cta__title" id="pay-title"></span>
+            <span class="cta__sub" id="pay-sub"></span>
+          </button>
+        </section>
+
+        <!-- ============================================================ Профиль -->
+        <section class="screen" data-screen="profile" hidden>
+          <div class="card pad profile-card">
+            <div class="profile-card__who">
+              <span class="avatar avatar--lg" data-avatar>?</span>
+              <div><b class="profile-card__name" data-user-name>…</b><div class="muted" data-user-handle></div></div>
+            </div>
+            <div class="profile-stats">
+              <div><b id="stat-done">0</b><span class="muted" data-i18n="profile.done">смонтировано</span></div>
+              <div><b data-balance-value>0</b><span class="muted" data-i18n="profile.balance">на балансе</span></div>
+            </div>
+            <button class="cta cta--slim" type="button" data-nav="tariffs" id="profile-topup"><span class="cta__title" data-i18n="cta.topup">Пополнить баланс</span></button>
+          </div>
+
+          <div class="card list" data-needs="referral">
+            <button class="list-row" type="button" data-nav="invite">
+              <span class="tile tile--plain"><svg width="20" height="20"><use href="#i-invite"/></svg></span>
+              <span class="list-row__text"><b data-i18n="home.invite">Пригласите друга</b><span class="muted" id="profile-invite-sub"></span></span>
+              <svg width="18" height="18" class="chev"><use href="#i-chevron"/></svg>
+            </button>
+          </div>
+
+          <div class="card list">
+            <div class="list-row">
+              <span class="tile tile--plain"><svg width="20" height="20"><use href="#i-globe"/></svg></span>
+              <span class="list-row__text"><b data-i18n="profile.language">Язык</b></span>
+              <div class="seg seg--sm" data-lang-seg></div>
+            </div>
+            <div class="list-row">
+              <span class="tile tile--plain"><svg width="20" height="20"><use href="#i-moon"/></svg></span>
+              <span class="list-row__text"><b data-i18n="profile.theme">Тема</b></span>
+              <div class="seg seg--sm seg--icons" id="theme-seg"></div>
+            </div>
+            <button class="list-row" type="button" id="open-chat">
+              <span class="tile tile--plain"><svg width="20" height="20"><use href="#i-chat"/></svg></span>
+              <span class="list-row__text"><b data-i18n="profile.chat">Чат с ботом</b><span class="muted" id="profile-bot"></span></span>
+              <svg width="18" height="18" class="chev"><use href="#i-chevron"/></svg>
+            </button>
+          </div>
+          <p class="muted small profile-hint" id="profile-hint"></p>
+        </section>
+      </main>
+    </div>
+
+    <!-- ============================================================ нижняя панель (телефон) -->
     <nav class="tabbar">
-      <button class="tabbar__item" data-nav="invite" type="button">
-        <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="10" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 19c.8-3.3 3.3-5 6.5-5s5.7 1.7 6.5 5M19 8v6M16 11h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-        <span data-i18n="nav.invite">Пригласить</span>
-      </button>
-      <button class="tabbar__item" data-nav="videos" type="button">
-        <svg viewBox="0 0 24 24" width="22" height="22"><rect x="3.5" y="8" width="17" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M6 5h12M8.5 2.5h7M10.5 11.5v5l4-2.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <span data-i18n="nav.videos">Ролики</span>
-        <i class="dot" id="videos-dot" hidden></i>
-      </button>
+      <button class="tabbar__item" data-nav="home" type="button"><svg width="22" height="22"><use href="#i-home"/></svg><span data-i18n="nav.home">Главная</span></button>
+      <button class="tabbar__item" data-nav="videos" type="button"><svg width="22" height="22"><use href="#i-results"/></svg><span data-i18n="nav.videos">Результаты</span><i class="dot" data-active-dot hidden></i></button>
       <button class="tabbar__main" data-nav="edit" type="button" data-i18n-aria="nav.edit">
-        <span class="tabbar__orb">
-          <svg viewBox="0 0 24 24" width="28" height="28"><path d="M10 3.5 11.6 8.4 16.5 10l-4.9 1.6L10 16.5 8.4 11.6 3.5 10l4.9-1.6zM18 13l.9 2.1L21 16l-2.1.9L18 19l-.9-2.1L15 16l2.1-.9z" fill="currentColor"/></svg>
-        </span>
+        <span class="tabbar__orb"><svg width="28" height="28"><use href="#i-spark"/></svg></span>
         <span data-i18n="nav.edit">Монтаж</span>
       </button>
-      <button class="tabbar__item" data-nav="balance" type="button">
-        <svg viewBox="0 0 24 24" width="22" height="22"><ellipse cx="12" cy="6" rx="7" ry="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
-        <span data-i18n="nav.balance">Баланс</span>
-        <i class="count" id="nav-balance">0</i>
-      </button>
-      <button class="tabbar__item" data-nav="profile" type="button">
-        <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M4.5 20c1-3.6 3.9-5.5 7.5-5.5s6.5 1.9 7.5 5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-        <span data-i18n="nav.profile">Профиль</span>
-      </button>
+      <button class="tabbar__item" data-nav="tariffs" type="button"><svg width="22" height="22"><use href="#i-coins"/></svg><span data-i18n="nav.tariffs">Тарифы</span><b class="count" data-balance-count>0</b></button>
+      <button class="tabbar__item" data-nav="profile" type="button"><svg width="22" height="22"><use href="#i-user"/></svg><span data-i18n="nav.profile">Профиль</span></button>
     </nav>
+
+    <div class="sheet" id="sheet" hidden>
+      <div class="sheet__backdrop" data-sheet-close></div>
+      <div class="sheet__panel card" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+        <div class="sheet__head">
+          <h3 id="sheet-title"></h3>
+          <button class="icon-btn icon-btn--sm" type="button" data-sheet-close data-i18n-aria="close"><svg width="16" height="16"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="sheet__body" id="sheet-body"></div>
+      </div>
+    </div>
 
     <div class="toast" id="toast" hidden></div>
     <div class="blocker" id="blocker" hidden>

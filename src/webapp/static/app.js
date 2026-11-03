@@ -1,23 +1,38 @@
-/* Mini App. Без сборки и фреймворка: один экран, несколько вкладок, API на том же хосте. */
+/* Mini App. Без сборки и фреймворка: шесть экранов, история переходов, API на том же хосте. */
 "use strict";
 
 const tg = window.Telegram && window.Telegram.WebApp;
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
-// Тексты интерфейса. Язык приходит с сервера (`user.lang`) и меняется в профиле.
+// Тексты интерфейса. Язык приходит с сервера (`user.lang`) и меняется в шапке и в профиле.
 const I18N = {
   ru: {
-    theme: "Сменить тему", back: "Назад", forward: "Вперёд",
+    theme: "Сменить тему", back: "Назад", close: "Закрыть",
+    "nav.home": "Главная", "nav.invite": "Приглашения", "nav.edit": "Монтаж", "nav.videos": "Результаты",
+    "nav.tariffs": "Тарифы", "nav.profile": "Профиль", "nav.collapse": "Свернуть панель",
+    "title.invite": "Приглашайте друзей", "step": "Шаг {n} из 2",
+    "home.new": "Новый ролик", "home.new_sub": "Загрузите видео — смонтируем за пару минут",
+    "home.recent": "Последнее", "home.all": "Все", "home.invite": "Пригласите друга",
+    "home.invite_sub": "{p}% с каждой его покупки — вам на баланс",
+    "home.empty": "Роликов пока нет", "home.empty_sub": "Первый ролик появится здесь",
     "preview.pause": "Пауза", "preview.play": "Воспроизвести",
     "preview.s1": ["это", "пример", "субтитров", "в", "стиле"],
     "preview.s2": ["паузы", "уже", "вырезаны"],
     "preview.s3": ["и", "кадр", "по центру", "лица"],
-    "edit.style": "Стиль субтитров", "edit.font": "Шрифт", "edit.color": "Цвет выделения",
-    "edit.video": "Видео", "edit.requirements": "Требования к видео", "edit.upload": "Загрузите видео",
-    "edit.params": "Параметры", "edit.untitled": "Видео",
-    "opt.cut": "Нарезать видео", "opt.sfx": "Звуковые эффекты", "opt.broll": "Медиа-карточки", "opt.camera": "Движение камеры",
-    "help.cut": ["Нарезать видео", "Вырезаем затяжные паузы дольше 1.2 секунды и долгие «эээ». Обычные вдохи и слова-паразиты остаются — так речь звучит естественно."],
+    "edit.s1_title": "Загрузите видео для ролика",
+    "edit.s1_lead": "Видео, где человек говорит в камеру. Соберём из него вертикальный ролик с субтитрами.",
+    "edit.limits": "до {mb} МБ · от {min} с до {max} мин",
+    "edit.style": "Стиль субтитров", "edit.font": "Шрифт", "edit.color": "Цвет выделения", "edit.effects": "Эффекты",
+    "edit.requirements": "Требования к видео", "edit.in_chat": "Отправить в чат с ботом",
+    "edit.untitled": "Видео", "edit.remove": "Убрать видео",
+    "edit.next": "Далее: оформление", "edit.next_idle": "Сначала добавьте видео", "edit.next_ready": "стиль, шрифт и цвет субтитров",
+    "edit.back_to_video": "← Вернуться к видео",
+    "opt.cut": "Нарезка", "cut.on": "Вырезать паузы", "cut.off": "Без нарезки",
+    "cut.on_hint": "Уберём затяжные паузы и долгие «эээ» — ролик станет плотнее.",
+    "cut.off_hint": "Видео пойдёт целиком, как снято: только кадр 9:16 и субтитры.",
+    "opt.sfx": "Звуковые эффекты", "opt.broll": "Медиа-карточки", "opt.camera": "Движение камеры",
+    "help.cut": ["Нарезка", "Вырезаем затяжные паузы дольше 1.2 секунды и долгие «эээ». Обычные вдохи и слова-паразиты остаются — так речь звучит естественно."],
     "help.sfx": ["Звуковые эффекты", "Тихий щелчок на каждом субтитре, «whoosh» на появлении медиа-карточки и при смене крупности. Громкость голоса выравнивается в любом случае."],
     "help.broll": ["Медиа-карточки", "Картинки и короткие клипы по смыслу сказанного — не чаще одной на 8 секунд и никогда поверх субтитров."],
     "help.camera": ["Движение камеры", "На резах кадр чередует общий и крупный план, чтобы склейки читались как монтаж. Выключите — весь ролик пойдёт одним планом."],
@@ -33,40 +48,73 @@ const I18N = {
     "cta.free": "бесплатно для владельца", "cta.pick": "сначала выберите видео", "cta.charge": "спишется 1 ролик из {n}",
     "cta.uploading": "Загрузка {p}%", "cta.checking": "Проверяю видео…", "cta.keep_open": "не закрывайте приложение до конца загрузки",
     "upload.lost": "Связь оборвалась во время загрузки. Попробуйте ещё раз.",
-    "toast.accepted": "Видео принято. Готовый ролик придёт в чат, а прогресс — во вкладке «Ролики».",
+    "toast.accepted": "Видео принято. Готовый ролик придёт в чат, а прогресс — в «Результатах».",
     "err.title": "Не получилось",
-    "nav.invite": "Пригласить", "nav.videos": "Ролики", "nav.edit": "Монтаж", "nav.balance": "Баланс", "nav.profile": "Профиль",
-    "balance.unlimited": "без ограничений", "balance.on": "На балансе", "balance.topup": "Пополнить звёздами",
+    "balance.unlimited": "без ограничений",
     "balance.note": "Один ролик — один смонтированный видеофайл. Если монтаж не получится, ролик вернётся на баланс.",
     "balance.note_admin": "Вы владелец бота: монтаж бесплатный, баланс не списывается.",
     "status.queued": "в очереди", "status.running": "монтируется", "status.done": "готов", "status.failed": "не получилось", "status.cancelled": "отменён",
+    "jobs.all": "Все", "jobs.done": "Готовые", "jobs.active": "В работе",
     "jobs.empty": "Роликов пока нет", "jobs.empty_hint": "Загрузите видео — готовый ролик придёт в чат и появится здесь.",
+    "jobs.empty_filter": "Здесь пока пусто",
     "jobs.to_edit": "К монтажу", "jobs.reel": "Ролик", "jobs.refunded": "Ролик вернулся на баланс.",
     "jobs.purged": "Удалён с сервера по сроку хранения. В чате ролик остался.",
     "jobs.retention": "Готовые ролики хранятся на сервере {n} дн., в чате — всегда.",
     "jobs.send": "Прислать в чат", "jobs.sent": "Отправил в чат.", "jobs.not_sent": "Не отправилось",
-    "pkg.per": "{n} ⭐ за ролик", "pkg.try": "попробовать",
+    "tariffs.balance": "Баланс", "tariffs.history": "История", "tariffs.package": "Пакет", "tariffs.method": "Способ оплаты",
+    "pkg.per": "{n} ⭐ за ролик", "pkg.try": "попробовать", "pkg.popular": "популярный", "pkg.save": "выгода −{n}%",
+    "pay.button": "Оплатить {n} ⭐", "pay.sub": "{n} {w} на баланс",
     "pay.title": "Оплата", "pay.update": "Обновите Telegram — эта версия не умеет оплату звёздами.",
     "pay.failed": "Оплата не прошла", "pay.failed_text": "Звёзды не списаны. Попробуйте ещё раз.",
     "pay.crediting": "Оплачено. Зачисляю…", "pay.credited": "Зачислено: {n} {w}.", "pay.later": "Оплата прошла, баланс обновится через минуту.",
-    "profile.noname": "Без имени", "profile.done": "смонтировано", "profile.balance": "на балансе", "profile.language": "Язык интерфейса",
+    "history.title": "История", "history.empty": "Оплат пока не было",
+    "history.payment": "Покупка пакета", "history.bonus": "Бонус за друга",
+    "invite.lead": "За каждую оплату друга вам возвращается {p}% от купленных им роликов — прямо на баланс.",
+    "invite.your_link": "Ваша ссылка", "invite.copy": "Скопировать", "invite.share": "Поделиться",
+    "invite.copied": "Ссылка скопирована",
+    "invite.step1": "Друг открывает бота по вашей ссылке", "invite.step2": "Покупает пакет роликов",
+    "invite.step3": "Вам на баланс — {p}% от купленного",
+    "invite.all_time": "За всё время", "invite.came": "Пришли", "invite.paid": "Оплатили", "invite.earned": "Роликов",
+    "invite.today": "+{n} сегодня",
+    "invite.credit": "Накоплено {n} ролика — на баланс уйдёт целым роликом, как только наберётся.",
+    "invite.friends": "Приглашённые", "invite.summary": "{a} пришли · {b} оплатили · +{c} роликов",
+    "invite.none": "Пока никого", "invite.none_sub": "Поделитесь ссылкой — приглашённые появятся здесь.",
+    "invite.friend_paid": "оплатил", "invite.friend_waiting": "ещё не покупал", "invite.noname": "Без имени",
+    "period.7": "7 дней", "period.30": "30 дней", "period.0": "Всё время",
+    "invite.text": "Монтирую вертикальные ролики за пару минут: субтитры, паузы, кадр 9:16.",
+    "profile.noname": "Без имени", "profile.done": "смонтировано", "profile.balance": "на балансе",
+    "profile.language": "Язык", "profile.theme": "Тема", "profile.chat": "Чат с ботом",
     "profile.hint_admin": "Вы в списке владельцев: монтаж без списаний. Чтобы проверить оплату как обычный пользователь, уберите свой id из ADMIN_IDS.",
     "profile.hint": "Видео можно присылать и прямо в чат с ботом — стиль возьмётся последний выбранный здесь.",
-    "invite.text": "Монтирую вертикальные ролики за пару минут: субтитры, паузы, кадр 9:16.",
     "blocker.title": "Откройте из Telegram", "blocker.text": "Приложение работает внутри бота: нажмите кнопку «Монтаж» в чате.",
     "blocker.failed": "Не получилось открыть",
   },
   en: {
-    theme: "Toggle theme", back: "Back", forward: "Forward",
+    theme: "Toggle theme", back: "Back", close: "Close",
+    "nav.home": "Home", "nav.invite": "Invites", "nav.edit": "Editor", "nav.videos": "Results",
+    "nav.tariffs": "Pricing", "nav.profile": "Profile", "nav.collapse": "Collapse sidebar",
+    "title.invite": "Invite friends", "step": "Step {n} of 2",
+    "home.new": "New reel", "home.new_sub": "Upload a video — we'll edit it in a couple of minutes",
+    "home.recent": "Recent", "home.all": "All", "home.invite": "Invite a friend",
+    "home.invite_sub": "{p}% of every purchase they make goes to your balance",
+    "home.empty": "No videos yet", "home.empty_sub": "Your first reel will show up here",
     "preview.pause": "Pause", "preview.play": "Play",
     "preview.s1": ["this", "is", "captions", "in", "style"],
     "preview.s2": ["pauses", "are", "gone"],
     "preview.s3": ["and", "the frame", "follows", "the face"],
-    "edit.style": "Caption style", "edit.font": "Typeface", "edit.color": "Highlight colour",
-    "edit.video": "Video", "edit.requirements": "Video requirements", "edit.upload": "Upload a video",
-    "edit.params": "Settings", "edit.untitled": "Video",
-    "opt.cut": "Cut the video", "opt.sfx": "Sound effects", "opt.broll": "Media cards", "opt.camera": "Camera movement",
-    "help.cut": ["Cut the video", "We remove pauses longer than 1.2 seconds and long “umm”s. Normal breaths and filler words stay, so the speech sounds natural."],
+    "edit.s1_title": "Upload a video for your reel",
+    "edit.s1_lead": "A video of someone talking to the camera. We'll turn it into a vertical reel with captions.",
+    "edit.limits": "up to {mb} MB · {min} s to {max} min",
+    "edit.style": "Caption style", "edit.font": "Typeface", "edit.color": "Highlight colour", "edit.effects": "Effects",
+    "edit.requirements": "Video requirements", "edit.in_chat": "Send it in the bot chat",
+    "edit.untitled": "Video", "edit.remove": "Remove video",
+    "edit.next": "Next: design", "edit.next_idle": "Add a video first", "edit.next_ready": "caption style, typeface and colour",
+    "edit.back_to_video": "← Back to the video",
+    "opt.cut": "Cutting", "cut.on": "Cut pauses", "cut.off": "No cutting",
+    "cut.on_hint": "We'll remove long pauses and drawn-out “umm”s — the reel gets tighter.",
+    "cut.off_hint": "The video stays whole, as shot: just the 9:16 frame and captions.",
+    "opt.sfx": "Sound effects", "opt.broll": "Media cards", "opt.camera": "Camera movement",
+    "help.cut": ["Cutting", "We remove pauses longer than 1.2 seconds and long “umm”s. Normal breaths and filler words stay, so the speech sounds natural."],
     "help.sfx": ["Sound effects", "A quiet tick on every caption, a “whoosh” when a media card appears and when the shot size changes. Voice loudness is levelled either way."],
     "help.broll": ["Media cards", "Images and short clips that match what's being said — at most one per 8 seconds and never over the captions."],
     "help.camera": ["Camera movement", "At cuts the frame alternates between wide and close-up so the edits read as editing. Turn it off to keep one shot throughout."],
@@ -82,32 +130,52 @@ const I18N = {
     "cta.free": "free for the owner", "cta.pick": "pick a video first", "cta.charge": "uses 1 of your {n} videos",
     "cta.uploading": "Uploading {p}%", "cta.checking": "Checking the video…", "cta.keep_open": "keep the app open until the upload finishes",
     "upload.lost": "The connection dropped during upload. Please try again.",
-    "toast.accepted": "Video received. The finished reel will arrive in the chat; track progress in “Videos”.",
+    "toast.accepted": "Video received. The finished reel will arrive in the chat; track progress in “Results”.",
     "err.title": "Something went wrong",
-    "nav.invite": "Invite", "nav.videos": "Videos", "nav.edit": "Editor", "nav.balance": "Balance", "nav.profile": "Profile",
-    "balance.unlimited": "unlimited", "balance.on": "Your balance", "balance.topup": "Top up with Stars",
+    "balance.unlimited": "unlimited",
     "balance.note": "One video — one edited reel. If editing fails, the video goes back to your balance.",
     "balance.note_admin": "You own this bot: editing is free and your balance isn't used.",
     "status.queued": "queued", "status.running": "editing", "status.done": "ready", "status.failed": "failed", "status.cancelled": "cancelled",
+    "jobs.all": "All", "jobs.done": "Ready", "jobs.active": "In progress",
     "jobs.empty": "No videos yet", "jobs.empty_hint": "Upload a video — the finished reel will arrive in the chat and show up here.",
+    "jobs.empty_filter": "Nothing here yet",
     "jobs.to_edit": "Go to editor", "jobs.reel": "Reel", "jobs.refunded": "The video was returned to your balance.",
     "jobs.purged": "Removed from the server after the storage period. It's still in your chat.",
     "jobs.retention": "Finished videos stay on the server for {n} days and in your chat forever.",
     "jobs.send": "Send to chat", "jobs.sent": "Sent to the chat.", "jobs.not_sent": "Couldn't send",
-    "pkg.per": "{n} ⭐ per video", "pkg.try": "try it out",
+    "tariffs.balance": "Balance", "tariffs.history": "History", "tariffs.package": "Package", "tariffs.method": "Payment method",
+    "pkg.per": "{n} ⭐ per video", "pkg.try": "try it out", "pkg.popular": "popular", "pkg.save": "save {n}%",
+    "pay.button": "Pay {n} ⭐", "pay.sub": "{n} {w} to your balance",
     "pay.title": "Payment", "pay.update": "Please update Telegram — this version can't pay with Stars.",
     "pay.failed": "Payment failed", "pay.failed_text": "No Stars were charged. Please try again.",
     "pay.crediting": "Paid. Adding to your balance…", "pay.credited": "Added: {n} {w}.", "pay.later": "Payment received; your balance will update in a minute.",
-    "profile.noname": "No name", "profile.done": "edited", "profile.balance": "balance", "profile.language": "Interface language",
+    "history.title": "History", "history.empty": "No payments yet",
+    "history.payment": "Package purchase", "history.bonus": "Friend bonus",
+    "invite.lead": "Every time a friend pays, {p}% of the videos they bought comes back to you — straight to your balance.",
+    "invite.your_link": "Your link", "invite.copy": "Copy", "invite.share": "Share",
+    "invite.copied": "Link copied",
+    "invite.step1": "A friend opens the bot with your link", "invite.step2": "They buy a video package",
+    "invite.step3": "You get {p}% of it on your balance",
+    "invite.all_time": "All time", "invite.came": "Joined", "invite.paid": "Paid", "invite.earned": "Videos",
+    "invite.today": "+{n} today",
+    "invite.credit": "{n} of a video saved up — it moves to your balance as a whole video once it adds up.",
+    "invite.friends": "Invited", "invite.summary": "{a} joined · {b} paid · +{c} videos",
+    "invite.none": "Nobody yet", "invite.none_sub": "Share your link — invited friends will show up here.",
+    "invite.friend_paid": "paid", "invite.friend_waiting": "hasn't bought yet", "invite.noname": "No name",
+    "period.7": "7 days", "period.30": "30 days", "period.0": "All time",
+    "invite.text": "I turn talking-head videos into vertical reels in a couple of minutes: captions, pauses cut, 9:16 frame.",
+    "profile.noname": "No name", "profile.done": "edited", "profile.balance": "balance",
+    "profile.language": "Language", "profile.theme": "Theme", "profile.chat": "Bot chat",
     "profile.hint_admin": "You're on the owners list: editing is free. To test payments as a regular user, remove your id from ADMIN_IDS.",
     "profile.hint": "You can also send videos straight to the bot chat — it will use the style you last picked here.",
-    "invite.text": "I turn talking-head videos into vertical reels in a couple of minutes: captions, pauses cut, 9:16 frame.",
     "blocker.title": "Open from Telegram", "blocker.text": "This app runs inside the bot: tap the “Editor” button in the chat.",
     "blocker.failed": "Couldn't open the app",
   },
 };
 
-const LANG_NAMES = { ru: "Русский", en: "English" };
+const SCREENS = ["home", "invite", "edit", "videos", "tariffs", "profile"];
+// Старые имена вкладок: бот присылает кнопки с `?screen=balance`.
+const SCREEN_ALIASES = { balance: "tariffs" };
 
 function currentLang() {
   if (state.boot && state.boot.user && I18N[state.boot.user.lang]) return state.boot.user.lang;
@@ -137,11 +205,17 @@ const state = {
   font: "theme",
   options: {},
   file: null,
-  fileInfo: "",
   busy: false,
   jobs: [],
+  jobsLoaded: false,
+  jobsFilter: "all",
   pollTimer: null,
-  screen: "edit",
+  screen: null,
+  history: [],
+  step: 1,
+  pkg: null,
+  refDays: 30,
+  refs: null,
 };
 
 // ------------------------------------------------------------------ сеть
@@ -176,6 +250,28 @@ const videosWord = (n) => (currentLang() === "en"
   ? (Math.abs(n) === 1 ? "video" : "videos")
   : plural(n, "ролик", "ролика", "роликов"));
 
+// Сотые ролика → «0,5» / «0.5». Бонус за друга копится дробью: 10 % от пакета
+// в 5 роликов — половина ролика.
+function fmtShare(hundredths) {
+  const n = (hundredths || 0) / 100;
+  const text = Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, "");
+  return currentLang() === "ru" ? text.replace(".", ",") : text;
+}
+
+function locale() { return currentLang() === "en" ? "en-GB" : "ru-RU"; }
+function fmtWhen(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) {
+    return d.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
+  }
+  return d.toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+function fmtDate(iso) {
+  return iso ? new Date(iso).toLocaleDateString(locale(), { day: "numeric", month: "short" }) : "";
+}
+
 function haptic(kind = "selection") {
   if (!tg || !tg.HapticFeedback) return;
   try {
@@ -186,11 +282,11 @@ function haptic(kind = "selection") {
 
 let toastTimer = null;
 function toast(text) {
-  const el = $("#toast");
-  el.textContent = text;
-  el.hidden = false;
+  const node = $("#toast");
+  node.textContent = text;
+  node.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 3200);
+  toastTimer = setTimeout(() => { node.hidden = true; }, 3200);
 }
 
 function popup(title, message) {
@@ -210,6 +306,19 @@ function el(tag, attrs = {}, children = []) {
   }
   for (const c of [].concat(children)) if (c) node.append(c);
   return node;
+}
+
+// Значок из спрайта в index.html.
+function icon(name, size = 20, cls) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  if (cls) svg.setAttribute("class", cls);
+  const use = document.createElementNS(ns, "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.append(use);
+  return svg;
 }
 
 // «#0B0F14» → «11, 15, 20»: плашка превью красится той же непрозрачностью, что
@@ -232,6 +341,11 @@ function fmtDuration(sec) {
   return m ? `${m}:${String(s).padStart(2, "0")}` : `${s} ${tr("dur.s")}`;
 }
 
+function openTelegram(url) {
+  if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
+  else window.open(url, "_blank");
+}
+
 // ------------------------------------------------------------------ тема
 
 const THEME_KEY = "reel-theme";
@@ -241,18 +355,34 @@ function applyTheme(theme) {
   if (tg) {
     try { tg.setHeaderColor(bg); tg.setBackgroundColor(bg); tg.setBottomBarColor && tg.setBottomBarColor(bg); } catch (_) { /* старый клиент */ }
   }
+  renderThemeSeg();
+}
+function setTheme(theme) {
+  try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* не критично */ }
+  applyTheme(theme);
+  haptic();
 }
 function initTheme() {
   let saved = null;
   try { saved = localStorage.getItem(THEME_KEY); } catch (_) { /* приватный режим */ }
-  const initial = saved || (tg && tg.colorScheme === "dark" ? "dark" : "light");
+  // Тёмная — основа: приложение про видео, и так его рисует образец. Светлая —
+  // если человек выбрал её сам или так настроен его Telegram.
+  const initial = saved || (tg && tg.colorScheme === "light" ? "light" : "dark");
   applyTheme(initial);
-  $("#theme-toggle").addEventListener("click", () => {
-    const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-    try { localStorage.setItem(THEME_KEY, next); } catch (_) { /* не критично */ }
-    applyTheme(next);
-    haptic();
-  });
+  for (const btn of $$("[data-theme-toggle]")) {
+    btn.addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+  }
+}
+function renderThemeSeg() {
+  const box = $("#theme-seg");
+  if (!box) return;
+  const now = document.documentElement.dataset.theme;
+  box.replaceChildren(...[["light", "sun"], ["dark", "moon"]].map(([key, ico]) =>
+    el("button", {
+      type: "button", class: key === now ? "is-active" : "", "aria-label": key,
+      "aria-pressed": key === now ? "true" : "false",
+      onclick: () => setTheme(key),
+    }, [icon(ico, 16)])));
 }
 
 // ------------------------------------------------------------------ превью субтитров
@@ -436,7 +566,16 @@ const preview = {
   },
 };
 
-// ------------------------------------------------------------------ экран «Монтаж»
+// Превью живёт только на втором шаге монтажа. У спрятанного `display:none`
+// высота равна нулю, масштаб уходил на запасные 620, и на возврате кадр на
+// четверть секунды показывал субтитр в полтора раза крупнее, с неужатыми
+// строками. Заодно это 3.6 перерисовки в секунду, которые шли бы вечно.
+function syncPreview() {
+  if (state.screen === "edit" && state.step === 2 && !document.hidden) preview.start();
+  else preview.stop();
+}
+
+// ------------------------------------------------------------------ экран «Монтаж», шаг 2
 
 // Лента перерисовывается целиком, поэтому к активному элементу прокручиваемся
 // уже ПОСЛЕ замены: старый узел к этому моменту не в документе.
@@ -446,7 +585,7 @@ const preview = {
 // касания.
 function scrollToActive(box, behavior = "smooth") {
   const active = box.querySelector(".is-active");
-  if (!active) return;
+  if (!active || box.scrollWidth <= box.clientWidth) return;
   const a = active.getBoundingClientRect();
   const b = box.getBoundingClientRect();
   // `behavior` — перечисление WebIDL: клиент, который не знает значения
@@ -470,7 +609,7 @@ function fitCardNames() {
     name.style.fontSize = "";
     const over = name.scrollWidth / name.clientWidth;
     if (name.clientWidth > 0 && over > 1) {
-      name.style.fontSize = `${Math.max(11, Math.floor(18 / over))}px`;
+      name.style.fontSize = `${Math.max(9, Math.floor(18 / over))}px`;
     }
   }
 }
@@ -511,7 +650,7 @@ function renderPresets() {
 }
 
 function renderAccents() {
-  const p = state.boot.presets.find((x) => x.name === state.preset);
+  const p = activePreset();
   const box = $("#accent-chips");
   $("#accent-count").textContent = state.boot.accents.length;
   box.replaceChildren(...state.boot.accents.map((a) =>
@@ -563,16 +702,40 @@ function renderFonts() {
 
 function renderOptions() {
   for (const input of $$("[data-option]")) input.checked = !!state.options[input.dataset.option];
+  renderCut();
+}
+
+// ------------------------------------------------------------------ экран «Монтаж», шаг 1
+
+// Нарезка — выбор из двух, а не тумблер: на образце это режимы, и «без
+// нарезки» читается как осознанный выбор, а не забытая галочка. Третьего
+// режима нет, пока пайплайн его не умеет (`core.options`).
+function renderCut() {
+  const box = $("#cut-seg");
+  const on = !!state.options.cut;
+  box.replaceChildren(...[[true, "cut.on"], [false, "cut.off"]].map(([value, key]) =>
+    el("button", {
+      type: "button", role: "radio", class: value === on ? "is-active" : "",
+      "aria-checked": value === on ? "true" : "false", text: tr(key),
+      onclick: () => { state.options.cut = value; haptic(); renderCut(); },
+    })));
+  $("#cut-hint").textContent = tr(on ? "cut.on_hint" : "cut.off_hint");
+}
+
+function renderLimits() {
+  const l = state.boot.limits;
+  $("#drop-limits").textContent = tr("edit.limits", { mb: l.max_upload_mb, min: l.min_seconds, max: l.max_minutes });
 }
 
 function setFile(file) {
   state.file = file;
   const zone = $("#dropzone");
+  const thumb = $("#drop-thumb");
   zone.classList.toggle("has-file", !!file);
-  $("#drop-thumb").style.backgroundImage = "";
+  thumb.style.backgroundImage = "";
+  thumb.classList.remove("has-image");
+  renderNext();
   if (!file) {
-    $("#drop-title").textContent = tr("edit.upload");
-    $("#drop-sub").textContent = ".mp4, .mov, .m4v, .webm, .mkv, .avi";
     $("#file-input").value = "";
     renderCta();
     return;
@@ -615,11 +778,12 @@ function setFile(file) {
       const side = Math.min(probe.videoWidth, probe.videoHeight);
       if (side && state.file === file) {
         const c = document.createElement("canvas");
-        c.width = c.height = 108;
+        c.width = c.height = 128;
         c.getContext("2d").drawImage(
-          probe, (probe.videoWidth - side) / 2, (probe.videoHeight - side) / 2, side, side, 0, 0, 108, 108,
+          probe, (probe.videoWidth - side) / 2, (probe.videoHeight - side) / 2, side, side, 0, 0, 128, 128,
         );
-        $("#drop-thumb").style.backgroundImage = `url(${c.toDataURL("image/jpeg", 0.72)})`;
+        thumb.style.backgroundImage = `url(${c.toDataURL("image/jpeg", 0.72)})`;
+        thumb.classList.add("has-image");
       }
     } catch (_) { /* кодек не отдаёт кадр в canvas — остаётся иконка */ }
     done();
@@ -627,6 +791,33 @@ function setFile(file) {
   probe.onerror = done;
   probe.src = url;
   renderCta();
+}
+
+function renderNext() {
+  const btn = $("#next");
+  btn.classList.toggle("is-idle", !state.file);
+  $("#next-sub").textContent = tr(state.file ? "edit.next_ready" : "edit.next_idle");
+}
+
+function setStep(step) {
+  state.step = step;
+  for (const s of $$("[data-step]")) s.hidden = Number(s.dataset.step) !== step;
+  window.scrollTo({ top: 0 });
+  renderHeader();
+  syncBackButton();
+  syncPreview();
+  if (step === 2) {
+    // Ленты меряются только видимыми: на скрытом шаге ширина нулевая. А шрифты
+    // плиток браузер начинает тянуть, только когда шаг стал видимым, — первый
+    // замер идёт по подставному шрифту, поэтому второй ждёт их загрузки.
+    const fit = () => {
+      fitCardNames();
+      for (const id of ["#preset-tabs", "#font-chips", "#accent-chips"]) scrollToActive($(id), "instant");
+      preview.render();
+    };
+    fit();
+    if (document.fonts && document.fonts.ready) requestAnimationFrame(() => document.fonts.ready.then(fit));
+  }
 }
 
 function initEdit() {
@@ -640,14 +831,18 @@ function initEdit() {
       tr("req.orientation"),
     ].join("\n"));
   });
+  $("#send-in-chat").addEventListener("click", () => {
+    haptic();
+    openTelegram(`https://t.me/${state.boot.bot_username}`);
+  });
 
   const input = $("#file-input");
   input.addEventListener("change", () => setFile(input.files[0] || null));
   const zone = $("#dropzone");
   zone.addEventListener("click", (ev) => {
-    if (state.file && ev.target.closest("#drop-action")) {
+    if (state.file && ev.target.closest("#drop-remove")) {
       ev.preventDefault();
-      if (!state.busy) setFile(null);
+      if (!state.busy) { setFile(null); haptic(); }
     } else if (state.busy) {
       ev.preventDefault();
     }
@@ -661,27 +856,19 @@ function initEdit() {
     if (f && !state.busy) setFile(f);
   });
 
-  for (const input of $$("[data-option]")) {
-    input.addEventListener("change", () => { state.options[input.dataset.option] = input.checked; haptic(); });
+  for (const box of $$("[data-option]")) {
+    box.addEventListener("change", () => { state.options[box.dataset.option] = box.checked; haptic(); });
   }
   for (const btn of $$("[data-help]")) {
     btn.addEventListener("click", () => popup(...tr(`help.${btn.dataset.help}`)));
   }
+  $("#next").addEventListener("click", () => {
+    if (!state.file) { haptic("warning"); $("#file-input").click(); return; }
+    haptic();
+    setStep(2);
+  });
+  $("#to-step1").addEventListener("click", () => { haptic(); setStep(1); });
   $("#cta").addEventListener("click", onCta);
-}
-
-function renderBalance() {
-  const u = state.boot.user;
-  const n = u.balance;
-  $("#balance-value").textContent = u.is_admin ? "∞" : n;
-  $("#nav-balance").textContent = u.is_admin ? "∞" : n;
-  $("#balance-line").textContent = u.is_admin ? tr("balance.unlimited") : `${n} ${videosWord(n)}`;
-  $("#balance-big").textContent = u.is_admin ? "∞" : n;
-  $("#balance-unit").textContent = u.is_admin ? "" : videosWord(n);
-  $("#balance-note").textContent = tr(u.is_admin ? "balance.note_admin" : "balance.note");
-  $("#stat-balance").textContent = u.is_admin ? "∞" : n;
-  $("#stat-done").textContent = u.videos_done;
-  renderCta();
 }
 
 function renderCta(progressText, share) {
@@ -703,8 +890,7 @@ function renderCta(progressText, share) {
     sub.textContent = tr("cta.missing");
   } else {
     // Пока файла нет, нажатие открывает выбор файла, а не запускает монтаж —
-    // так кнопка и должна называться. Причина жила в подписи 12-м кеглем, а
-    // заголовок обещал другое.
+    // так кнопка и должна называться.
     title.textContent = tr(state.file ? "cta.edit" : "cta.choose");
     sub.textContent = u.is_admin
       ? tr(state.file ? "cta.free" : "cta.pick")
@@ -715,7 +901,7 @@ function renderCta(progressText, share) {
 async function onCta() {
   if (state.busy) return;
   const u = state.boot.user;
-  if (!u.is_admin && u.balance < 1) { go("balance"); return; }
+  if (!u.is_admin && u.balance < 1) { go("tariffs"); return; }
   if (!state.file) { haptic("warning"); $("#file-input").click(); return; }
 
   state.busy = true;
@@ -723,13 +909,16 @@ async function onCta() {
     const job = await uploadAndStart(state.file);
     haptic("success");
     setFile(null);
+    state.step = 1;
+    for (const s of $$("[data-step]")) s.hidden = Number(s.dataset.step) !== 1;
     await refreshBoot();
     toast(tr("toast.accepted"));
     state.jobs = [job, ...state.jobs.filter((j) => j.id !== job.id)];
-    go("videos");
+    state.jobsLoaded = true;
+    go("videos", { replace: true });
   } catch (e) {
     haptic("error");
-    if (e.status === 402) { await refreshBoot(); go("balance"); }
+    if (e.status === 402) { await refreshBoot(); go("tariffs"); }
     popup(tr("err.title"), e.message);
   } finally {
     state.busy = false;
@@ -770,31 +959,86 @@ async function uploadAndStart(file) {
   return res.job;
 }
 
-// ------------------------------------------------------------------ экран «Ролики»
+// ------------------------------------------------------------------ «Главная»
+
+function jobTitle(j) {
+  return j.result_duration ? `${tr("jobs.reel")} · ${fmtDuration(j.result_duration)}` : tr("jobs.reel");
+}
+
+function renderHome() {
+  const box = $("#home-recent");
+  if (!state.jobsLoaded) {
+    box.replaceChildren(el("div", { class: "skeleton" }));
+    return;
+  }
+  const recent = state.jobs.slice(0, 3);
+  if (!recent.length) {
+    box.replaceChildren(el("button", { class: "card list-row", type: "button", onclick: () => go("edit") }, [
+      el("span", { class: "thumb" }, [icon("film", 20)]),
+      el("span", { class: "list-row__text" }, [el("b", { text: tr("home.empty") }), el("span", { class: "muted", text: tr("home.empty_sub") })]),
+      icon("chevron", 18, "chev"),
+    ]));
+    return;
+  }
+  box.replaceChildren(...recent.map((j) => {
+    const active = j.status === "queued" || j.status === "running";
+    const sub = active
+      ? `${tr(`status.${j.status}`)} · ${Math.round((j.progress || 0) * 100)}%`
+      : [j.status === "done" ? null : tr(`status.${j.status}`), fmtWhen(j.created_at)].filter(Boolean).join(" · ");
+    return el("button", { class: "card list-row", type: "button", onclick: () => go("videos") }, [
+      el("span", { class: "thumb" }, [icon(active ? "clock" : "film", 20)]),
+      el("span", { class: "list-row__text" }, [el("b", { text: jobTitle(j) }), el("span", { class: "muted", text: sub })]),
+      icon("chevron", 18, "chev"),
+    ]);
+  }));
+}
+
+// ------------------------------------------------------------------ «Результаты»
+
+const JOB_FILTERS = {
+  all: () => true,
+  done: (j) => j.status === "done",
+  active: (j) => j.status === "queued" || j.status === "running",
+};
+
+function renderJobFilter() {
+  $("#jobs-filter").replaceChildren(...Object.keys(JOB_FILTERS).map((key) => {
+    const n = state.jobs.filter(JOB_FILTERS[key]).length;
+    return el("button", {
+      type: "button", role: "radio", class: key === state.jobsFilter ? "is-active" : "",
+      "aria-checked": key === state.jobsFilter ? "true" : "false",
+      onclick: () => { state.jobsFilter = key; haptic(); renderJobs(); },
+    }, [tr(`jobs.${key}`), state.jobsLoaded && n ? el("b", { text: String(n) }) : null]);
+  }));
+}
 
 function renderJobs() {
   const box = $("#jobs");
-  const active = state.jobs.some((j) => j.status === "queued" || j.status === "running");
-  $("#videos-dot").hidden = !active;
-  if (!state.jobs.length) {
+  renderJobFilter();
+  const retention = $("#jobs-retention");
+  retention.hidden = !(state.boot.retention_days > 0 && state.jobs.length);
+  retention.textContent = tr("jobs.retention", { n: state.boot.retention_days });
+  if (!state.jobsLoaded) {
+    box.replaceChildren(...[0, 1, 2].map(() => el("div", { class: "skeleton" })));
+    return;
+  }
+  const jobs = state.jobs.filter(JOB_FILTERS[state.jobsFilter]);
+  if (!jobs.length) {
+    const none = !state.jobs.length;
     box.replaceChildren(el("div", { class: "card empty" }, [
-      el("b", { text: tr("jobs.empty") }),
-      el("p", { class: "muted", text: tr("jobs.empty_hint") }),
+      el("b", { text: tr(none ? "jobs.empty" : "jobs.empty_filter") }),
+      none ? el("p", { class: "muted", text: tr("jobs.empty_hint") }) : null,
       el("button", { class: "btn-soft", type: "button", text: tr("jobs.to_edit"), onclick: () => go("edit") }),
     ]));
     return;
   }
   const presets = Object.fromEntries(state.boot.presets.map((p) => [p.name, p.title]));
-  const retention = state.boot.retention_days > 0
-    ? [el("p", { class: "muted jobs__hint", text: tr("jobs.retention", { n: state.boot.retention_days }) })]
-    : [];
-  box.replaceChildren(...retention, ...state.jobs.map((j) => {
-    const date = j.created_at ? new Date(j.created_at).toLocaleString(currentLang() === "en" ? "en-GB" : "ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+  box.replaceChildren(...jobs.map((j) => {
     const accent = state.boot.accents.find((a) => a.key === (j.options && j.options.accent));
-    const meta = [presets[j.preset] || j.preset, accent && accent.key !== "theme" ? accent.title : null, date].filter(Boolean).join(" · ");
+    const meta = [presets[j.preset] || j.preset, accent && accent.key !== "theme" ? accent.title : null, fmtWhen(j.created_at)].filter(Boolean).join(" · ");
     const parts = [
       el("div", { class: "job__head" }, [
-        el("div", {}, [el("div", { class: "job__title", text: j.result_duration ? `${tr("jobs.reel")} · ${fmtDuration(j.result_duration)}` : tr("jobs.reel") }), el("div", { class: "muted", text: meta })]),
+        el("div", {}, [el("div", { class: "job__title", text: jobTitle(j) }), el("div", { class: "muted", text: meta })]),
         el("span", { class: `status status--${j.status}`, text: tr(`status.${j.status}`) }),
       ]),
     ];
@@ -826,16 +1070,27 @@ function renderJobs() {
   }));
 }
 
+function renderActivity() {
+  const active = state.jobs.some((j) => j.status === "queued" || j.status === "running");
+  for (const dot of $$("[data-active-dot]")) dot.hidden = !active;
+}
+
 async function loadJobs() {
   try {
     const data = await api("/api/jobs");
-    const before = JSON.stringify(state.jobs.map((j) => [j.id, j.status, j.progress, j.stage]));
+    const sig = (list) => JSON.stringify(list.map((j) => [j.id, j.status, j.progress, j.stage]));
+    const changed = !state.jobsLoaded || sig(data.jobs) !== sig(state.jobs);
     state.jobs = data.jobs;
+    state.jobsLoaded = true;
     state.boot.user.balance = data.balance;
     renderBalance();
+    renderActivity();
     // Перерисовываем только при изменениях: иначе плеер готового ролика
     // сбрасывался бы каждые три секунды посреди просмотра.
-    if (JSON.stringify(state.jobs.map((j) => [j.id, j.status, j.progress, j.stage])) !== before) renderJobs();
+    if (changed) {
+      if (state.screen === "videos") renderJobs();
+      if (state.screen === "home") renderHome();
+    }
   } catch (e) {
     if (state.screen === "videos") toast(e.message);
   }
@@ -845,24 +1100,55 @@ async function loadJobs() {
 function schedulePoll() {
   clearTimeout(state.pollTimer);
   const active = state.jobs.some((j) => j.status === "queued" || j.status === "running");
-  $("#videos-dot").hidden = !active;
   if (active) state.pollTimer = setTimeout(loadJobs, 3000);
 }
 
-// ------------------------------------------------------------------ экран «Баланс»
+// ------------------------------------------------------------------ «Тарифы»
 
-function renderPackages() {
-  const box = $("#packages");
-  box.replaceChildren(...state.boot.packages.map((p) => {
-    const per = Math.round(p.stars / p.videos);
-    return el("button", { class: "card package", type: "button", onclick: () => buy(p.videos) }, [
-      el("div", { class: "package__main" }, [
-        el("b", { text: `${p.videos} ${videosWord(p.videos)}` }),
-        el("span", { class: "muted", text: p.videos > 1 ? tr("pkg.per", { n: per }) : tr("pkg.try") }),
+function packageFacts() {
+  const list = state.boot.packages || [];
+  const base = list.length ? list[0].stars / list[0].videos : 0;
+  // «Популярный» — средний пакет, когда их хотя бы три: самый частый выбор
+  // между «попробовать» и «оптом». Метка — подсказка, а не продажа: выгода
+  // пишется честным процентом от цены одиночного ролика.
+  const popular = list.length >= 3 ? Math.floor((list.length - 1) / 2) : -1;
+  return list.map((p, i) => ({
+    ...p,
+    popular: i === popular,
+    per: Math.round(p.stars / p.videos),
+    save: base ? Math.round((1 - p.stars / p.videos / base) * 100) : 0,
+  }));
+}
+
+function renderTariffs() {
+  const facts = packageFacts();
+  if (state.pkg === null || !facts.some((p) => p.videos === state.pkg)) {
+    const pop = facts.find((p) => p.popular) || facts[0];
+    state.pkg = pop ? pop.videos : null;
+  }
+  $("#packages").replaceChildren(...facts.map((p) => {
+    const on = p.videos === state.pkg;
+    return el("button", {
+      class: "package", type: "button", role: "radio", "aria-checked": on ? "true" : "false",
+      onclick: () => { state.pkg = p.videos; haptic(); renderTariffs(); },
+    }, [
+      el("span", { class: `radio${on ? " is-on" : ""}` }),
+      el("span", { class: "package__main" }, [
+        p.popular ? el("span", { class: "badge", text: tr("pkg.popular") }) : null,
+        el("span", { class: "package__amount" }, [el("b", { text: String(p.videos) }), el("span", { class: "muted", text: videosWord(p.videos) })]),
+        el("span", { class: "muted", text: p.videos > 1 ? tr("pkg.per", { n: p.per }) : tr("pkg.try") }),
       ]),
-      el("span", { class: "package__price", text: `${p.stars} ⭐` }),
+      el("span", { class: "package__price" }, [
+        el("b", { text: `${p.stars} ⭐` }),
+        p.save > 0 ? el("span", { class: "package__save", text: tr("pkg.save", { n: p.save }) }) : null,
+      ]),
     ]);
   }));
+  const chosen = facts.find((p) => p.videos === state.pkg);
+  $("#pay-method-price").textContent = chosen ? `${chosen.stars} ⭐` : "";
+  $("#pay-title").textContent = chosen ? tr("pay.button", { n: chosen.stars }) : "";
+  $("#pay-sub").textContent = chosen ? tr("pay.sub", { n: chosen.videos, w: videosWord(chosen.videos) }) : "";
+  $("#pay").hidden = !chosen;
 }
 
 async function buy(videos) {
@@ -894,28 +1180,197 @@ async function buy(videos) {
   });
 }
 
-// ------------------------------------------------------------------ профиль и приглашение
+// ------------------------------------------------------------------ лист снизу
+
+let sheetReturnFocus = null;
+function openSheet(title, body) {
+  sheetReturnFocus = document.activeElement;
+  $("#sheet-title").textContent = title;
+  $("#sheet-body").replaceChildren(...[].concat(body));
+  $("#sheet").hidden = false;
+  syncBackButton();
+  const close = $("#sheet [data-sheet-close].icon-btn");
+  if (close) close.focus();
+}
+function closeSheet() {
+  if ($("#sheet").hidden) return false;
+  $("#sheet").hidden = true;
+  syncBackButton();
+  if (sheetReturnFocus && sheetReturnFocus.focus) sheetReturnFocus.focus();
+  return true;
+}
+
+async function openHistory() {
+  haptic();
+  openSheet(tr("history.title"), el("div", { class: "skeleton" }));
+  let items;
+  try {
+    items = (await api("/api/payments")).items;
+  } catch (e) {
+    $("#sheet-body").replaceChildren(el("p", { class: "muted", text: e.message }));
+    return;
+  }
+  if (!items.length) {
+    $("#sheet-body").replaceChildren(el("p", { class: "muted empty-line", text: tr("history.empty") }));
+    return;
+  }
+  $("#sheet-body").replaceChildren(...items.map((it) => {
+    const bonus = it.kind === "bonus";
+    return el("div", { class: "history-row" }, [
+      el("span", { class: "tile" }, [icon(bonus ? "invite" : "star", 18, bonus ? null : "star")]),
+      el("span", { class: "list-row__text" }, [
+        el("b", { text: tr(bonus ? "history.bonus" : "history.payment") }),
+        el("span", { class: "muted", text: fmtWhen(it.at) }),
+      ]),
+      el("span", { class: "list-row__end" }, [
+        el("b", { class: "pos", text: bonus ? `+${fmtShare(it.share)}` : `+${it.videos}` }),
+        el("span", { class: "muted", text: bonus ? videosWord(2) : `${it.stars} ⭐` }),
+      ]),
+    ]);
+  }));
+}
+
+// ------------------------------------------------------------------ «Приглашения»
+
+function referralLink() {
+  const r = state.boot.referral;
+  return r ? `https://t.me/${state.boot.bot_username}?start=${r.code}` : "";
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) {
+    // WebView Telegram на части клиентов не пускает в буфер обмена через
+    // Clipboard API — старый путь через выделение работает почти везде.
+    const area = el("textarea", { style: "position:fixed;opacity:0" });
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+    area.remove();
+    return ok;
+  }
+}
+
+function shareInvite() {
+  const share = `https://t.me/share/url?url=${encodeURIComponent(referralLink())}&text=${encodeURIComponent(tr("invite.text"))}`;
+  haptic();
+  openTelegram(share);
+}
+
+function renderInviteStatic() {
+  const r = state.boot.referral;
+  if (!r) return;
+  $("#invite-lead").textContent = tr("invite.lead", { p: r.percent });
+  $("#invite-step3").textContent = tr("invite.step3", { p: r.percent });
+  $("#invite-link").textContent = referralLink();
+  const credit = $("#ref-credit");
+  credit.hidden = !(r.credit > 0);
+  credit.textContent = tr("invite.credit", { n: fmtShare(r.credit) });
+  $("#ref-period").replaceChildren(...[7, 30, 0].map((d) =>
+    el("button", {
+      type: "button", role: "radio", class: d === state.refDays ? "is-active" : "",
+      "aria-checked": d === state.refDays ? "true" : "false",
+      onclick: () => { if (state.refDays !== d) { state.refDays = d; haptic(); renderInviteStatic(); loadReferrals(); } },
+    }, d ? [icon("calendar", 15), tr(`period.${d}`)] : [tr("period.0")])));
+}
+
+function renderReferrals() {
+  const data = state.refs;
+  if (!data) {
+    $("#ref-friends").replaceChildren(el("div", { class: "skeleton" }));
+    return;
+  }
+  const s = data.stats;
+  $("#ref-invited").textContent = s.invited;
+  $("#ref-paid").textContent = s.paid;
+  $("#ref-earned").textContent = `+${fmtShare(s.earned)}`;
+  $("#ref-invited-today").textContent = tr("invite.today", { n: s.invited_today });
+  $("#ref-paid-today").textContent = tr("invite.today", { n: s.paid_today });
+  $("#ref-earned-today").textContent = tr("invite.today", { n: fmtShare(s.earned_today) });
+
+  const friends = data.friends;
+  const paid = friends.filter((f) => f.paid).length;
+  const earned = friends.reduce((sum, f) => sum + f.earned, 0);
+  $("#ref-summary").textContent = tr("invite.summary", { a: friends.length, b: paid, c: fmtShare(earned) });
+  if (!friends.length) {
+    $("#ref-friends").replaceChildren(el("div", { class: "empty-line" }, [
+      el("b", { text: tr("invite.none") }), el("span", { class: "muted small", text: tr("invite.none_sub") }),
+    ]));
+    return;
+  }
+  $("#ref-friends").replaceChildren(...friends.map((f) => {
+    const name = f.name || tr("invite.noname");
+    return el("div", { class: "list-row" }, [
+      el("span", { class: "avatar", text: name.slice(0, 1).toUpperCase() }),
+      el("span", { class: "list-row__text" }, [el("b", { text: name }), el("span", { class: "muted", text: fmtDate(f.joined_at) })]),
+      el("span", { class: "list-row__end" }, f.paid
+        ? [el("b", { class: "pos", text: `+${fmtShare(f.earned)}` }), el("span", { class: "muted", text: tr("invite.friend_paid") })]
+        : [el("span", { class: "muted", text: tr("invite.friend_waiting") })]),
+    ]);
+  }));
+}
+
+async function loadReferrals() {
+  if (!state.boot.referral) return;
+  const days = state.refDays;
+  try {
+    const data = await api(`/api/referrals?days=${days}&tz=${new Date().getTimezoneOffset()}`);
+    if (days !== state.refDays) return; // пока шёл ответ, выбрали другой период
+    state.refs = data;
+    renderReferrals();
+  } catch (e) {
+    if (state.screen === "invite") toast(e.message);
+  }
+}
+
+// ------------------------------------------------------------------ «Профиль» и общее
+
+function renderUser() {
+  const u = state.boot.user;
+  const name = u.first_name || u.username || tr("profile.noname");
+  for (const n of $$("[data-user-name]")) n.textContent = name;
+  for (const n of $$("[data-user-handle]")) n.textContent = u.username ? `@${u.username}` : "";
+  for (const n of $$("[data-avatar]")) n.textContent = name.slice(0, 1).toUpperCase();
+  const brand = $("#brand");
+  brand.replaceChildren(state.boot.bot_name || "Reels", el("i", { class: "grad-dot", text: "." }));
+  for (const n of $$("[data-needs='referral']")) n.hidden = !state.boot.referral;
+  const p = state.boot.referral ? state.boot.referral.percent : 0;
+  $("#home-invite-sub").textContent = tr("home.invite_sub", { p });
+  $("#profile-invite-sub").textContent = tr("home.invite_sub", { p });
+}
 
 function renderProfile() {
   const u = state.boot.user;
-  const name = u.first_name || u.username || tr("profile.noname");
-  $("#profile-name").textContent = name;
-  $("#profile-username").textContent = u.username ? `@${u.username}` : "";
-  $("#avatar").textContent = name.slice(0, 1).toUpperCase();
+  $("#stat-done").textContent = u.videos_done;
+  $("#profile-topup").hidden = u.is_admin;
   $("#profile-hint").textContent = tr(u.is_admin ? "profile.hint_admin" : "profile.hint");
-  renderLanguages();
+  $("#profile-bot").textContent = state.boot.bot_username ? `@${state.boot.bot_username}` : "";
+}
+
+function renderBalance() {
+  const u = state.boot.user;
+  const n = u.balance;
+  for (const node of $$("[data-balance-value]")) node.textContent = u.is_admin ? "∞" : n;
+  for (const node of $$("[data-balance-unit]")) node.textContent = u.is_admin ? tr("balance.unlimited") : videosWord(n);
+  for (const node of $$("[data-balance-count]")) node.textContent = u.is_admin ? "∞" : n;
+  $("#balance-note").textContent = tr(u.is_admin ? "balance.note_admin" : "balance.note");
+  renderCta();
 }
 
 function renderLanguages() {
-  const box = $("#lang-tabs");
   const current = currentLang();
-  box.replaceChildren(...Object.entries(LANG_NAMES).map(([code, title]) =>
-    el("button", {
-      class: `tab${code === current ? " is-active" : ""}`,
-      type: "button",
-      text: title,
-      onclick: () => setLanguage(code),
-    })));
+  for (const box of $$("[data-lang-seg]")) {
+    box.replaceChildren(...["ru", "en"].map((code) =>
+      el("button", {
+        type: "button", class: code === current ? "is-active" : "", text: code.toUpperCase(),
+        "aria-pressed": code === current ? "true" : "false",
+        onclick: () => setLanguage(code),
+      })));
+  }
 }
 
 async function setLanguage(code) {
@@ -943,52 +1398,108 @@ async function setLanguage(code) {
 
 function rerenderAll() {
   applyStaticTexts();
+  renderUser();
+  renderLanguages();
+  renderThemeSeg();
   renderPresets();
   renderAccents();
   renderFonts();
+  renderOptions();
+  renderLimits();
+  renderNext();
   renderBalance();
+  renderHeader();
   preview.render();
-  if (state.file) setFile(state.file); else setFile(null);
-  if (state.screen === "videos") renderJobs();
-  if (state.screen === "balance") renderPackages();
-  if (state.screen === "profile") renderProfile();
-}
-
-function invite() {
-  const bot = state.boot.bot_username;
-  const link = `https://t.me/${bot}`;
-  const text = tr("invite.text");
-  const share = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`;
-  haptic();
-  if (tg && tg.openTelegramLink) tg.openTelegramLink(share);
-  else window.open(share, "_blank");
+  if (state.file) setFile(state.file);
+  renderScreen(state.screen);
 }
 
 // ------------------------------------------------------------------ навигация
 
-function go(screen) {
-  if (screen === "invite") { invite(); return; }
-  state.screen = screen;
+const TITLES = { home: "nav.home", invite: "title.invite", edit: "nav.edit", videos: "nav.videos", tariffs: "nav.tariffs", profile: "nav.profile" };
+
+function renderHeader() {
+  $("#page-title").textContent = tr(TITLES[state.screen] || "nav.home");
+  const step = $("#page-step");
+  step.hidden = state.screen !== "edit";
+  step.textContent = tr("step", { n: state.step });
+  $("#back").hidden = !canGoBack();
+  document.title = `${tr(TITLES[state.screen] || "nav.home")} · ${(state.boot && state.boot.bot_name) || "Reels"}`;
+}
+
+function canGoBack() {
+  return !$("#sheet").hidden || (state.screen === "edit" && state.step === 2) || state.history.length > 0;
+}
+
+function goBack() {
+  if (closeSheet()) return;
+  if (state.screen === "edit" && state.step === 2) { setStep(1); return; }
+  const prev = state.history.pop();
+  go(prev || "home", { push: false });
+}
+
+function syncBackButton() {
+  if (!tg || !tg.BackButton) return;
+  if (canGoBack()) tg.BackButton.show(); else tg.BackButton.hide();
+}
+
+function renderScreen(screen) {
+  if (screen === "home") renderHome();
+  if (screen === "videos") renderJobs();
+  if (screen === "tariffs") renderTariffs();
+  if (screen === "profile") renderProfile();
+  if (screen === "invite") { renderInviteStatic(); renderReferrals(); }
+}
+
+function go(screen, { push = true, replace = false } = {}) {
+  screen = SCREEN_ALIASES[screen] || screen;
+  if (!SCREENS.includes(screen)) screen = "home";
+  if (screen === "invite" && !state.boot.referral) { shareInvite(); return; }
+  closeSheet();
+  if (screen !== state.screen) {
+    // Главная — корень: дойдя до неё, историю дальше не копим, иначе «назад»
+    // водил бы кругами по всем когда-то открытым вкладкам.
+    if (screen === "home") state.history = [];
+    else if (push && !replace && state.screen) state.history.push(state.screen);
+    state.screen = screen;
+  }
   for (const s of $$("[data-screen]")) s.hidden = s.dataset.screen !== screen;
   for (const b of $$("[data-nav]")) b.classList.toggle("is-active", b.dataset.nav === screen);
   window.scrollTo({ top: 0 });
-  // Таймер превью живёт только на своём экране. У спрятанного `display:none`
-  // высота равна нулю, масштаб уходил на запасные 620, и на возврате кадр на
-  // четверть секунды показывал субтитр в полтора раза крупнее, с неужатыми
-  // строками. Заодно это 3.6 перерисовки в секунду, которые шли вечно.
-  if (screen === "edit") preview.start(); else preview.stop();
-  if (tg && tg.BackButton) {
-    if (screen === "edit") tg.BackButton.hide(); else tg.BackButton.show();
-  }
-  if (screen === "videos") { renderJobs(); loadJobs(); }
-  if (screen === "balance") renderPackages();
-  if (screen === "profile") renderProfile();
+  renderHeader();
+  syncBackButton();
+  syncPreview();
+  renderScreen(screen);
+  if (screen === "videos" || screen === "home") loadJobs();
+  if (screen === "invite") loadReferrals();
+  if (screen === "edit" && state.step === 2) setStep(2);
 }
 
 async function refreshBoot() {
   const fresh = await api("/api/bootstrap");
   state.boot.user = fresh.user;
+  state.boot.referral = fresh.referral;
   renderBalance();
+  renderUser();
+}
+
+const COLLAPSE_KEY = "reel-sidebar";
+function initSidebar() {
+  const shell = $("#app");
+  let saved = null;
+  try { saved = localStorage.getItem(COLLAPSE_KEY); } catch (_) { /* приватный режим */ }
+  shell.classList.toggle("is-collapsed", saved === "1");
+  $("#collapse").addEventListener("click", () => {
+    const next = !shell.classList.contains("is-collapsed");
+    shell.classList.toggle("is-collapsed", next);
+    try { localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0"); } catch (_) { /* не критично */ }
+    haptic();
+  });
+  // В свёрнутой панели подписи спрятаны — пусть живут во всплывающей подсказке.
+  for (const b of $$(".side-nav__item")) {
+    const label = b.querySelector("[data-i18n]");
+    if (label) b.title = label.textContent;
+  }
 }
 
 async function main() {
@@ -1001,7 +1512,7 @@ async function main() {
   tg.ready();
   tg.expand();
   try { tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (_) { /* старый клиент */ }
-  if (tg.BackButton) tg.BackButton.onClick(() => go("edit"));
+  if (tg.BackButton) tg.BackButton.onClick(goBack);
 
   try {
     state.boot = await api("/api/bootstrap");
@@ -1014,7 +1525,6 @@ async function main() {
     return;
   }
   const b = state.boot;
-  $("#brand").textContent = b.bot_name || tr("nav.edit");
   applyStaticTexts();
   state.preset = b.presets.some((p) => p.name === b.user.preset) ? b.user.preset : (b.presets[0] || {}).name;
   state.options = { ...b.defaults };
@@ -1025,18 +1535,17 @@ async function main() {
   state.font = saved.font || b.defaults.font || "theme";
 
   declareFonts();
+  renderUser();
+  renderLanguages();
   renderPresets();
   renderAccents();
   renderFonts();
-  // Запомненная тема может быть семнадцатой в ленте: без подкрутки человек
-  // видел бы начало списка и ни одной выбранной плитки.
-  for (const id of ["#preset-tabs", "#font-chips", "#accent-chips"]) {
-    scrollToActive($(id), "instant");
-  }
   renderOptions();
+  renderLimits();
+  renderNext();
   renderBalance();
   initEdit();
-  preview.start();
+  initSidebar();
   // Ширина строки и подписи плиток меряются шрифтами тем — до их загрузки
   // замер идёт по подставному системному и врёт в меньшую сторону: названия
   // приезжали обрезанными многоточием ровно на первом, холодном открытии.
@@ -1054,19 +1563,26 @@ async function main() {
     wrap.classList.toggle("is-compact", window.scrollY > 120);
   }, { passive: true });
   // Вкладка в фоне — таймер не нужен; возврат к ней пересчитывает кадр.
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) preview.stop();
-    else if (state.screen === "edit") preview.start();
-  });
+  document.addEventListener("visibilitychange", syncPreview);
 
   for (const btn of $$("[data-nav]")) btn.addEventListener("click", () => { haptic(); go(btn.dataset.nav); });
-  $("#balance-pill").addEventListener("click", () => go("balance"));
+  $("#back").addEventListener("click", () => { haptic(); goBack(); });
+  for (const n of $$("[data-sheet-close]")) n.addEventListener("click", () => closeSheet());
+  addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeSheet(); });
+  $("#history-open").addEventListener("click", openHistory);
+  $("#pay").addEventListener("click", () => { if (state.pkg) buy(state.pkg); });
+  $("#invite-copy").addEventListener("click", async () => {
+    const ok = await copyText(referralLink());
+    haptic(ok ? "success" : "error");
+    toast(ok ? tr("invite.copied") : referralLink());
+  });
+  $("#invite-share").addEventListener("click", shareInvite);
+  $("#open-chat").addEventListener("click", () => { haptic(); openTelegram(`https://t.me/${state.boot.bot_username}`); });
 
   // Вкладка приходит параметром `?screen=`, а не фрагментом: фрагмент занят
   // Telegram — в нём едут параметры запуска (`#tgWebAppData=…`).
-  const start = new URLSearchParams(location.search).get("screen") || "edit";
-  go(["edit", "videos", "balance", "profile"].includes(start) ? start : "edit");
-  loadJobs();
+  go(new URLSearchParams(location.search).get("screen") || "home", { push: false });
+  if (state.screen !== "home" && state.screen !== "videos") loadJobs();
 }
 
 main();

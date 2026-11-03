@@ -425,7 +425,7 @@ async def booted(tmp_path, monkeypatch):
 
     async def upsert(user_id, **fields):
         return SimpleNamespace(
-            id=user_id, balance=3, videos_done=1, preset="pulse", settings={}, lang=None,
+            id=user_id, balance=3, videos_done=1, preset="pulse", settings={}, lang=None, ref_credit=0,
             username=fields.get("username"), first_name=fields.get("first_name"),
             language_code=fields.get("language_code"), is_admin=fields.get("is_admin", False),
         )
@@ -548,3 +548,24 @@ async def test_themes_come_in_one_order_for_the_app_and_the_chat(booted):
     assert [load_preset(n).order for n in names[1:]] == sorted(
         load_preset(n).order for n in names[1:]
     )
+
+
+def test_today_starts_at_the_users_midnight_not_the_servers():
+    """«+N сегодня» в приглашениях считается от полуночи человека."""
+    from datetime import datetime, timezone
+
+    from aiohttp.test_utils import make_mocked_request
+
+    from src.webapp.server import _day_start
+
+    now = datetime(2026, 11, 3, 20, 30, tzinfo=timezone.utc)
+    # Владивосток (UTC+10): там уже 4 ноября, 06:30 — сутки начались в 14:00 UTC.
+    vlad = make_mocked_request("GET", "/api/referrals?tz=-600")
+    assert _day_start(vlad, now) == datetime(2026, 11, 3, 14, 0, tzinfo=timezone.utc)
+    # Нью-Йорк (UTC−5): 15:30 3 ноября — сутки начались в 05:00 UTC.
+    ny = make_mocked_request("GET", "/api/referrals?tz=300")
+    assert _day_start(ny, now) == datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc)
+    # Мусор и смещения больше суток — как UTC.
+    for junk in ("abc", "99999"):
+        bad = make_mocked_request("GET", f"/api/referrals?tz={junk}")
+        assert _day_start(bad, now) == datetime(2026, 11, 3, 0, 0, tzinfo=timezone.utc)

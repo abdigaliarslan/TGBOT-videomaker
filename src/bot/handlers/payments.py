@@ -98,3 +98,38 @@ async def on_paid(message: Message) -> None:
         t("pay.credited", lang, videos=videos, word=videos_word(videos, lang),
           balance=fresh.balance if fresh else videos)
     )
+    await _thank_referrer(message.bot, paid.telegram_payment_charge_id)
+
+
+def share_text(hundredths: int, lang: str) -> str:
+    """Сотые ролика словами: 50 → «0,5 ролика», 200 → «2 ролика», 10 → «0.1 of a video».
+
+    У дроби в русском родительный единственного («0,5 ролика») при любом
+    числе, а у целых — обычное согласование.
+    """
+    whole, part = divmod(hundredths, 100)
+    if not part:
+        return f"{whole} {videos_word(whole, lang)}"
+    number = f"{whole}.{part:02d}".rstrip("0")
+    if lang == "ru":
+        return f"{number.replace('.', ',')} ролика"
+    return f"{number} {'of a video' if whole == 0 else 'videos'}"
+
+
+async def _thank_referrer(bot, charge_id: str) -> None:
+    """Сказать пригласившему, что пришёл бонус. Зачислен он уже — это только весть."""
+    try:
+        got = await repo.payment_bonus(charge_id)
+        if got is None:
+            return
+        referrer_id, share = got
+        ref_user = await repo.get_user(referrer_id)
+        if ref_user is None:
+            return
+        lang = lang_of(ref_user)
+        await bot.send_message(
+            referrer_id,
+            t("ref.bonus", lang, share=share_text(share, lang), balance=ref_user.balance),
+        )
+    except Exception as e:  # noqa: BLE001 — человек мог заблокировать бота; деньги уже на месте
+        log.info("весть о бонусе по оплате %s не ушла: %s", charge_id, e)
