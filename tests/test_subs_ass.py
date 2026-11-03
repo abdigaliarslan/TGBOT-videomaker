@@ -353,9 +353,11 @@ def test_preset_swap_changes_output_without_touching_code():
     from src.core.preset import load_preset as lp
 
     glass = build_ass(build_plan(edl_with_accent(), "in.mp4", preset=lp("glass")))
-    bold = build_ass(build_plan(edl_with_accent(), "in.mp4", preset=lp("bold")))
+    centered = lp("bold").model_copy(deep=True)
+    centered.caption.position = "center"  # позиция — тоже данные пресета
+    bold = build_ass(build_plan(edl_with_accent(), "in.mp4", preset=centered))
     assert glass != bold
-    assert "\\an2" in glass and "\\an5" in bold  # bold ставит по центру
+    assert "\\an2" in glass and "\\an5" in bold
     assert "ВАЖНО" in bold and "ВАЖНО" not in glass  # bold — uppercase
 
 

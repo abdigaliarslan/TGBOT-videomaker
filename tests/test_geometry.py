@@ -734,12 +734,13 @@ def test_bundled_presets_never_put_a_card_over_their_own_captions():
 
 
 def test_a_centered_caption_leaves_no_room_for_a_card():
-    """`bold` держит субтитр по центру: карточка накрывала бы КАЖДЫЙ блок.
+    """Субтитр по центру: карточка накрывала бы КАЖДЫЙ блок.
 
-    Полный кадр честнее: он хотя бы не ставит картинку поверх текста.
+    Полный кадр честнее: он хотя бы не ставит картинку поверх текста. Своих тем
+    с центром больше нет — субтитр живёт внизу, — но центр остаётся в контракте.
     """
-    bold = load_preset("bold")
-    assert bold.caption.position == "center"
+    bold = load_preset("bold").model_copy(deep=True)
+    bold.caption.position = "center"
     rect = broll_rect("top_right", bold, FRAME)
     assert (rect.x, rect.y, rect.width, rect.height) == (0.0, 0.0, 1080.0, 1920.0)
 

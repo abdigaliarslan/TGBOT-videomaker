@@ -1973,3 +1973,130 @@ async def test_the_pipeline_puts_the_title_in_the_edl_before_the_plan(tmp_path, 
 
     assert edl.title == CARD_TITLE, "заголовок не доехал до листа к моменту кропа"
     assert card_of(build_plan(edl, "v.mp4", cfg=cfg())) is not None
+
+
+# ------------------------------------------------------------- ритм позиции
+
+
+def test_rhythm_keeps_home_most_of_the_time_and_leaves_rarely():
+    """Дом держится не меньше `RHYTHM_HOME_MIN`, вылазка — одна фраза, и
+    случается она не каждые две фразы, а изредка."""
+    from src.core.render_plan import RHYTHM_HOME_MIN, RhythmSpan, caption_rhythm
+
+    # Минута речи: блоки по 1.5 с, фраза — каждые два блока.
+    spans = [RhythmSpan(start=i * 1.5, end=i * 1.5 + 1.4, phrase=i % 2 == 0) for i in range(40)]
+    out = caption_rhythm(spans, "bottom")
+
+    away = [i for i, p in enumerate(out) if p == "top"]
+    assert away, "за минуту субтитр ни разу не сменил место"
+    assert len(away) <= len(out) // 4, f"наверху слишком часто: {''.join(p[0] for p in out)}"
+    assert spans[away[0]].start >= RHYTHM_HOME_MIN, "ушёл из дома, не успев в нём побыть"
+    for i in away:
+        # Вылазка начинается и заканчивается на границе фразы.
+        assert out[i - 1] == "top" or spans[i].phrase
+        assert i + 1 == len(out) or out[i + 1] == "top" or spans[i + 1].phrase
+
+
+def test_rhythm_does_not_flash_a_block_on_the_other_side():
+    """Короткий блок на полсекунды наверху читается как сбой, а не как приём."""
+    from src.core.render_plan import RhythmSpan, caption_rhythm
+
+    spans = [RhythmSpan(start=i * 0.6, end=i * 0.6 + 0.5, phrase=True) for i in range(60)]
+    assert set(caption_rhythm(spans, "bottom")) == {"bottom"}
+
+
+def test_a_directed_block_away_from_home_restarts_the_count():
+    """Тихий блок режиссёра наверху — уже смена места: сразу за ним ещё одна
+    вылазка была бы второй подряд."""
+    from src.core.render_plan import RHYTHM_HOME_MIN, RhythmSpan, caption_rhythm
+
+    spans = [
+        RhythmSpan(start=i * 1.5, end=i * 1.5 + 1.4, phrase=i % 2 == 0, fixed="top" if i == 8 else None)
+        for i in range(40)
+    ]
+    out = caption_rhythm(spans, "bottom")
+    first = next(i for i, p in enumerate(out) if p == "top" and spans[i].fixed is None)
+    assert spans[first].start - spans[8].end >= RHYTHM_HOME_MIN
+
+
+def test_rhythm_never_puts_text_over_a_face():
+    """Вылазка, которую блок не может сделать, не ставится вовсе."""
+    from src.core.render_plan import RhythmSpan, caption_rhythm
+
+    spans = [RhythmSpan(start=i * 1.5, end=i * 1.5 + 1.4, phrase=i % 2 == 0) for i in range(40)]
+    assert set(caption_rhythm(spans, "bottom", can_leave=lambda i: False)) == {"bottom"}
+
+
+def long_edl(**kw) -> EDL:
+    """Сорок секунд речи: блоки по три слова, фраза кончается точкой каждые два блока."""
+    words = []
+    for i in range(80):
+        text = f"сл{i}." if i % 6 == 5 else f"сл{i}"
+        words.append(Word(idx=i, text=text, start=i * 0.5, end=i * 0.5 + 0.4))
+    blocks = [
+        CaptionBlock(words=[CaptionWord(word_idx=i + k) for k in range(3)], quiet=False)
+        for i in range(0, 78, 3)
+    ]
+    data = dict(
+        source_duration=40.0, words=words,
+        cuts=[Cut(src_in=0.0, src_out=40.0, reason="keep")],
+        captions=blocks, preset="glass",
+    )
+    data.update(kw)
+    return EDL(**data)
+
+
+@pytest.mark.parametrize("name", ALL_PRESETS)
+def test_every_theme_lives_at_the_bottom_and_sometimes_goes_up(name):
+    """Дом субтитра — низ кадра у каждой темы, и за сорок секунд он хоть раз
+    поднимается наверх."""
+    plan = build_plan(long_edl(preset=name), "in.mp4", preset=load_preset(name), cfg=cfg())
+    caps = [b for b in plan.blocks if not b.title_card]
+    positions = [b.position for b in caps]
+    assert positions.count("bottom") > len(positions) * 0.7, (name, positions)
+    assert "top" in positions, name
+    assert "center" not in positions, name
+
+
+def test_a_legacy_block_of_a_two_register_theme_stays_home():
+    """У листа без объявленного регистра регистр решает позиция: подъём наверх
+    перекрасил бы плакат в тихий."""
+    edl = long_edl(preset="pulse")
+    for b in edl.captions:
+        b.quiet = None
+    plan = build_plan(edl, "in.mp4", preset=load_preset("pulse"), cfg=cfg())
+    assert {b.position for b in plan.blocks if not b.title_card} == {"bottom"}
+
+
+def test_the_rhythm_keeps_off_a_face_in_the_top_band():
+    """Лицо в верхней полосе всё время ролика — наверх не уходит ни один блок."""
+    from src.core.track import FaceTrack, TrackPoint
+
+    track = FaceTrack(
+        fps=30,
+        points=[TrackPoint(f=f, cx=0.5, cy=0.28, h=0.2, conf=0.9) for f in range(0, 1201)],
+    )
+    plan = build_plan(long_edl(), "in.mp4", preset=load_preset("glass"), cfg=cfg(), track=track)
+    assert {b.position for b in plan.blocks if not b.title_card} == {"bottom"}
+
+
+def test_long_sentences_still_get_a_rare_trip_up():
+    """Живое предложение идёт 6-8 с и в вылазку целиком не влезает. Без
+    запятой как границы фразы ролик из таких предложений не уходил из дома
+    ни разу — так вышло на эталонном клипе."""
+    words = []
+    for i in range(80):
+        # Предложение из 16 слов (8 с), запятая через каждые пять слов.
+        end = "." if i % 16 == 15 else ("," if i % 16 in (4, 9) else "")
+        words.append(Word(idx=i, text=f"сл{i}{end}", start=i * 0.5, end=i * 0.5 + 0.45))
+    blocks = [
+        CaptionBlock(words=[CaptionWord(word_idx=k) for k in range(i, min(i + 3, 80))], quiet=False)
+        for i in range(0, 80, 3)
+    ]
+    edl = EDL(
+        source_duration=40.0, words=words,
+        cuts=[Cut(src_in=0.0, src_out=40.0, reason="keep")],
+        captions=blocks, preset="glass",
+    )
+    plan = build_plan(edl, "in.mp4", preset=load_preset("glass"), cfg=cfg())
+    assert "top" in [b.position for b in plan.blocks if not b.title_card]

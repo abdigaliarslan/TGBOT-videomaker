@@ -36,8 +36,8 @@
     "glass_opacity": 0.0
   },
   "caption": {
-    "position": "center",
-    "margin": 0,
+    "position": "bottom",
+    "margin": 380,
     "line_height": 1.22,
     "align": "center",
     "max_lines": 3,

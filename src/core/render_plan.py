@@ -600,6 +600,109 @@ def _resolve_position(
     return base  # type: ignore[return-value]
 
 
+# Ритм позиции у блоков «auto». Субтитр, приклеенный к одному месту на весь
+# ролик, глаз перестаёт замечать, а прыгающий каждую фразу — утомляет. Поэтому
+# у плаката есть дом (позиция темы, обычно низ), и изредка одна фраза уходит на
+# другую сторону кадра и возвращается. Числа — про «изредка»: дом держится не
+# меньше `RHYTHM_HOME_MIN`, вылазка длится от `RHYTHM_AWAY_MIN` до
+# `RHYTHM_AWAY_MAX` и начинается только с новой фразы, а не посреди мысли.
+RHYTHM_HOME_MIN = 12.0
+RHYTHM_AWAY_MIN = 1.5
+RHYTHM_AWAY_MAX = 5.0
+# Пауза между блоками, после которой следующий считается новой фразой, даже если
+# предыдущий не закончился знаком.
+RHYTHM_PHRASE_GAP = 0.25
+# Граница фразы — не только точка: предложение живой речи идёт по 6-8 с и в
+# вылазку целиком не влезает, а запятая — уже место, где мысль переводит дух.
+RHYTHM_PHRASE_MARKS = (".", "!", "?", "…", ",", ";", ":", "—", "–")
+RHYTHM_SIDES = ("top", "bottom")
+# Лицо, которое вылазка не имеет права закрыть: от глаз до подбородка в долях
+# высоты лица из трека (`TrackPoint.h`) и ширина в тех же долях. Лоб под текстом
+# допустим — так ставят титры над головой и в эталоне.
+FACE_GUARD_UP = 0.25
+FACE_GUARD_DOWN = 0.5
+FACE_WIDTH_RATIO = 0.8
+FACE_MIN_CONF = 0.5
+
+
+@dataclass(slots=True)
+class RhythmSpan:
+    """Блок глазами ритма: когда звучит и волен ли он сменить место.
+
+    `fixed` — позиция, которую блок займёт сам: явная от режиссёра или дом у
+    блока, которому уходить нельзя. `None` — блок «auto», ритм решает за него.
+    """
+
+    start: float
+    end: float
+    phrase: bool
+    fixed: str | None = None
+
+
+def caption_rhythm(
+    spans: Sequence[RhythmSpan],
+    home: str,
+    *,
+    can_leave: Any = None,
+) -> list[str]:
+    """Позиция каждого блока: дом или редкая вылазка на другую сторону кадра.
+
+    Вылазка — это фраза целиком: блоки подряд с начала фразы до её конца или до
+    `RHYTHM_AWAY_MAX`. Короче `RHYTHM_AWAY_MIN` она не ставится вовсе: блок,
+    мелькнувший наверху на полсекунды, читается как сбой, а не как приём.
+    `can_leave(i)` — может ли блок `i` встать на другой стороне (там лицо —
+    не может); вылазка, которую он обрывает, тоже не ставится.
+
+    Блок с явной позицией не на доме — та же вылазка, только режиссёрская
+    (тихий блок наверху): после него дом снова отсчитывается заново.
+    """
+    if home not in ("top", "bottom"):
+        return [s.fixed or home for s in spans]
+    away = "top" if home == "bottom" else "bottom"
+    leave = can_leave or (lambda i: True)
+    out = [s.fixed or home for s in spans]
+    home_since = spans[0].start if spans else 0.0
+    i = 0
+    while i < len(spans):
+        span = spans[i]
+        if span.fixed is not None:
+            if span.fixed != home:
+                home_since = span.end
+            i += 1
+            continue
+        if not span.phrase or span.start - home_since < RHYTHM_HOME_MIN:
+            i += 1
+            continue
+        run = [i]
+        j = i + 1
+        while (
+            j < len(spans)
+            and spans[j].fixed is None
+            and not spans[j].phrase
+            and spans[j].end - span.start <= RHYTHM_AWAY_MAX
+        ):
+            run.append(j)
+            j += 1
+        if spans[run[-1]].end - span.start > RHYTHM_AWAY_MAX:
+            run.pop()  # фраза из одного длинного блока: дом
+        # Возвращается вылазка тоже на границе фразы: уйти наверх с началом
+        # мысли и спуститься посреди неё — тот же разрыв, только в конце.
+        after = run[-1] + 1 if run else i
+        if (
+            not run
+            or spans[run[-1]].end - span.start < RHYTHM_AWAY_MIN
+            or (after < len(spans) and not spans[after].phrase and spans[after].fixed is None)
+            or not all(leave(k) for k in run)
+        ):
+            i += 1
+            continue
+        for k in run:
+            out[k] = away
+        home_since = spans[run[-1]].end
+        i = run[-1] + 1
+    return out
+
+
 @dataclass(slots=True)
 class _Place:
     """Блок, разложенный под ОДНУ позицию — вместе с регистром, в котором он там играет.
@@ -786,7 +889,82 @@ def build_plan(
     # получить, — и картинка уступает КАЖДОЙ. Раскладка считается под каждую из
     # них (§1.4.1: позиция решает регистр, а регистр — всю раскладку), см.
     # `lay_places`.
+    home = ps.caption.position
+
+    def roams(block: Any) -> bool:
+        """Волен ли блок уйти из дома по ритму (`caption_rhythm`).
+
+        Только «auto» и только плакат. Регистр обязан быть объявлен: у листа без
+        поля (`quiet=None`) его решает позиция, и вылазка наверх молча
+        перекрасила бы плакат в тихий. Блок, привязанный к голове, ведёт голова.
+        """
+        if block.position in CAPTION_POSITIONS or home not in RHYTHM_SIDES:
+            return False
+        if getattr(block, "anchor_track", None) is not None:
+            return False
+        return not quiet.enabled or getattr(block, "quiet", None) is False
+
+    def covers_face(start: float, end: float, rect: Rect) -> bool:
+        """Закрывает ли блок лицо — от глаз до подбородка — хоть на одном кадре.
+
+        Лоб и волосы под текстом допустимы, глаза и рот нет. Нет трека — кроп
+        лица не нашёл, и закрывать нечего.
+        """
+        if track is None:
+            return False
+        for f in range(round(start * track.fps), round(end * track.fps) + 1):
+            p = track.at(f)
+            if p is None or p.conf < FACE_MIN_CONF:
+                continue
+            face_h = p.h * height
+            top_y = p.cy * height - FACE_GUARD_UP * face_h
+            low_y = p.cy * height + FACE_GUARD_DOWN * face_h
+            half_w = FACE_WIDTH_RATIO * face_h / 2
+            if (
+                rect.y < low_y
+                and rect.y + rect.height > top_y
+                and rect.x < p.cx * width + half_w
+                and rect.x + rect.width > p.cx * width - half_w
+            ):
+                return True
+        return False
+
+    def settle_rhythm(items: list[_Laid], phrases: list[bool]) -> list[str]:
+        """Решает ритм и оставляет пришпиленному блоку одну измеренную позицию.
+
+        Отбросить лишнее нужно ДО картинок: картинка уступает каждой позиции из
+        `places`, и пришпиленная тема держит одну полосу затем, чтобы вставке
+        хватило места (`Caption.pinned`).
+        """
+        away = "top" if home == "bottom" else "bottom"
+
+        def can_leave(i: int) -> bool:
+            there = items[i].places.get(away)
+            if there is None or there.rect is None:
+                return False  # не измерен — нечем проверить ни лицо, ни картинку
+            return not covers_face(items[i].start, items[i].end, there.rect)
+
+        spans = [
+            RhythmSpan(
+                start=item.start,
+                end=item.end,
+                phrase=phrase,
+                fixed=None if roams(item.block) else (
+                    item.block.position if item.block.position in CAPTION_POSITIONS else home
+                ),
+            )
+            for item, phrase in zip(items, phrases)
+        ]
+        chosen = caption_rhythm(spans, home, can_leave=can_leave)
+        for item, pos in zip(items, chosen):
+            if ps.caption.pinned and roams(item.block):
+                item.places = {pos: item.places[pos]}
+        return chosen
+
     laid: list[_Laid] = []
+    phrases: list[bool] = []
+    prev_word: Any = None
+    prev_end = 0.0
     for block in edl.captions:
         pwords: list[PlanWord] = []
         for cw in block.words:
@@ -814,11 +992,25 @@ def build_plan(
         if not pwords:
             continue
 
+        # Новая фраза — после знака или после паузы. Текст берётся из
+        # транскрипта, а не из показанного: у темы в верхнем регистре
+        # `display_text` может знаки и снимать.
+        phrases.append(
+            prev_word is None
+            or pwords[0].start - prev_end >= RHYTHM_PHRASE_GAP
+            or prev_word.text.rstrip().endswith(RHYTHM_PHRASE_MARKS)
+        )
+        prev_word, prev_end = by_idx[pwords[-1].word_idx], pwords[-1].end
+
         places: tuple[str, ...] = (
             (block.position,)
             if block.position in CAPTION_POSITIONS
             else caption_positions(ps)
         )
+        if roams(block):
+            # Ритм решает позицию позже, по замеру: мерим блок и на другой
+            # стороне, а лишнее отбросим, как только решение будет принято.
+            places = tuple(dict.fromkeys((*places, *RHYTHM_SIDES)))
         laid.append(
             _Laid(
                 block=block,
@@ -827,6 +1019,8 @@ def build_plan(
                 places=lay_places(places, pwords, block),
             )
         )
+
+    homes = settle_rhythm(laid, phrases)
 
     def text_zones(start: float, end: float) -> list[Rect]:
         """Прямоугольники, которые текст может занять в этом промежутке.
@@ -971,11 +1165,11 @@ def build_plan(
         return [[dx, dy] for dx, dy in offsets]
 
     blocks: list[PlanBlock] = []
-    for item in laid:
+    for item, item_home in zip(laid, homes):
         hits = occupied(item)
         position = _resolve_position(
             item.block.position,
-            ps.caption.position,
+            item_home,
             collides_bottom=hits["bottom"],
             collides_top=hits["top"],
             collides_center=hits["center"],
