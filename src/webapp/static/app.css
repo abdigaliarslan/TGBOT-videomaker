@@ -368,61 +368,75 @@ svg { flex: none; }
 .design__controls { display: flex; flex-direction: column; }
 
 /* ---------------------------------------------------------------- ленты выбора */
-.strip__track::-webkit-scrollbar { display: none; }
-/* Лента выходит за поля экрана: на телефоне обрезанная карточка у края — это
-   единственный намёк, что ленту можно листать, а стрелки его подменяли. */
-.strip { margin: 0 -18px 20px; }
+/* Стиль, шрифт и цвет — каждый одной лентой «таблеток», листается вбок.
+   Стрелки по краям для мыши, палец листает и так; стрелка видна, только
+   когда в её сторону есть куда листать. */
+.picker { padding: 16px 0 6px; overflow: hidden; }
+.picker__head { display: flex; align-items: baseline; gap: 8px; padding: 0 18px 8px; }
+.picker__head h2 {
+  font-size: 12px; font-weight: 800; color: var(--muted);
+  letter-spacing: 0.1em; text-transform: uppercase;
+}
+.strip { position: relative; margin-bottom: 12px; }
 .strip__track {
-  display: flex; gap: 10px; overflow-x: auto; scrollbar-width: none;
-  padding: 6px 18px 10px; scroll-behavior: smooth; scroll-snap-type: x proximity;
+  display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none;
+  padding: 2px 18px 4px; scroll-behavior: smooth; scroll-snap-type: x proximity;
+  scroll-padding: 0 52px;
 }
+.strip__track::-webkit-scrollbar { display: none; }
 .strip__track > * { scroll-snap-align: center; }
-.strip__track--swatches { gap: 8px; scroll-snap-type: none; }
+.strip__arrow {
+  position: absolute; top: 50%; z-index: 2; transform: translateY(-50%);
+  width: 36px; height: 36px; border-radius: 50%;
+  background: var(--card-2); border: 1px solid var(--line); color: var(--text);
+  display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 10px rgb(0 0 0 / 25%);
+  transition: opacity 140ms ease, transform 120ms ease;
+}
+.strip__arrow:active { transform: translateY(-50%) scale(0.92); }
+.strip__arrow--prev { left: 10px; }
+.strip__arrow--next { right: 10px; }
+/* Лента затухает к краю, за которым ещё есть таблетки: обрубленная таблетка
+   под стрелкой читалась как ошибка вёрстки. Маска, а не подложка цветом
+   карточки, — так затухание верно в обеих темах. */
+.strip.has-next .strip__track {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 84px), transparent calc(100% - 20px));
+  mask-image: linear-gradient(90deg, #000 calc(100% - 84px), transparent calc(100% - 20px));
+}
+.strip.has-prev .strip__track {
+  -webkit-mask-image: linear-gradient(90deg, transparent 20px, #000 84px);
+  mask-image: linear-gradient(90deg, transparent 20px, #000 84px);
+}
+.strip.has-prev.has-next .strip__track {
+  -webkit-mask-image: linear-gradient(90deg, transparent 20px, #000 84px, #000 calc(100% - 84px), transparent calc(100% - 20px));
+  mask-image: linear-gradient(90deg, transparent 20px, #000 84px, #000 calc(100% - 84px), transparent calc(100% - 20px));
+}
 
-.style-card {
-  flex: none; width: 132px; height: 88px; border-radius: 18px; overflow: hidden;
-  background: var(--stage); border: 1px solid var(--stage-line); color: #fff; text-align: center;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
-  transition: transform 140ms ease, box-shadow 140ms ease;
+/* Общая форма таблетки. Выбранная — светлая, как на образце. */
+.style-pill, .chip, .swatch {
+  flex: none; height: 44px; padding: 0 18px; border-radius: 999px;
+  background: var(--card-2); border: 1px solid var(--line); color: var(--text);
+  display: inline-flex; align-items: center; gap: 9px; white-space: nowrap;
+  font-weight: 700; font-size: 15px;
+  transition: background 140ms ease, color 140ms ease, transform 120ms ease;
 }
-.style-card__name {
-  max-width: 100%; padding: 0 10px; font-size: 18px; line-height: 1.05;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+.style-pill:active, .chip:active, .swatch:active { transform: scale(0.96); }
+.style-pill.is-active, .chip.is-active, .swatch.is-active {
+  background: var(--pill); color: var(--pill-text); border-color: var(--pill);
 }
-.style-card__bar { width: 28px; height: 3px; border-radius: 2px; }
-.style-card:active { transform: scale(0.97); }
-/* Кольцо через промежуток цветом фона: сама плитка тёмная всегда, и обводка
-   цветом интерфейса слилась бы с ней в светлой теме. */
-.style-card.is-active { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--pill); }
 
-.chip {
-  flex: none; height: 48px; padding: 0 16px; border-radius: 15px;
-  background: var(--card); border: 1px solid var(--line);
-  display: inline-flex; align-items: center; gap: 10px; white-space: nowrap;
-}
-/* Образец крупнее подписи: на 21 px «Аа» у восемнадцати шрифтов различается
-   слабо — характер начертания виден только на кегле от 26. */
-.chip__aa { font-family: var(--chip-font), system-ui, sans-serif; font-size: 26px; line-height: 1; }
-.chip__name { font-size: 14px; font-weight: 600; color: var(--muted); }
-.chip:active { transform: scale(0.97); }
-.chip.is-active { background: var(--pill); color: var(--pill-text); border-color: var(--pill); }
-.chip.is-active .chip__name { color: inherit; }
+/* Название темы набрано ЕЁ шрифтом и регистром: таблетка — образец, а не
+   подпись. Кегль чуть меньше у капса — иначе WIDESCREEN шире соседей вдвое. */
+.style-pill__name { font-size: 16px; line-height: 1; }
+.style-pill__name.is-caps { font-size: 13px; }
 
-.swatch {
-  flex: none; width: 72px; display: flex; flex-direction: column; align-items: center; gap: 7px;
-}
-.swatch__dot {
-  width: 40px; height: 40px; border-radius: 50%;
-  box-shadow: inset 0 0 0 3px var(--stage), 0 0 0 1px var(--stage-line);
-  transition: box-shadow 140ms ease, transform 120ms ease;
-}
-.swatch:active .swatch__dot { transform: scale(0.92); }
-.swatch.is-active .swatch__dot { box-shadow: inset 0 0 0 3px var(--stage), 0 0 0 2px var(--pill); }
-.swatch__name {
-  max-width: 72px; min-height: 2.4em; font-size: 12px; color: var(--muted);
-  text-align: center; line-height: 1.2;
-}
-.swatch.is-active .swatch__name { color: var(--text); font-weight: 600; }
+.chip { padding: 0 18px 0 14px; }
+.chip__aa { font-family: var(--chip-font), system-ui, sans-serif; font-size: 22px; line-height: 1; font-weight: 400; }
+.chip__name { font-size: 14px; font-weight: 700; }
+
+.swatch { padding: 0 18px 0 14px; font-size: 14px; }
+.swatch__dot { width: 12px; height: 12px; border-radius: 50%; box-shadow: 0 0 0 1px rgb(255 255 255 / 18%); }
+:root[data-theme="light"] .swatch__dot { box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
 
 .section-head { display: flex; align-items: baseline; gap: 8px; margin: 2px 0 8px; }
 .section-head h2 {
@@ -665,8 +679,6 @@ svg { flex: none; }
   .screens { padding: 0 28px; }
   .screen { gap: 16px; }
 
-  .strip { margin: 0 0 20px; }
-  .strip__track { padding: 6px 2px 10px; flex-wrap: wrap; overflow: visible; }
   .jobs { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
   .sheet { align-items: center; }
   .sheet__panel { border-radius: 24px; }

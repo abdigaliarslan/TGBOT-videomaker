@@ -205,28 +205,37 @@
               </div>
 
               <div class="design__controls">
-                <div class="section-head">
-                  <h2 data-i18n="edit.style">Стиль субтитров</h2>
-                  <span class="section-head__count" id="style-count"></span>
-                </div>
-                <div class="strip">
-                  <div class="strip__track" id="preset-tabs" role="radiogroup" data-i18n-aria="edit.style"></div>
-                </div>
-
-                <div class="section-head">
-                  <h2 data-i18n="edit.font">Шрифт</h2>
-                  <span class="section-head__count" id="font-count"></span>
-                </div>
-                <div class="strip">
-                  <div class="strip__track" id="font-chips" role="radiogroup" data-i18n-aria="edit.font"></div>
-                </div>
-
-                <div class="section-head">
-                  <h2 data-i18n="edit.color">Цвет выделения</h2>
-                  <span class="section-head__count" id="accent-count"></span>
-                </div>
-                <div class="strip">
-                  <div class="strip__track strip__track--swatches" id="accent-chips" role="radiogroup" data-i18n-aria="edit.color"></div>
+                <!-- Стиль, шрифт и цвет — по ленте в ряд, листаются вбок стрелками
+                     или пальцем. Сеткой из семнадцати плиток выбор занимал
+                     полтора экрана, и превью уходило из виду. -->
+                <div class="card picker">
+                  <div class="picker__head">
+                    <h2 data-i18n="edit.style">Стиль субтитров</h2>
+                    <span class="section-head__count" id="style-count"></span>
+                  </div>
+                  <div class="strip">
+                    <button class="strip__arrow strip__arrow--prev" type="button" data-dir="-1" data-i18n-aria="back" hidden><svg width="18" height="18"><use href="#i-back"/></svg></button>
+                    <div class="strip__track" id="preset-tabs" role="radiogroup" data-i18n-aria="edit.style"></div>
+                    <button class="strip__arrow strip__arrow--next" type="button" data-dir="1" data-i18n-aria="forward" hidden><svg width="18" height="18"><use href="#i-chevron"/></svg></button>
+                  </div>
+                  <div class="picker__head">
+                    <h2 data-i18n="edit.font">Шрифт</h2>
+                    <span class="section-head__count" id="font-count"></span>
+                  </div>
+                  <div class="strip">
+                    <button class="strip__arrow strip__arrow--prev" type="button" data-dir="-1" data-i18n-aria="back" hidden><svg width="18" height="18"><use href="#i-back"/></svg></button>
+                    <div class="strip__track" id="font-chips" role="radiogroup" data-i18n-aria="edit.font"></div>
+                    <button class="strip__arrow strip__arrow--next" type="button" data-dir="1" data-i18n-aria="forward" hidden><svg width="18" height="18"><use href="#i-chevron"/></svg></button>
+                  </div>
+                  <div class="picker__head">
+                    <h2 data-i18n="edit.color">Цвет выделения</h2>
+                    <span class="section-head__count" id="accent-count"></span>
+                  </div>
+                  <div class="strip">
+                    <button class="strip__arrow strip__arrow--prev" type="button" data-dir="-1" data-i18n-aria="back" hidden><svg width="18" height="18"><use href="#i-back"/></svg></button>
+                    <div class="strip__track" id="accent-chips" role="radiogroup" data-i18n-aria="edit.color"></div>
+                    <button class="strip__arrow strip__arrow--next" type="button" data-dir="1" data-i18n-aria="forward" hidden><svg width="18" height="18"><use href="#i-chevron"/></svg></button>
+                  </div>
                 </div>
 
                 <div class="section-head"><h2 data-i18n="edit.effects">Эффекты</h2></div>

@@ -8,7 +8,7 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 // Тексты интерфейса. Язык приходит с сервера (`user.lang`) и меняется в шапке и в профиле.
 const I18N = {
   ru: {
-    theme: "Сменить тему", back: "Назад", close: "Закрыть",
+    theme: "Сменить тему", back: "Назад", forward: "Вперёд", close: "Закрыть",
     "nav.home": "Главная", "nav.invite": "Приглашения", "nav.edit": "Монтаж", "nav.videos": "Результаты",
     "nav.tariffs": "Тарифы", "nav.profile": "Профиль", "nav.collapse": "Свернуть панель",
     "title.invite": "Приглашайте друзей", "step": "Шаг {n} из 2",
@@ -90,7 +90,7 @@ const I18N = {
     "blocker.failed": "Не получилось открыть",
   },
   en: {
-    theme: "Toggle theme", back: "Back", close: "Close",
+    theme: "Toggle theme", back: "Back", forward: "Forward", close: "Close",
     "nav.home": "Home", "nav.invite": "Invites", "nav.edit": "Editor", "nav.videos": "Results",
     "nav.tariffs": "Pricing", "nav.profile": "Profile", "nav.collapse": "Collapse sidebar",
     "title.invite": "Invite friends", "step": "Step {n} of 2",
@@ -395,8 +395,26 @@ function declareFonts() {
   const faces = new Map();
   for (const f of state.boot.fonts || []) if (f.file && f.family) faces.set(f.file, f.family);
   for (const p of state.boot.presets || []) if (p.font_file && p.font) faces.set(p.font_file, p.font);
-  const css = [...faces].map(([file, family]) => `@font-face{font-family:"${family}";` +
-    `src:url("/fonts/${file}") format("truetype");font-weight:1 1000;font-display:swap;}`).join("\n");
+  // На каждое семейство ДВА объявления с одним именем и разными наборами
+  // символов. Браузер выбирает файл по тому, что реально на экране:
+  //
+  //   лента («Аа» и латинские названия тем) → урезанный файл, 8-19 КБ;
+  //   превью (русская фраза)                → полный, и только для выбранного.
+  //
+  // Это снимает главную причину, по которой лента выглядела одинаковой:
+  // восемнадцать полных файлов — 1406 КБ в gzip и 25 секунд по туннелю
+  // (замер), и всё это время образцы рисуются одним системным шрифтом.
+  // Восемнадцать урезанных весят 280 КБ на всех.
+  //
+  // Урезанный объявлен ВТОРЫМ: при пересечении наборов побеждает последний,
+  // и буквы ленты берутся из маленького файла, а не из полного.
+  const range = state.boot.font_ui_range;
+  const css = [...faces].flatMap(([file, family]) => {
+    const face = (src, extra) => `@font-face{font-family:"${family}";` +
+      `src:url("${src}") format("truetype");font-weight:1 1000;font-display:swap;${extra}}`;
+    const full = face(`/fonts/${file}`, "");
+    return range ? [full, face(`/fonts/ui/${file}`, `unicode-range:${range};`)] : [full];
+  }).join("\n");
   const tag = document.getElementById("font-faces") || el("style", { id: "font-faces" });
   tag.textContent = css;
   if (!tag.parentNode) document.head.appendChild(tag);
@@ -409,9 +427,20 @@ function declareFonts() {
   // выглядят одинаково (замерено: ширина «Аа» у всех 25.2 px, через две
   // секунды — от 20.7 до 37.4). Здесь же загрузка начинается на первом
   // экране и идёт, пока человек выбирает видео.
-  if (document.fonts && document.fonts.load) {
-    for (const family of new Set(faces.values())) {
-      document.fonts.load(`21px "${family}"`).catch(() => { /* нет файла — останется запасной */ });
+  //
+  // Просим ПОИМЕННО урезанные начертания, а не семейства.
+  //
+  // `document.fonts.load("21px \"X\"")` грузит ВСЕ подходящие начертания
+  // семейства, а полное подходит к любому тексту — замерено: скачивались и 17
+  // урезанных, и 17 полных, то есть 3.2 МБ вместо 280 КБ, вдвое хуже, чем
+  // было. Поэтому идём по самим объявлениям и будим только те, у которых
+  // задан диапазон: полные браузер дотянет сам, когда превью наберёт русскую
+  // фразу, и только для выбранного шрифта.
+  if (document.fonts && range) {
+    for (const face of document.fonts) {
+      if (face.unicodeRange && face.unicodeRange !== "U+0-10FFFF" && face.status === "unloaded") {
+        face.load().catch(() => { /* нет файла — останется запасной */ });
+      }
     }
   }
 }
@@ -612,19 +641,35 @@ function scrollToActive(box, behavior = "smooth") {
   }
 }
 
-// Длинное название ужимается, а не обрезается многоточием: «MODERNI…» и
-// «HEAVYWEIG…» — это уже не образец шрифта, ради которого плитка и нужна.
-//
-// Отдельной функцией, потому что меряется ШРИФТОМ ТЕМЫ: на холодном открытии
-// он ещё не загружен (`font-display: swap`), замер идёт по подставному и
-// врёт. `document.fonts.ready` зовёт это второй раз.
-function fitCardNames() {
-  for (const name of $$(".style-card__name")) {
-    name.style.fontSize = "";
-    const over = name.scrollWidth / name.clientWidth;
-    if (name.clientWidth > 0 && over > 1) {
-      name.style.fontSize = `${Math.max(9, Math.floor(18 / over))}px`;
+// Стрелки ленты видны, только когда в их сторону есть куда листать: стрелка
+// «назад» на самом начале ленты обещала бы то, чего нет. Пересчитываются на
+// прокрутке, на смене размера и после каждой перерисовки ленты — ширина
+// таблеток меняется с языком и с загрузкой шрифтов тем.
+function syncArrows(strip) {
+  const track = strip.querySelector(".strip__track");
+  const max = track.scrollWidth - track.clientWidth;
+  const prev = max > 2 && track.scrollLeft > 2;
+  const next = max > 2 && track.scrollLeft < max - 2;
+  strip.querySelector(".strip__arrow--prev").hidden = !prev;
+  strip.querySelector(".strip__arrow--next").hidden = !next;
+  strip.classList.toggle("has-prev", prev);
+  strip.classList.toggle("has-next", next);
+}
+function syncAllArrows() {
+  for (const strip of $$(".strip")) syncArrows(strip);
+}
+function initStrips() {
+  for (const strip of $$(".strip")) {
+    const track = strip.querySelector(".strip__track");
+    track.addEventListener("scroll", () => syncArrows(strip), { passive: true });
+    for (const btn of strip.querySelectorAll(".strip__arrow")) {
+      btn.addEventListener("click", () => {
+        haptic();
+        const step = Math.max(160, track.clientWidth * 0.7) * Number(btn.dataset.dir);
+        try { track.scrollBy({ left: step, behavior: "smooth" }); } catch (_) { track.scrollLeft += step; }
+      });
     }
+    if (window.ResizeObserver) new ResizeObserver(() => syncArrows(strip)).observe(track);
   }
 }
 
@@ -633,7 +678,7 @@ function renderPresets() {
   $("#style-count").textContent = state.boot.presets.length;
   box.replaceChildren(...state.boot.presets.map((p) =>
     el("button", {
-      class: `style-card${p.name === state.preset ? " is-active" : ""}`,
+      class: `style-pill${p.name === state.preset ? " is-active" : ""}`,
       type: "button",
       // Не «вкладка»: панели у неё нет, и скринридер обещал бы то, чего нет.
       // Это выбор одного из многих — радиогруппа.
@@ -650,17 +695,16 @@ function renderPresets() {
         scrollToActive(box);
       },
     }, [
-      // Плитка — это образец: название темы набрано ЕЁ шрифтом и её регистром,
-      // под ним полоска её акцентного цвета. Семнадцать одинаковых пилюль с
-      // подписями ничего не говорили бы о том, чем темы отличаются.
+      // Таблетка — это образец: название темы набрано ЕЁ шрифтом и её
+      // регистром. Семнадцать одинаково набранных подписей ничего не говорили
+      // бы о том, чем темы отличаются.
       el("span", {
-        class: "style-card__name",
+        class: `style-pill__name${p.uppercase ? " is-caps" : ""}`,
         text: p.uppercase ? p.title.toUpperCase() : p.title,
         style: `font-family:"${p.font}", system-ui, sans-serif;letter-spacing:${p.letter_spacing}em`,
       }),
-      el("i", { class: "style-card__bar", style: `background:${p.colors.accent}` }),
     ])));
-  fitCardNames();
+  syncArrows(box.parentNode);
 }
 
 function renderAccents() {
@@ -685,6 +729,7 @@ function renderAccents() {
       el("i", { class: "swatch__dot", style: `background:${a.color || (p ? p.colors.accent : "#F3D28F")}` }),
       el("span", { class: "swatch__name", text: a.title }),
     ])));
+  syncArrows($("#accent-chips").parentNode);
 }
 
 function renderFonts() {
@@ -712,6 +757,7 @@ function renderFonts() {
       el("span", { class: "chip__aa", text: "Аа" }),
       el("span", { class: "chip__name", text: f.title }),
     ])));
+  syncArrows($("#font-chips").parentNode);
 }
 
 function renderOptions() {
@@ -825,7 +871,7 @@ function setStep(step) {
     // плиток браузер начинает тянуть, только когда шаг стал видимым, — первый
     // замер идёт по подставному шрифту, поэтому второй ждёт их загрузки.
     const fit = () => {
-      fitCardNames();
+      syncAllArrows();
       for (const id of ["#preset-tabs", "#font-chips", "#accent-chips"]) scrollToActive($(id), "instant");
       preview.render();
     };
@@ -1568,13 +1614,14 @@ async function main() {
   renderNext();
   renderBalance();
   initEdit();
+  initStrips();
   initSidebar();
   // Ширина строки и подписи плиток меряются шрифтами тем — до их загрузки
   // замер идёт по подставному системному и врёт в меньшую сторону: названия
   // приезжали обрезанными многоточием ровно на первом, холодном открытии.
   if (document.fonts && document.fonts.ready) {
     document.fonts.ready.then(() => {
-      fitCardNames();
+      syncAllArrows();
       scrollToActive($("#preset-tabs"), "instant");
       preview.render();
     });
