@@ -17,7 +17,7 @@
     "past_opacity": 1.0,
     "ghost_opacity": 0.0,
     "accent": "#E6C87A",
-    "shout": "#F0E0B0",
+    "shout": "#C98F2E",
     "outline": "#05070A",
     "shadow": "#000000"
   },
@@ -68,8 +68,8 @@
     "block_shift_px": 0,
     "block_leave_px": 20,
     "block_leave_scale": 1.0,
-    "accent_scale": 1.2,
-    "shout_scale": 1.35,
+    "accent_scale": 1.45,
+    "shout_scale": 1.7,
     "shout_rotate": 0.0,
     "word_in_ms": 220,
     "word_rise_px": 0

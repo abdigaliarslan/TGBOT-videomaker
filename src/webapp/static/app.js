@@ -28,7 +28,8 @@ const I18N = {
     "file.too_long": "Видео длиннее {max} мин — сервер его не примет.",
     "file.too_short": "Видео короче {min} с — монтировать нечего.",
     "size.mb": "МБ", "size.gb": "ГБ", "dur.s": "с",
-    "cta.edit": "Смонтировать", "cta.topup": "Пополнить баланс", "cta.missing": "не хватает 1 ролика",
+    "cta.edit": "Смонтировать", "cta.choose": "Выбрать видео",
+    "cta.topup": "Пополнить баланс", "cta.missing": "не хватает 1 ролика",
     "cta.free": "бесплатно для владельца", "cta.pick": "сначала выберите видео", "cta.charge": "спишется 1 ролик из {n}",
     "cta.uploading": "Загрузка {p}%", "cta.checking": "Проверяю видео…", "cta.keep_open": "не закрывайте приложение до конца загрузки",
     "upload.lost": "Связь оборвалась во время загрузки. Попробуйте ещё раз.",
@@ -76,7 +77,8 @@ const I18N = {
     "file.too_long": "The video is longer than {max} min — the server won't accept it.",
     "file.too_short": "The video is shorter than {min} s — nothing to edit.",
     "size.mb": "MB", "size.gb": "GB", "dur.s": "s",
-    "cta.edit": "Create reel", "cta.topup": "Top up balance", "cta.missing": "you need 1 more video",
+    "cta.edit": "Create reel", "cta.choose": "Choose a video",
+    "cta.topup": "Top up balance", "cta.missing": "you need 1 more video",
     "cta.free": "free for the owner", "cta.pick": "pick a video first", "cta.charge": "uses 1 of your {n} videos",
     "cta.uploading": "Uploading {p}%", "cta.checking": "Checking the video…", "cta.keep_open": "keep the app open until the upload finishes",
     "upload.lost": "The connection dropped during upload. Please try again.",
@@ -371,9 +373,11 @@ const preview = {
     // (`opacity: 0`), в превью её и нет — фон карточки тёмный.
     const plate = el("div", { class: "cap-plate" });
     const panel = p.panel || {};
+    let plateX = 0;
     if (panel.enabled && panel.opacity > 0) {
+      plateX = Math.round(panel.padding_x * k);
       plate.style.background = `rgba(${hexToRgb(panel.color)}, ${panel.opacity})`;
-      plate.style.padding = `${Math.round(panel.padding_y * k)}px ${Math.round(panel.padding_x * k)}px`;
+      plate.style.padding = `${Math.round(panel.padding_y * k)}px ${plateX}px`;
       plate.style.borderRadius = `${Math.round(panel.radius * k)}px`;
     }
     plate.append(el("div", { class: "cap-line" }, scene.small.map((w) => word(w, base))));
@@ -385,7 +389,14 @@ const preview = {
 
     // Строка ужимается под ширину превью, как в рендере (С1): слово «СУБТИТРОВ»
     // капсом в Bold иначе вылезает за края карточки.
-    const room = box.clientWidth - (plate.offsetWidth - plate.clientWidth);
+    //
+    // Паддинг плашки вычитается ЯВНО. Раньше тут стояло
+    // `plate.offsetWidth - plate.clientWidth`, но clientWidth паддинг уже
+    // включает: разность даёт рамку, а её у плашки нет — то есть вычиталось
+    // всегда ноль. На единственной теме с видимой плашкой (Notebook) строка,
+    // которая шире её внутренней коробки, проверку проходила и вылезала
+    // словами за подложку.
+    const room = box.clientWidth - 2 * plateX;
     for (const line of plate.children) {
       const over = line.scrollWidth / room;
       if (room > 0 && over > 1) {
@@ -395,7 +406,8 @@ const preview = {
         }
       }
     }
-    $("#preview-tag").textContent = `${p.title} · ${activeFamily()}`;
+    const font = activeFont();
+    $("#preview-tag").textContent = `${p.title} · ${font ? font.title : p.font}`;
   },
   tick() {
     this.step += 1;
@@ -403,8 +415,19 @@ const preview = {
   },
   start() {
     clearInterval(this.timer);
+    // При сокращённом движении кадр собирается один раз и стоит: мигание слов
+    // раз в 280 мс — ровно то, от чего эта настройка защищает.
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      this.step = 5;
+      this.render();
+      return;
+    }
     this.timer = setInterval(() => { if (!this.paused) this.tick(); }, 280);
     this.render();
+  },
+  stop() {
+    clearInterval(this.timer);
+    this.timer = null;
   },
   toggle() {
     this.paused = !this.paused;
@@ -426,7 +449,30 @@ function scrollToActive(box, behavior = "smooth") {
   if (!active) return;
   const a = active.getBoundingClientRect();
   const b = box.getBoundingClientRect();
-  box.scrollBy({ left: a.left - b.left - (b.width - a.width) / 2, behavior });
+  // `behavior` — перечисление WebIDL: клиент, который не знает значения
+  // «instant», бросает TypeError прямо на входе. Здесь это стоило бы всего
+  // остального в `main()` — обработчиков загрузки, кнопок, опроса задач.
+  try {
+    box.scrollBy({ left: a.left - b.left - (b.width - a.width) / 2, behavior });
+  } catch (_) {
+    box.scrollLeft += a.left - b.left - (b.width - a.width) / 2;
+  }
+}
+
+// Длинное название ужимается, а не обрезается многоточием: «MODERNI…» и
+// «HEAVYWEIG…» — это уже не образец шрифта, ради которого плитка и нужна.
+//
+// Отдельной функцией, потому что меряется ШРИФТОМ ТЕМЫ: на холодном открытии
+// он ещё не загружен (`font-display: swap`), замер идёт по подставному и
+// врёт. `document.fonts.ready` зовёт это второй раз.
+function fitCardNames() {
+  for (const name of $$(".style-card__name")) {
+    name.style.fontSize = "";
+    const over = name.scrollWidth / name.clientWidth;
+    if (name.clientWidth > 0 && over > 1) {
+      name.style.fontSize = `${Math.max(11, Math.floor(18 / over))}px`;
+    }
+  }
 }
 
 function renderPresets() {
@@ -436,9 +482,11 @@ function renderPresets() {
     el("button", {
       class: `style-card${p.name === state.preset ? " is-active" : ""}`,
       type: "button",
-      role: "tab",
+      // Не «вкладка»: панели у неё нет, и скринридер обещал бы то, чего нет.
+      // Это выбор одного из многих — радиогруппа.
+      role: "radio",
       title: `${p.title} · ${p.font}`,
-      "aria-selected": p.name === state.preset ? "true" : "false",
+      "aria-checked": p.name === state.preset ? "true" : "false",
       onclick: () => {
         state.preset = p.name;
         haptic();
@@ -459,23 +507,19 @@ function renderPresets() {
       }),
       el("i", { class: "style-card__bar", style: `background:${p.colors.accent}` }),
     ])));
-  // Длинное название ужимается, а не обрезается многоточием: «MODERNI…» и
-  // «HEAVYWEIG…» — это уже не образец шрифта, ради которого плитка и нужна.
-  for (const name of box.querySelectorAll(".style-card__name")) {
-    const over = name.scrollWidth / name.clientWidth;
-    if (name.clientWidth > 0 && over > 1) {
-      name.style.fontSize = `${Math.max(11, Math.floor(18 / over))}px`;
-    }
-  }
+  fitCardNames();
 }
 
 function renderAccents() {
   const p = state.boot.presets.find((x) => x.name === state.preset);
   const box = $("#accent-chips");
+  $("#accent-count").textContent = state.boot.accents.length;
   box.replaceChildren(...state.boot.accents.map((a) =>
     el("button", {
       class: `swatch${a.key === state.accent ? " is-active" : ""}`,
       type: "button",
+      role: "radio",
+      "aria-checked": a.key === state.accent ? "true" : "false",
       title: a.title,
       onclick: () => {
         state.accent = a.key;
@@ -492,10 +536,13 @@ function renderAccents() {
 
 function renderFonts() {
   const box = $("#font-chips");
+  $("#font-count").textContent = (state.boot.fonts || []).length;
   box.replaceChildren(...(state.boot.fonts || []).map((f) =>
     el("button", {
       class: `chip${f.key === state.font ? " is-active" : ""}`,
       type: "button",
+      role: "radio",
+      "aria-checked": f.key === state.font ? "true" : "false",
       title: f.family || activeThemeFamily(),
       // Образец рисуется САМИМ шрифтом: название «Антиква» ничего не говорит,
       // пока не видно букв. Подпись при этом остаётся интерфейсным шрифтом —
@@ -540,7 +587,20 @@ function setFile(file) {
   probe.preload = "metadata";
   probe.muted = true;
   probe.playsInline = true;
-  const done = () => URL.revokeObjectURL(url);
+  // Освобождение — один раз и в любом случае. Перемотка может завершиться
+  // вообще без события (`seekable` пуст — так бывает у .mkv и .webm без
+  // индекса): тогда ни `seeked`, ни `error` не придут, и видео с буфером
+  // осталось бы жить до перезагрузки страницы. Сторож снимает это через три
+  // секунды — обложки не будет, остальное работает.
+  let freed = false;
+  const done = () => {
+    if (freed) return;
+    freed = true;
+    clearTimeout(guard);
+    probe.removeAttribute("src");
+    URL.revokeObjectURL(url);
+  };
+  const guard = setTimeout(done, 3000);
   probe.onloadedmetadata = () => {
     const d = probe.duration;
     if (state.file !== file) { done(); return; }
@@ -642,7 +702,10 @@ function renderCta(progressText, share) {
     title.textContent = tr("cta.topup");
     sub.textContent = tr("cta.missing");
   } else {
-    title.textContent = tr("cta.edit");
+    // Пока файла нет, нажатие открывает выбор файла, а не запускает монтаж —
+    // так кнопка и должна называться. Причина жила в подписи 12-м кеглем, а
+    // заголовок обещал другое.
+    title.textContent = tr(state.file ? "cta.edit" : "cta.choose");
     sub.textContent = u.is_admin
       ? tr(state.file ? "cta.free" : "cta.pick")
       : (state.file ? tr("cta.charge", { n: u.balance }) : tr("cta.pick"));
@@ -909,6 +972,11 @@ function go(screen) {
   for (const s of $$("[data-screen]")) s.hidden = s.dataset.screen !== screen;
   for (const b of $$("[data-nav]")) b.classList.toggle("is-active", b.dataset.nav === screen);
   window.scrollTo({ top: 0 });
+  // Таймер превью живёт только на своём экране. У спрятанного `display:none`
+  // высота равна нулю, масштаб уходил на запасные 620, и на возврате кадр на
+  // четверть секунды показывал субтитр в полтора раза крупнее, с неужатыми
+  // строками. Заодно это 3.6 перерисовки в секунду, которые шли вечно.
+  if (screen === "edit") preview.start(); else preview.stop();
   if (tg && tg.BackButton) {
     if (screen === "edit") tg.BackButton.hide(); else tg.BackButton.show();
   }
@@ -969,8 +1037,27 @@ async function main() {
   renderBalance();
   initEdit();
   preview.start();
-  // Ширина строки мерится шрифтом темы — до его загрузки замер врёт.
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => preview.render());
+  // Ширина строки и подписи плиток меряются шрифтами тем — до их загрузки
+  // замер идёт по подставному системному и врёт в меньшую сторону: названия
+  // приезжали обрезанными многоточием ровно на первом, холодном открытии.
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => {
+      fitCardNames();
+      scrollToActive($("#preset-tabs"), "instant");
+      preview.render();
+    });
+  }
+  // Превью прилипает под шапкой и ужимается, когда человек ушёл листать
+  // ленты: иначе выбор цвета и шрифта меняет то, чего в этот момент не видно.
+  const wrap = $("#preview-wrap");
+  addEventListener("scroll", () => {
+    wrap.classList.toggle("is-compact", window.scrollY > 120);
+  }, { passive: true });
+  // Вкладка в фоне — таймер не нужен; возврат к ней пересчитывает кадр.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) preview.stop();
+    else if (state.screen === "edit") preview.start();
+  });
 
   for (const btn of $$("[data-nav]")) btn.addEventListener("click", () => { haptic(); go(btn.dataset.nav); });
   $("#balance-pill").addEventListener("click", () => go("balance"));

@@ -10,7 +10,7 @@
   --bg: #f3f2f7;
   --card: #ffffff;
   --text: #16161b;
-  --muted: #72727d;
+  --muted: #6b6b76;
   --line: #dddce4;
   --pill: #1f1e25;
   --pill-text: #ffffff;
@@ -72,10 +72,10 @@ h1, h2 { margin: 0; }
 }
 .topbar__actions { display: flex; gap: 8px; }
 .icon-btn, .balance-pill {
-  height: 40px; border-radius: 999px; background: var(--card);
+  height: 44px; border-radius: 999px; background: var(--card);
   border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center;
 }
-.icon-btn { width: 40px; }
+.icon-btn { width: 44px; }
 .balance-pill { gap: 7px; padding: 0 14px 0 12px; font-weight: 700; }
 
 .screens { padding: 0 18px; }
@@ -83,11 +83,30 @@ h1, h2 { margin: 0; }
 .screen-title h1 { font-size: 26px; letter-spacing: -0.02em; }
 
 /* ---------------------------------------------------------------- превью */
+
+/* Кадр ведётся от ВЫСОТЫ, а не от ширины. Раньше стояло
+   `width: min(100%, 360px); aspect-ratio: 9/16; max-height: 62vh`, и при
+   ширине 354 пропорция просила 629 px, а max-height резал до ~523: карточка
+   была 3:4, то есть не той формы, что ролик. Строка, влезавшая в превью, в
+   кадре не влезала, и место субтитра по вертикали показывалось не то. */
+.preview-wrap {
+  --prev-h: min(58vh, 460px);
+  position: sticky; top: 60px; z-index: 4;
+  margin: 0 -18px; padding: 4px 18px 0; background: var(--bg);
+  height: calc(var(--prev-h) + 22px);
+  transition: height 220ms ease;
+}
+/* Ушли листать ленты — кадр ужимается и остаётся на виду: иначе выбор цвета
+   и шрифта меняет то, чего в этот момент не видно. Масштаб, а не новая
+   раскладка: содержимое то же, Python и превью считают по тем же числам. */
+.preview-wrap.is-compact { height: calc(var(--prev-h) * 0.46 + 18px); }
+.preview-wrap.is-compact .preview { transform: scale(0.46); }
 .preview {
   position: relative; overflow: hidden;
-  width: min(100%, 360px); aspect-ratio: 9 / 16; max-height: 62vh;
-  margin: 4px auto 18px; border-radius: 26px; background: #111;
+  height: var(--prev-h); width: calc(var(--prev-h) * 9 / 16); max-width: 100%;
+  margin: 0 auto; border-radius: 26px; background: #111;
   box-shadow: 0 12px 40px rgb(10 10 20 / 25%);
+  transform-origin: top center; transition: transform 220ms ease;
 }
 .preview__bg {
   position: absolute; inset: 0;
@@ -100,8 +119,8 @@ h1, h2 { margin: 0; }
 }
 @keyframes drift { from { transform: scale(1.02); } to { transform: scale(1.1) translateY(-2%); } }
 .preview__play {
-  position: absolute; top: 14px; right: 14px; z-index: 2;
-  width: 38px; height: 38px; border-radius: 50%;
+  position: absolute; top: 12px; right: 12px; z-index: 2;
+  width: 44px; height: 44px; border-radius: 50%;
   background: rgb(255 255 255 / 92%); color: #111;
   display: flex; align-items: center; justify-content: center;
 }
@@ -154,10 +173,10 @@ h1, h2 { margin: 0; }
 .strip { margin: 0 -18px 24px; }
 .strip__track {
   display: flex; gap: 10px; overflow-x: auto; scrollbar-width: none;
-  padding: 4px 18px 8px; scroll-behavior: smooth; scroll-snap-type: x proximity;
+  padding: 6px 18px 10px; scroll-behavior: smooth; scroll-snap-type: x proximity;
 }
 .strip__track > * { scroll-snap-align: center; }
-.strip__track--swatches { gap: 4px; }
+.strip__track--swatches { gap: 8px; scroll-snap-type: none; }
 
 .style-card {
   flex: none; width: 132px; height: 88px; border-radius: 18px; overflow: hidden;
@@ -187,17 +206,18 @@ h1, h2 { margin: 0; }
 .chip.is-active .chip__name { color: inherit; }
 
 .swatch {
-  flex: none; width: 64px; display: flex; flex-direction: column; align-items: center; gap: 7px;
+  flex: none; width: 72px; display: flex; flex-direction: column; align-items: center; gap: 7px;
 }
 .swatch__dot {
   width: 40px; height: 40px; border-radius: 50%;
-  box-shadow: inset 0 0 0 3px var(--bg), 0 0 0 1px var(--line);
-  transition: box-shadow 140ms ease;
+  box-shadow: inset 0 0 0 3px var(--stage), 0 0 0 1px var(--stage-line);
+  transition: box-shadow 140ms ease, transform 120ms ease;
 }
-.swatch.is-active .swatch__dot { box-shadow: inset 0 0 0 3px var(--bg), 0 0 0 2px var(--pill); }
+.swatch:active .swatch__dot { transform: scale(0.92); }
+.swatch.is-active .swatch__dot { box-shadow: inset 0 0 0 3px var(--stage), 0 0 0 2px var(--pill); }
 .swatch__name {
-  max-width: 64px; font-size: 11px; color: var(--muted); text-align: center;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 72px; min-height: 2.4em; font-size: 12px; color: var(--muted);
+  text-align: center; line-height: 1.2;
 }
 .swatch.is-active .swatch__name { color: var(--text); font-weight: 600; }
 
@@ -207,8 +227,9 @@ h1, h2 { margin: 0; }
   font-size: 13px; font-weight: 700; color: var(--muted);
   letter-spacing: 0.08em; text-transform: uppercase;
 }
-.section-head__count { font-size: 12px; font-weight: 700; color: var(--muted); opacity: 0.6; }
-.link-hint { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--muted); font-size: 13px; }
+.section-head__count { font-size: 12px; font-weight: 700; color: var(--muted); }
+.link-hint { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 2px;
+  margin-left: auto; color: var(--muted); font-size: 13px; }
 .link-hint span { border-bottom: 1px dashed currentColor; }
 
 .dropzone {
@@ -239,16 +260,21 @@ h1, h2 { margin: 0; }
 .toggle-row { display: flex; align-items: center; gap: 8px; min-height: 54px; }
 .toggle-row__label { font-size: 16px; }
 .badge-new {
-  font-size: 10px; font-weight: 800; letter-spacing: 0.04em; color: #fff;
-  padding: 3px 7px; border-radius: 7px; background: var(--grad);
+  font-size: 11px; font-weight: 800; letter-spacing: 0.04em; color: #fff;
+  padding: 3px 7px; border-radius: 7px; background: #7a3cf0;
 }
 .help {
+  position: relative;
   width: 22px; height: 22px; border-radius: 50%; background: var(--field); color: var(--muted);
   font-size: 12px; font-weight: 700; margin-right: auto;
 }
-.switch { position: relative; width: 52px; height: 32px; flex: none; }
+/* Вид прежний, мишень 44×44: сам кружок в 22 px — промах на телефоне. */
+.help::after { content: ""; position: absolute; inset: -11px; }
+/* Высота 54 с прозрачными полями: тумблер выглядит как прежде, но попасть
+   по нему можно по всей высоте строки. */
+.switch { position: relative; width: 52px; height: 54px; flex: none; }
 .switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
-.switch span { position: absolute; inset: 0; border-radius: 999px; background: var(--field); transition: background 160ms ease; }
+.switch span { position: absolute; inset: 11px 0; border-radius: 999px; background: var(--field); transition: background 160ms ease; }
 .switch span::after {
   content: ""; position: absolute; top: 3px; left: 3px; width: 26px; height: 26px; border-radius: 50%;
   background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 25%); transition: transform 180ms cubic-bezier(.3,.7,.4,1);
@@ -258,6 +284,10 @@ h1, h2 { margin: 0; }
 .switch input:checked + span::after { transform: translateX(20px); }
 
 /* ---------------------------------------------------------------- главная кнопка */
+/* Кнопка остаётся в потоке. Прилипшей она была ровно один заход: `sticky` с
+   `bottom` поднимает элемент ПОВЕРХ того, что выше по документу, и кнопка
+   постоянно лежала на ленте шрифтов. До неё теперь ведёт ужатое превью —
+   экран стал короче, — а не плавающая полоса. */
 .cta {
   position: relative; overflow: hidden; width: 100%; min-height: 64px; margin-top: 22px;
   border-radius: var(--radius); background: var(--grad); color: #fff;
@@ -269,7 +299,7 @@ h1, h2 { margin: 0; }
 .cta[disabled] { filter: saturate(0.4) brightness(0.9); cursor: default; }
 .cta__fill { position: absolute; inset: 0 auto 0 0; width: 0; background: rgb(255 255 255 / 22%); transition: width 200ms linear; }
 .cta__title { position: relative; font-size: 17px; font-weight: 800; }
-.cta__sub { position: relative; font-size: 12px; opacity: 0.9; }
+.cta__sub { position: relative; font-size: 13px; }
 .balance-line { text-align: center; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 14px 0 0; }
 .balance-line b { color: var(--text); }
 
@@ -351,7 +381,12 @@ h1, h2 { margin: 0; }
 .blocker__card { padding: 24px; text-align: center; }
 .blocker__card p { margin: 8px 0 0; }
 
+:focus-visible { outline: 2px solid var(--pill); outline-offset: 2px; border-radius: 10px; }
+
 @media (prefers-reduced-motion: reduce) {
   .preview__bg { animation: none; }
-  .cap-word { transition: none; transform: none; }
+  /* Слово не мигает раз в 280 мс, а просто стоит: таймер в app.js при этой
+     настройке не запускается вовсе, и кадр собирается один раз. */
+  .cap-word { transition: none; transform: none; opacity: 1; }
+  .preview, .preview-wrap { transition: none; }
 }

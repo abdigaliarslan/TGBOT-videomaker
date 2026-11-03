@@ -6,7 +6,7 @@
     "family": "Golos Text",
     "file": "GolosText-Bold.ttf",
     "weight": 700,
-    "size": 46,
+    "size": 63,
     "uppercase": true,
     "letter_spacing": 0.07
   },
@@ -37,7 +37,7 @@
   },
   "caption": {
     "position": "bottom",
-    "margin": 190,
+    "margin": 300,
     "line_height": 1.35,
     "align": "center",
     "max_lines": 2,

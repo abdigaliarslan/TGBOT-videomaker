@@ -756,11 +756,19 @@ async def font(request: web.Request) -> web.StreamResponse:
     path = Path(cfg.fonts_dir) / name
     if name not in allowed or not path.is_file():
         return _json_error(404, t("api.font_not_found", _browser_lang(request)))
-    headers = {"Cache-Control": "public, max-age=86400"}
-    if "gzip" in request.headers.get("Accept-Encoding", "").lower():
+    headers = {"Cache-Control": "public, max-age=86400", "Vary": "Accept-Encoding"}
+    # `gzip;q=0` — это явный ОТКАЗ от сжатия, а не просьба о нём: подстрока
+    # «gzip» в заголовке есть в обоих случаях.
+    accept = request.headers.get("Accept-Encoding", "").lower().replace(" ", "")
+    if "gzip" in accept and "gzip;q=0" not in accept:
+        # В отдельном потоке: это 70-80 мс чистого процессора на файл, а цикл
+        # событий здесь общий с long-polling бота (`src/bot/main.py`). Первое
+        # открытие приложения после выкладки тянет все восемнадцать начертаний
+        # разом — полсекунды, на которые бот переставал бы отвечать всем.
+        body = await asyncio.to_thread(_gzipped_font, path, path.stat().st_mtime_ns)
         return web.Response(
-            body=_gzipped_font(path, path.stat().st_mtime_ns),
-            headers={**headers, "Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+            body=body,
+            headers={**headers, "Content-Encoding": "gzip"},
             content_type="font/ttf",
         )
     return web.FileResponse(path, headers=headers)

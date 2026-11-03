@@ -489,7 +489,12 @@ class FontMetrics:
         return sum(1 for u in self.split(text, ligatures=ligatures) if self.advance(u))
 
 
-@lru_cache(maxsize=8)
+# Кеш обязан вмещать ВСЮ библиотеку, а не горсть шрифтов. При восьми ячейках и
+# восемнадцати файлах один `/api/bootstrap` (34 обращения к 17 файлам) выбивал
+# сам себя по кругу: 13 попаданий на 55 промахов и 50 мс синхронного разбора
+# JSON на каждое открытие приложения — в том же цикле событий, где опрашивается
+# бот. Тот же промах бил по `options.apply_font` в пайплайне.
+@lru_cache(maxsize=64)
 def load_metrics(font_file: str) -> FontMetrics:
     """Метрики по имени файла шрифта из пресета (`Montserrat-ExtraBold.ttf`)."""
     stem = Path(font_file).stem
