@@ -126,6 +126,16 @@ class Settings(BaseSettings):
     bot_upload_timeout_s: float = 900.0
 
     admin_ids: list[int] = Field(default_factory=list)
+    # Монтаж бесплатно для всех: ролик не списывается ни с чата, ни из
+    # приложения, пустой баланс не упирается в пейволл. Покупка пакетов при
+    # этом работает как работала — выключить режим значит вернуть оплату, не
+    # трогая ничьих балансов.
+    free_videos: bool = False
+
+    def charges(self, *, is_admin: bool) -> bool:
+        """Списывать ли ролик за задачу. Одно решение на оба входа: иначе
+        бесплатность в приложении обходилась бы пейволлом в чате и наоборот."""
+        return not (is_admin or self.free_videos)
 
     # ------------------------------------------------------------------ инфраструктура
     postgres_dsn: str = "postgresql+asyncpg://reelbot:reelbot@localhost:5432/reelbot"

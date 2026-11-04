@@ -45,7 +45,7 @@ const I18N = {
     "size.mb": "МБ", "size.gb": "ГБ", "dur.s": "с",
     "cta.edit": "Смонтировать", "cta.choose": "Выбрать видео",
     "cta.topup": "Пополнить баланс", "cta.missing": "не хватает 1 ролика",
-    "cta.free": "бесплатно для владельца", "cta.pick": "сначала выберите видео", "cta.charge": "спишется 1 ролик из {n}",
+    "cta.free": "бесплатно для владельца", "cta.free_all": "сейчас монтаж бесплатный", "cta.pick": "сначала выберите видео", "cta.charge": "спишется 1 ролик из {n}",
     "cta.uploading": "Загрузка {p}%", "cta.checking": "Проверяю видео…", "cta.keep_open": "не закрывайте приложение до конца загрузки",
     "upload.lost": "Связь оборвалась во время загрузки. Попробуйте ещё раз.",
     "toast.accepted": "Видео принято. Готовый ролик придёт в чат, а прогресс — в «Результатах».",
@@ -53,6 +53,7 @@ const I18N = {
     "balance.unlimited": "без ограничений",
     "balance.note": "Один ролик — один смонтированный видеофайл. Если монтаж не получится, ролик вернётся на баланс.",
     "balance.note_admin": "Вы владелец бота: монтаж бесплатный, баланс не списывается.",
+    "balance.note_free": "Сейчас монтаж бесплатный: ролики с баланса не списываются.",
     "status.queued": "в очереди", "status.running": "монтируется", "status.done": "готов", "status.failed": "не получилось", "status.cancelled": "отменён",
     "jobs.all": "Все", "jobs.done": "Готовые", "jobs.active": "В работе",
     "jobs.empty": "Роликов пока нет", "jobs.empty_hint": "Загрузите видео — готовый ролик придёт в чат и появится здесь.",
@@ -127,7 +128,7 @@ const I18N = {
     "size.mb": "MB", "size.gb": "GB", "dur.s": "s",
     "cta.edit": "Create reel", "cta.choose": "Choose a video",
     "cta.topup": "Top up balance", "cta.missing": "you need 1 more video",
-    "cta.free": "free for the owner", "cta.pick": "pick a video first", "cta.charge": "uses 1 of your {n} videos",
+    "cta.free": "free for the owner", "cta.free_all": "editing is free right now", "cta.pick": "pick a video first", "cta.charge": "uses 1 of your {n} videos",
     "cta.uploading": "Uploading {p}%", "cta.checking": "Checking the video…", "cta.keep_open": "keep the app open until the upload finishes",
     "upload.lost": "The connection dropped during upload. Please try again.",
     "toast.accepted": "Video received. The finished reel will arrive in the chat; track progress in “Results”.",
@@ -135,6 +136,7 @@ const I18N = {
     "balance.unlimited": "unlimited",
     "balance.note": "One video — one edited reel. If editing fails, the video goes back to your balance.",
     "balance.note_admin": "You own this bot: editing is free and your balance isn't used.",
+    "balance.note_free": "Editing is free right now: your balance isn't used.",
     "status.queued": "queued", "status.running": "editing", "status.done": "ready", "status.failed": "failed", "status.cancelled": "cancelled",
     "jobs.all": "All", "jobs.done": "Ready", "jobs.active": "In progress",
     "jobs.empty": "No videos yet", "jobs.empty_hint": "Upload a video — the finished reel will arrive in the chat and show up here.",
@@ -944,6 +946,12 @@ function initEdit() {
   $("#cta").addEventListener("click", onCta);
 }
 
+// Платит ли пользователь за ролик. Владельцы не платят никогда, остальные —
+// пока не включён бесплатный режим (`free` в bootstrap, FREE_VIDEOS на сервере).
+function pays(u) {
+  return !u.is_admin && !(state.boot && state.boot.free);
+}
+
 function renderCta(progressText, share) {
   const btn = $("#cta");
   const u = state.boot && state.boot.user;
@@ -958,23 +966,24 @@ function renderCta(progressText, share) {
     return;
   }
   btn.disabled = false;
-  if (!u.is_admin && u.balance < 1) {
+  if (pays(u) && u.balance < 1) {
     title.textContent = tr("cta.topup");
     sub.textContent = tr("cta.missing");
   } else {
     // Пока файла нет, нажатие открывает выбор файла, а не запускает монтаж —
     // так кнопка и должна называться.
     title.textContent = tr(state.file ? "cta.edit" : "cta.choose");
-    sub.textContent = u.is_admin
-      ? tr(state.file ? "cta.free" : "cta.pick")
-      : (state.file ? tr("cta.charge", { n: u.balance }) : tr("cta.pick"));
+    const free = u.is_admin ? "cta.free" : "cta.free_all";
+    sub.textContent = !state.file
+      ? tr("cta.pick")
+      : (pays(u) ? tr("cta.charge", { n: u.balance }) : tr(free));
   }
 }
 
 async function onCta() {
   if (state.busy) return;
   const u = state.boot.user;
-  if (!u.is_admin && u.balance < 1) { go("tariffs"); return; }
+  if (pays(u) && u.balance < 1) { go("tariffs"); return; }
   if (!state.file) { haptic("warning"); $("#file-input").click(); return; }
 
   state.busy = true;
@@ -1120,7 +1129,7 @@ function renderJobs() {
       parts.push(el("div", { class: "bar" }, [el("i", { style: `width:${Math.round((j.progress || 0) * 100)}%` })]));
     } else if (j.status === "failed") {
       parts.push(el("div", { class: "muted", text: j.error || "" }));
-      if (!state.boot.user.is_admin) parts.push(el("div", { class: "muted", text: tr("jobs.refunded") }));
+      if (pays(state.boot.user)) parts.push(el("div", { class: "muted", text: tr("jobs.refunded") }));
     } else if (j.purged) {
       parts.push(el("div", { class: "muted", text: tr("jobs.purged") }));
     } else if (j.status === "done" && j.video_url) {
@@ -1430,7 +1439,9 @@ function renderBalance() {
   for (const node of $$("[data-balance-value]")) node.textContent = u.is_admin ? "∞" : n;
   for (const node of $$("[data-balance-unit]")) node.textContent = u.is_admin ? tr("balance.unlimited") : videosWord(n);
   for (const node of $$("[data-balance-count]")) node.textContent = u.is_admin ? "∞" : n;
-  $("#balance-note").textContent = tr(u.is_admin ? "balance.note_admin" : "balance.note");
+  $("#balance-note").textContent = tr(
+    u.is_admin ? "balance.note_admin" : (pays(u) ? "balance.note" : "balance.note_free"),
+  );
   renderCta();
 }
 

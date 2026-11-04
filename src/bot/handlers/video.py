@@ -119,7 +119,8 @@ async def on_video(message: Message, bot: Bot) -> None:
         return
 
     # Пейволл один на оба входа: иначе оплату в приложении обходили бы простой
-    # отправкой файла в чат. Владельцы из ADMIN_IDS не платят.
+    # отправкой файла в чат. Владельцы из ADMIN_IDS не платят, а в бесплатном
+    # режиме (`FREE_VIDEOS`) не платит никто.
     try:
         job = await repo.create_job(
             user.id,
@@ -132,7 +133,7 @@ async def on_video(message: Message, bot: Bot) -> None:
             # два, а пользователь один. Тему чат и так брал из профиля, а цвет со
             # шрифтом до сих пор молча сбрасывались на умолчание.
             options=JobOptions.model_validate(db_user.settings or {}).model_dump(),
-            charge=not db_user.is_admin,
+            charge=settings.charges(is_admin=db_user.is_admin),
         )
     except repo.InsufficientBalance:
         await message.answer(t("video.no_balance", lang), reply_markup=app_keyboard("balance", lang))

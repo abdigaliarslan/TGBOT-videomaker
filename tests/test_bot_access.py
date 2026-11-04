@@ -180,3 +180,56 @@ async def test_a_long_telegram_outage_ends_the_process(monkeypatch):
     with pytest.raises(SystemExit) as e:
         await bot_main._get_me_persistently(Dead())
     assert "Telegram недоступен" in str(e.value)
+
+
+# ------------------------------------------------------------------ бесплатный режим
+
+
+def test_free_mode_charges_nobody_and_paid_mode_charges_all_but_owners():
+    """Решение «списывать ли ролик» одно на оба входа — чат и приложение."""
+    from src.core.config import Settings
+
+    paid = Settings(_env_file=None, free_videos=False)
+    free = Settings(_env_file=None, free_videos=True)
+    assert paid.charges(is_admin=False) and not paid.charges(is_admin=True)
+    assert not free.charges(is_admin=False) and not free.charges(is_admin=True)
+
+
+async def test_free_mode_lets_an_empty_balance_send_a_video_from_the_chat(monkeypatch):
+    """Ролик из чата в бесплатном режиме ставится без списания — иначе
+    пустой баланс упирался бы в пейволл, которого сейчас нет."""
+    async def upsert_user(*a, **kw):
+        return SimpleNamespace(
+            is_blocked=False, is_admin=False, lang="ru", language_code="ru",
+            preset="glass", settings=None, balance=0,
+        )
+
+    async def no_jobs(*a, **kw):
+        return 0
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    async def create_job(*a, **kw):
+        seen.update(kw)
+        raise Stop
+
+    monkeypatch.setattr(video.repo, "upsert_user", upsert_user)
+    monkeypatch.setattr(video.repo, "active_jobs_count", no_jobs)
+    monkeypatch.setattr(video.repo, "create_job", create_job)
+    monkeypatch.setattr(video.settings, "free_videos", True)
+
+    async def answer(text, **kw):
+        return SimpleNamespace(message_id=1)
+
+    msg = SimpleNamespace(
+        from_user=SimpleNamespace(id=5, username=None, first_name=None, language_code="ru"),
+        chat=SimpleNamespace(id=5),
+        video=SimpleNamespace(mime_type="video/mp4", duration=30, file_size=1024, file_id="f"),
+        video_note=None, document=None, answer=answer,
+    )
+    with pytest.raises(Stop):
+        await video.on_video(msg, Boom())
+    assert seen["charge"] is False

@@ -378,6 +378,9 @@ async def bootstrap(request: web.Request) -> web.Response:
                 for k, (titles, choice) in FONTS.items()
             ],
             "packages": [{"videos": v, "stars": s} for v, s in cfg.star_packages.items()],
+            # Монтаж сейчас бесплатный для всех: кнопка не ведёт в тарифы и не
+            # обещает списания.
+            "free": cfg.free_videos,
             "limits": {
                 "min_seconds": cfg.min_video_seconds,
                 "max_minutes": cfg.max_video_minutes,
@@ -616,7 +619,7 @@ async def upload_finish(request: web.Request) -> web.Response:
                 preset=preset,
                 chat_id=user.id,
                 options=options.model_dump(),
-                charge=not user.is_admin,
+                charge=cfg.charges(is_admin=user.is_admin),
             )
         except repo.InsufficientBalance:
             return await _fail(request, 402, "api.no_balance", extra={"balance": user.balance})
