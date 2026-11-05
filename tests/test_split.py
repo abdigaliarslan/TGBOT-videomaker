@@ -150,3 +150,62 @@ def test_split_for_the_whole_reel_needs_no_full_frame_pass(tmp_path, media):
     assert sizes == [960]
     late = pixel(out, 3.5, 540, 400)
     assert late[0] > 200, f"верхнее пропало, хотя его хватает на весь ролик: {late}"
+
+
+# --------------------------------------------------------------- верхний исходник
+
+
+async def test_a_job_without_a_top_has_no_top_source(tmp_path):
+    from types import SimpleNamespace
+
+    from src.worker.tasks import fetch_top_source
+
+    job = SimpleNamespace(id="j", top_source_key=None)
+    assert await fetch_top_source(job, tmp_path / "top.mp4") is None
+
+
+async def test_the_top_source_is_downloaded_from_storage(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from src.worker import tasks
+
+    got = []
+
+    class FakeStorage:
+        async def download(self, key, dst):
+            got.append(key)
+            Path(dst).write_bytes(b"x")
+
+    monkeypatch.setattr(tasks, "storage", FakeStorage())
+    job = SimpleNamespace(id="j", top_source_key="sources/j/top.mp4")
+    out = await tasks.fetch_top_source(job, tmp_path / "top.mp4")
+    assert out == tmp_path / "top.mp4" and got == ["sources/j/top.mp4"]
+
+
+async def test_a_purged_top_source_is_a_clear_error(tmp_path, monkeypatch):
+    """После уборки по сроку перерендер получает понятный отказ, а не падение."""
+    from types import SimpleNamespace
+
+    from src.worker import tasks
+
+    class GoneStorage:
+        async def download(self, key, dst):
+            raise FileNotFoundError(key)
+
+    monkeypatch.setattr(tasks, "storage", GoneStorage())
+    job = SimpleNamespace(id="j", top_source_key="sources/j/top.mp4")
+    with pytest.raises(tasks.JobError) as err:
+        await tasks.fetch_top_source(job, tmp_path / "top.mp4")
+    assert err.value.code == "source_lost"
+
+
+async def test_a_split_job_whose_top_was_purged_is_a_clear_error(tmp_path):
+    """Уборка обнуляет ключ, а лист по-прежнему говорит «поделено»."""
+    from types import SimpleNamespace
+
+    from src.worker.tasks import JobError, fetch_top_source
+
+    job = SimpleNamespace(id="j", top_source_key=None, edl={"split_until": 6.1})
+    with pytest.raises(JobError) as err:
+        await fetch_top_source(job, tmp_path / "top.mp4")
+    assert err.value.code == "source_lost"

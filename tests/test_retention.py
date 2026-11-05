@@ -16,6 +16,7 @@ class FakeJob:
     id: uuid.UUID
     source_key: str | None
     result_key: str | None
+    top_source_key: str | None = None
 
 
 class FakeStorage:
@@ -95,3 +96,16 @@ def test_the_janitor_runs_the_purge():
     names = {c.name for c in tasks.LightWorkerSettings.cron_jobs}
     assert "cron:purge_expired_files" in names
     assert tasks.purge_expired_files in tasks.LightWorkerSettings.functions
+
+
+async def test_purge_deletes_the_top_source_too(env, monkeypatch):
+    """У ролика из двух видео исходников два: верхний не должен пережить срок
+    хранения и лежать в хранилище вечно."""
+    jobs, seen = env
+    jobs[0].top_source_key = "sources/a-top.mp4"
+    fake = FakeStorage()
+    monkeypatch.setattr(tasks, "storage", fake)
+    out = await tasks.purge_expired_files({})
+
+    assert "sources/a-top.mp4" in fake.deleted
+    assert out["files"] == 4

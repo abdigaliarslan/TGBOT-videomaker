@@ -121,6 +121,25 @@ async def fetch_source(job: Any, dst: Path) -> Path:
     raise JobError("Исходный файл потерялся. Пришлите видео ещё раз.", "source_lost")
 
 
+async def fetch_top_source(job: Any, dst: Path) -> Path | None:
+    """Верхнее видео режима «Два видео» или `None`, если ролик из одного.
+
+    Ключа нет, а лист говорит, что кадр поделён, — исходник снят уборкой по
+    сроку хранения. Перерендер тогда собрал бы другой ролик, поэтому это тот же
+    понятный отказ, что и у пропавшего нижнего.
+    """
+    key = getattr(job, "top_source_key", None)
+    if not key:
+        if (getattr(job, "edl", None) or {}).get("split_until") is not None:
+            raise JobError("Исходный файл потерялся. Пришлите видео ещё раз.", "source_lost")
+        return None
+    try:
+        await storage.download(key, dst)
+    except FileNotFoundError as e:
+        raise JobError("Исходный файл потерялся. Пришлите видео ещё раз.", "source_lost") from e
+    return dst
+
+
 # --------------------------------------------------------------------------- задача
 
 
@@ -501,7 +520,7 @@ async def purge_expired_files(ctx: dict[str, Any]) -> dict[str, int]:
     jobs = await repo.jobs_with_expired_files(cutoff)
     files = 0
     for job in jobs:
-        for key in {job.source_key, job.result_key} - {None}:
+        for key in {job.source_key, getattr(job, "top_source_key", None), job.result_key} - {None}:
             try:
                 await storage.delete(key)
                 files += 1

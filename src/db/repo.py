@@ -642,6 +642,7 @@ async def mark_files_purged(job_id: uuid.UUID | str) -> None:
     await update_job(
         job_id,
         source_key=None,
+        top_source_key=None,
         result_key=None,
         source_local_path=None,
         files_purged_at=datetime.now(timezone.utc),

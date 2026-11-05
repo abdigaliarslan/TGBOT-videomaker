@@ -233,3 +233,14 @@ async def test_the_watchdog_picks_the_stuck_and_leaves_the_fresh(user):
     assert stuck.id in ids, "задача без признаков жизни не попала в выборку"
     assert waiting.id in ids, "задача, простоявшая в очереди девять часов, не попала в выборку"
     assert fresh.id not in ids, "в выборку попала задача, которая только началась"
+
+
+async def test_the_top_source_is_kept_and_purged_with_the_job(user):
+    """Второй исходник режима «Два видео» живёт в задаче и уходит вместе с
+    остальными файлами по сроку хранения."""
+    job = await repo.create_job(1001, **job_args())
+    await repo.update_job(job.id, top_source_key="sources/x/top.mp4")
+    assert (await repo.get_job(job.id)).top_source_key == "sources/x/top.mp4"
+
+    await repo.mark_files_purged(job.id)
+    assert (await repo.get_job(job.id)).top_source_key is None

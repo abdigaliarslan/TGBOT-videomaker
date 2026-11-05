@@ -115,6 +115,9 @@ class Job(Base):
     # источник
     source_file_id: Mapped[str | None] = mapped_column(String(256))
     source_key: Mapped[str | None] = mapped_column(String(512))  # ключ в S3
+    # Второй исходник режима «Два видео» — верхняя половина кадра, без звука.
+    # NULL — обычный ролик из одного видео.
+    top_source_key: Mapped[str | None] = mapped_column(String(512))
     # Путь, который отдал локальный Bot API server (M0 ⚠): файл лежит на общем
     # томе, скачивать его через API не нужно и нельзя.
     source_local_path: Mapped[str | None] = mapped_column(String(1024))
