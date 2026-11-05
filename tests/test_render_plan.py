@@ -2100,3 +2100,51 @@ def test_long_sentences_still_get_a_rare_trip_up():
     )
     plan = build_plan(edl, "in.mp4", preset=load_preset("glass"), cfg=cfg())
     assert "top" in [b.position for b in plan.blocks if not b.title_card]
+
+
+# ------------------------------------------------------------ два видео: шов
+
+
+def test_block_windows_match_the_plan():
+    """Окна блоков до плана — те же, что поставит план: по ним выбирается
+    момент раскрытия, и разойдись они, склейка встала бы посреди блока."""
+    from src.core.render_plan import block_windows
+
+    edl = long_edl()
+    plan = build_plan(edl, "in.mp4", preset=load_preset("glass"), cfg=cfg())
+    caps = [(b.start, b.end) for b in plan.blocks if not b.title_card]
+    assert block_windows(edl, cfg=cfg()) == pytest.approx(caps)
+
+
+def test_blocks_of_the_split_part_sit_on_the_seam():
+    """Пока кадр поделён, субтитр стоит на шве, плакатом и без привязки к
+    голове; после раскрытия живёт по правилам темы."""
+    edl = long_edl(split_until=20.0)
+    edl.captions[2].quiet = True
+    plan = build_plan(edl, "in.mp4", preset=load_preset("pulse"), cfg=cfg())
+    caps = [b for b in plan.blocks if not b.title_card]
+    before = [b for b in caps if b.start < 20.0]
+    after = [b for b in caps if b.start >= 20.0]
+    assert before and {b.position for b in before} == {"center"}
+    assert not any(b.quiet or b.anchor_path for b in before)
+    assert after and "center" not in {b.position for b in after}
+
+
+def test_a_plan_without_split_is_unchanged():
+    edl = long_edl()
+    again = edl.model_copy(update={"split_until": None})
+    ps = load_preset("glass")
+    assert build_plan(edl, "in.mp4", preset=ps, cfg=cfg()).to_dict() == \
+        build_plan(again, "in.mp4", preset=ps, cfg=cfg()).to_dict()
+
+
+def test_the_title_card_stays_over_the_top_half():
+    """Шов по центру не занимает полосу титра: заголовок не пропадает."""
+    edl = long_edl(split_until=20.0, title="Двадцать тысяч за стол")
+    plan = build_plan(edl, "in.mp4", preset=load_preset("pulse"), cfg=cfg())
+    assert any(b.title_card for b in plan.blocks)
+
+
+def test_split_until_survives_the_json_round_trip():
+    edl = long_edl(split_until=12.5)
+    assert EDL.model_validate_json(edl.model_dump_json()).split_until == 12.5

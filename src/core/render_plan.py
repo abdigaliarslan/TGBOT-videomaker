@@ -703,6 +703,38 @@ def caption_rhythm(
     return out
 
 
+def block_windows(
+    edl: EDL, *, apply_cuts: bool = True, cfg: Settings | None = None
+) -> list[tuple[float, float]]:
+    """Когда звучит каждый блок субтитров — ровно так, как его поставит `build_plan`.
+
+    Нужна до плана: момент, когда разделённый кадр раскрывается на весь экран,
+    выбирается по границам блоков (`pipeline.split.choose_split_until`), а
+    подготовленное видео собирается раньше, чем считается план. Арифметика та
+    же, что в `build_plan`: начало первого слова, конец последнего плюс хвост
+    `sub_tail`, затем следующий блок обрывает предыдущий. Расхождение ловит
+    `test_block_windows_match_the_plan`.
+    """
+    cfg = cfg or default_settings
+    tl = edl.timeline() if apply_cuts else Timeline([], edl.source_duration)
+    by_idx = {w.idx: w for w in edl.words}
+    out: list[list[float]] = []
+    for block in edl.captions:
+        spans = [
+            win
+            for cw in block.words
+            if cw.word_idx in by_idx and (win := tl.word_window(by_idx[cw.word_idx])) is not None
+        ]
+        if spans:
+            out.append([round(spans[0][0], 3), round(spans[-1][1], 3) + cfg.sub_tail])
+    for a, b in zip(out, out[1:]):
+        if a[1] > b[0]:
+            a[1] = b[0]
+    if out and tl.duration > 0:
+        out[-1][1] = min(out[-1][1], tl.duration)
+    return [(a, b) for a, b in out]
+
+
 @dataclass(slots=True)
 class _Place:
     """Блок, разложенный под ОДНУ позицию — вместе с регистром, в котором он там играет.
@@ -991,6 +1023,15 @@ def build_plan(
             )
         if not pwords:
             continue
+        if edl.split_until is not None and pwords[0].start < edl.split_until:
+            # Кадр поделён: блок стоит на шве между половинами, плакатом и без
+            # привязки к голове — голова живёт в нижней половине, а трек лица
+            # снят с полного кадра. Блок переписывается целиком, и дальше весь
+            # общий код (регистр, ритм, разведение с картинкой) видит обычный
+            # блок с явной позицией.
+            block = block.model_copy(
+                update={"position": "center", "quiet": False, "anchor_track": None}
+            )
 
         # Новая фраза — после знака или после паузы. Текст берётся из
         # транскрипта, а не из показанного: у темы в верхнем регистре
