@@ -278,6 +278,15 @@ svg { flex: none; }
 .dropzone__text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .dropzone__text b { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dropzone__text span { font-size: 13px; }
+/* «Два видео»: два поля друг над другом в рамке телефона — так, как ляжет
+   кадр ролика. Верхнее — то, что показывают, нижнее — говорящий. */
+.split-frame { display: flex; flex-direction: column; }
+.split-frame.is-split {
+  gap: 6px; padding: 6px; border-radius: 28px; background: var(--field);
+}
+.split-frame.is-split .dropzone__empty { min-height: 150px; padding: 18px 16px; }
+.split-frame.is-split .orb { width: 48px; height: 48px; }
+.dropzone__role { font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
 .under-drop { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: -6px; flex-wrap: wrap; }
 
 .help {

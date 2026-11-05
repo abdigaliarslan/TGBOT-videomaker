@@ -150,21 +150,39 @@
           <!-- Шаг 1: видео и нарезка -->
           <div class="step" data-step="1">
             <h2 class="step__title" data-i18n="edit.s1_title">Загрузите видео для ролика</h2>
-            <p class="lead" data-i18n="edit.s1_lead">Видео, где человек говорит в камеру. Соберём из него вертикальный ролик с субтитрами.</p>
+            <p class="lead" id="s1-lead" data-i18n="edit.s1_lead">Видео, где человек говорит в камеру. Соберём из него вертикальный ролик с субтитрами.</p>
 
+            <div class="seg seg--wide" id="layout-seg" role="radiogroup"></div>
+
+            <div class="split-frame" id="split-frame">
+            <label class="dropzone" id="top-dropzone" hidden>
+              <input type="file" id="top-input" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi" hidden />
+              <span class="dropzone__empty">
+                <span class="orb"><svg width="26" height="26"><use href="#i-plus"/></svg></span>
+                <b data-i18n="split.top_title">Сверху — что показываем</b>
+                <span class="muted" data-i18n="split.top_sub">без звука</span>
+              </span>
+              <span class="dropzone__file">
+                <span class="dropzone__thumb" id="top-thumb"><svg width="22" height="22"><use href="#i-film"/></svg></span>
+                <span class="dropzone__text"><span class="dropzone__role" data-i18n="split.top_role">Сверху</span><b id="top-title"></b><span class="muted" id="top-sub"></span></span>
+                <span class="round-btn" id="top-remove" data-i18n-aria="edit.remove"><svg width="18" height="18"><use href="#i-close"/></svg></span>
+              </span>
+            </label>
             <label class="dropzone" id="dropzone">
               <input type="file" id="file-input" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv,.avi" hidden />
               <span class="dropzone__empty">
                 <span class="orb"><svg width="26" height="26"><use href="#i-plus"/></svg></span>
-                <b data-i18n="cta.choose">Выбрать видео</b>
+                <b id="drop-empty-title" data-i18n="cta.choose">Выбрать видео</b>
+                <span class="muted" id="drop-role" hidden></span>
                 <span class="muted" id="drop-limits"></span>
               </span>
               <span class="dropzone__file">
                 <span class="dropzone__thumb" id="drop-thumb"><svg width="22" height="22"><use href="#i-film"/></svg></span>
-                <span class="dropzone__text"><b id="drop-title"></b><span class="muted" id="drop-sub"></span></span>
+                <span class="dropzone__text"><span class="dropzone__role" id="drop-role-chip" data-i18n="split.bottom_role" hidden>Снизу</span><b id="drop-title"></b><span class="muted" id="drop-sub"></span></span>
                 <span class="round-btn" id="drop-remove" data-i18n-aria="edit.remove"><svg width="18" height="18"><use href="#i-close"/></svg></span>
               </span>
             </label>
+            </div>
 
             <div class="under-drop">
               <button class="link-hint" id="requirements" type="button"><svg width="15" height="15"><use href="#i-info"/></svg><span data-i18n="edit.requirements">Требования к видео</span></button>

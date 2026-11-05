@@ -44,6 +44,11 @@ const I18N = {
     "file.too_short": "Видео короче {min} с — монтировать нечего.",
     "size.mb": "МБ", "size.gb": "ГБ", "dur.s": "с",
     "cta.edit": "Смонтировать", "cta.choose": "Выбрать видео",
+    "layout.single": "Одно видео", "layout.split": "Два видео",
+    "split.top_title": "Сверху — что показываем", "split.top_sub": "без звука",
+    "split.bottom_title": "Снизу — вы в кадре", "split.bottom_sub": "звук и субтитры отсюда",
+    "split.need_both": "добавьте оба видео", "split.top_role": "Сверху", "split.bottom_role": "Снизу",
+    "edit.s1_lead_split": "Сверху — то, что показываете, снизу — вы в кадре. Соберём из двух видео ролик с субтитрами.",
     "cta.topup": "Пополнить баланс", "cta.missing": "не хватает 1 ролика",
     "cta.free": "бесплатно для владельца", "cta.free_all": "сейчас монтаж бесплатный", "cta.pick": "сначала выберите видео", "cta.charge": "спишется 1 ролик из {n}",
     "cta.uploading": "Загрузка {p}%", "cta.checking": "Проверяю видео…", "cta.keep_open": "не закрывайте приложение до конца загрузки",
@@ -127,6 +132,11 @@ const I18N = {
     "file.too_short": "The video is shorter than {min} s — nothing to edit.",
     "size.mb": "MB", "size.gb": "GB", "dur.s": "s",
     "cta.edit": "Create reel", "cta.choose": "Choose a video",
+    "layout.single": "One video", "layout.split": "Two videos",
+    "split.top_title": "Top — what you show", "split.top_sub": "muted",
+    "split.bottom_title": "Bottom — you on camera", "split.bottom_sub": "sound and captions come from here",
+    "split.need_both": "add both videos", "split.top_role": "Top", "split.bottom_role": "Bottom",
+    "edit.s1_lead_split": "On top — what you show, below — you on camera. We'll turn the two videos into a reel with captions.",
     "cta.topup": "Top up balance", "cta.missing": "you need 1 more video",
     "cta.free": "free for the owner", "cta.free_all": "editing is free right now", "cta.pick": "pick a video first", "cta.charge": "uses 1 of your {n} videos",
     "cta.uploading": "Uploading {p}%", "cta.checking": "Checking the video…", "cta.keep_open": "keep the app open until the upload finishes",
@@ -207,6 +217,10 @@ const state = {
   font: "theme",
   options: {},
   file: null,
+  // «Два видео» (`pipeline.split`): `file` — нижнее, говорящий; `topFile` —
+  // верхнее, то, что показывают.
+  layout: "single",
+  topFile: null,
   busy: false,
   jobs: [],
   jobsLoaded: false,
@@ -778,6 +792,54 @@ function renderFonts() {
 function renderOptions() {
   for (const input of $$("[data-option]")) input.checked = !!state.options[input.dataset.option];
   renderCut();
+  renderLayout();
+}
+
+// Раскладка кадра — выбор из двух, как нарезка. Помнится между заходами: кто
+// снимает ролики «сверху товар, снизу я», снимает их подряд.
+const LAYOUT_KEY = "reelbot:layout";
+
+function loadLayout() {
+  try { return localStorage.getItem(LAYOUT_KEY) === "split" ? "split" : "single"; } catch (_) { return "single"; }
+}
+
+function renderLayout() {
+  const split = state.layout === "split";
+  $("#layout-seg").replaceChildren(...[["single", "layout.single"], ["split", "layout.split"]].map(([value, key]) =>
+    el("button", {
+      type: "button", role: "radio", class: value === state.layout ? "is-active" : "",
+      "aria-checked": value === state.layout ? "true" : "false", text: tr(key),
+      onclick: () => {
+        if (state.busy || state.layout === value) return;
+        state.layout = value;
+        try { localStorage.setItem(LAYOUT_KEY, value); } catch (_) { /* не критично */ }
+        haptic();
+        renderLayout();
+      },
+    })));
+  $("#split-frame").classList.toggle("is-split", split);
+  $("#top-dropzone").hidden = !split;
+  $("#drop-empty-title").textContent = tr(split ? "split.bottom_title" : "cta.choose");
+  $("#drop-role").textContent = tr("split.bottom_sub");
+  $("#drop-role").hidden = !split;
+  $("#drop-role-chip").hidden = !split;
+  $("#s1-lead").textContent = tr(split ? "edit.s1_lead_split" : "edit.s1_lead");
+  // Два файла в чат с ботом не отправить, а картинок по смыслу в этом режиме
+  // нет вовсе: верхнюю половину пользователь показывает сам.
+  $("#send-in-chat").hidden = split;
+  $('[data-option="broll"]').closest(".toggle-row").hidden = split;
+  renderNext();
+  renderCta();
+}
+
+// Готово ли к монтажу: в «Двух видео» нужны оба файла.
+function ready() {
+  return !!state.file && (state.layout !== "split" || !!state.topFile);
+}
+
+// Какое поле открыть, если файла не хватает.
+function missingInput() {
+  return $(!state.file ? "#file-input" : "#top-input");
 }
 
 // ------------------------------------------------------------------ экран «Монтаж», шаг 1
@@ -802,21 +864,29 @@ function renderLimits() {
   $("#drop-limits").textContent = tr("edit.limits", { mb: l.max_upload_mb, min: l.min_seconds, max: l.max_minutes });
 }
 
-function setFile(file) {
-  state.file = file;
-  const zone = $("#dropzone");
-  const thumb = $("#drop-thumb");
+// Поля загрузки: нижнее (говорящий, оно же единственное в обычном режиме) и
+// верхнее режима «Два видео».
+const SLOTS = {
+  bottom: { key: "file", zone: "#dropzone", thumb: "#drop-thumb", title: "#drop-title", sub: "#drop-sub", input: "#file-input", remove: "#drop-remove" },
+  top: { key: "topFile", zone: "#top-dropzone", thumb: "#top-thumb", title: "#top-title", sub: "#top-sub", input: "#top-input", remove: "#top-remove" },
+};
+
+function setFile(file, which = "bottom") {
+  const slot = SLOTS[which];
+  state[slot.key] = file;
+  const zone = $(slot.zone);
+  const thumb = $(slot.thumb);
   zone.classList.toggle("has-file", !!file);
   thumb.style.backgroundImage = "";
   thumb.classList.remove("has-image");
   renderNext();
   if (!file) {
-    $("#file-input").value = "";
+    $(slot.input).value = "";
     renderCta();
     return;
   }
-  $("#drop-title").textContent = file.name || tr("edit.untitled");
-  $("#drop-sub").textContent = fmtSize(file.size);
+  $(slot.title).textContent = file.name || tr("edit.untitled");
+  $(slot.sub).textContent = fmtSize(file.size);
   // Длительность читаем браузером до загрузки: слишком длинное видео лучше
   // отбить сразу, а не после минуты заливки по мобильной сети. Заодно снимаем
   // кадр на обложку: имя файла вроде `IMG_4821.mov` не говорит, то ли это видео.
@@ -841,17 +911,19 @@ function setFile(file) {
   const guard = setTimeout(done, 3000);
   probe.onloadedmetadata = () => {
     const d = probe.duration;
-    if (state.file !== file) { done(); return; }
-    $("#drop-sub").textContent = `${fmtSize(file.size)} · ${fmtDuration(d)}`;
+    if (state[slot.key] !== file) { done(); return; }
+    $(slot.sub).textContent = `${fmtSize(file.size)} · ${fmtDuration(d)}`;
+    // Пределы длины — у речи. Верхнему они не нужны: короткое просто раньше
+    // раскроет нижнее на весь экран, длинное обрежется.
     const lim = state.boot.limits;
-    if (isFinite(d) && d > lim.max_minutes * 60 + 1) toast(tr("file.too_long", { max: lim.max_minutes }));
-    else if (isFinite(d) && d < lim.min_seconds) toast(tr("file.too_short", { min: lim.min_seconds }));
+    if (which === "bottom" && isFinite(d) && d > lim.max_minutes * 60 + 1) toast(tr("file.too_long", { max: lim.max_minutes }));
+    else if (which === "bottom" && isFinite(d) && d < lim.min_seconds) toast(tr("file.too_short", { min: lim.min_seconds }));
     try { probe.currentTime = Math.min(0.5, (isFinite(d) ? d : 1) / 2); } catch (_) { done(); }
   };
   probe.onseeked = () => {
     try {
       const side = Math.min(probe.videoWidth, probe.videoHeight);
-      if (side && state.file === file) {
+      if (side && state[slot.key] === file) {
         const c = document.createElement("canvas");
         c.width = c.height = 128;
         c.getContext("2d").drawImage(
@@ -870,8 +942,10 @@ function setFile(file) {
 
 function renderNext() {
   const btn = $("#next");
-  btn.classList.toggle("is-idle", !state.file);
-  $("#next-sub").textContent = tr(state.file ? "edit.next_ready" : "edit.next_idle");
+  btn.classList.toggle("is-idle", !ready());
+  $("#next-sub").textContent = tr(
+    ready() ? "edit.next_ready" : (state.layout === "split" && (state.file || state.topFile) ? "split.need_both" : "edit.next_idle"),
+  );
 }
 
 function setStep(step) {
@@ -911,25 +985,27 @@ function initEdit() {
     openTelegram(`https://t.me/${state.boot.bot_username}`);
   });
 
-  const input = $("#file-input");
-  input.addEventListener("change", () => setFile(input.files[0] || null));
-  const zone = $("#dropzone");
-  zone.addEventListener("click", (ev) => {
-    if (state.file && ev.target.closest("#drop-remove")) {
+  for (const [which, slot] of Object.entries(SLOTS)) {
+    const input = $(slot.input);
+    input.addEventListener("change", () => setFile(input.files[0] || null, which));
+    const zone = $(slot.zone);
+    zone.addEventListener("click", (ev) => {
+      if (state[slot.key] && ev.target.closest(slot.remove)) {
+        ev.preventDefault();
+        if (!state.busy) { setFile(null, which); haptic(); }
+      } else if (state.busy) {
+        ev.preventDefault();
+      }
+    });
+    zone.addEventListener("dragover", (ev) => { ev.preventDefault(); zone.classList.add("is-over"); });
+    zone.addEventListener("dragleave", () => zone.classList.remove("is-over"));
+    zone.addEventListener("drop", (ev) => {
       ev.preventDefault();
-      if (!state.busy) { setFile(null); haptic(); }
-    } else if (state.busy) {
-      ev.preventDefault();
-    }
-  });
-  zone.addEventListener("dragover", (ev) => { ev.preventDefault(); zone.classList.add("is-over"); });
-  zone.addEventListener("dragleave", () => zone.classList.remove("is-over"));
-  zone.addEventListener("drop", (ev) => {
-    ev.preventDefault();
-    zone.classList.remove("is-over");
-    const f = ev.dataTransfer.files[0];
-    if (f && !state.busy) setFile(f);
-  });
+      zone.classList.remove("is-over");
+      const f = ev.dataTransfer.files[0];
+      if (f && !state.busy) setFile(f, which);
+    });
+  }
 
   for (const box of $$("[data-option]")) {
     box.addEventListener("change", () => { state.options[box.dataset.option] = box.checked; haptic(); });
@@ -938,7 +1014,7 @@ function initEdit() {
     btn.addEventListener("click", () => popup(...tr(`help.${btn.dataset.help}`)));
   }
   $("#next").addEventListener("click", () => {
-    if (!state.file) { haptic("warning"); $("#file-input").click(); return; }
+    if (!ready()) { haptic("warning"); missingInput().click(); return; }
     haptic();
     setStep(2);
   });
@@ -972,10 +1048,10 @@ function renderCta(progressText, share) {
   } else {
     // Пока файла нет, нажатие открывает выбор файла, а не запускает монтаж —
     // так кнопка и должна называться.
-    title.textContent = tr(state.file ? "cta.edit" : "cta.choose");
+    title.textContent = tr(ready() ? "cta.edit" : "cta.choose");
     const free = u.is_admin ? "cta.free" : "cta.free_all";
-    sub.textContent = !state.file
-      ? tr("cta.pick")
+    sub.textContent = !ready()
+      ? tr(state.layout === "split" ? "split.need_both" : "cta.pick")
       : (pays(u) ? tr("cta.charge", { n: u.balance }) : tr(free));
   }
 }
@@ -984,13 +1060,14 @@ async function onCta() {
   if (state.busy) return;
   const u = state.boot.user;
   if (pays(u) && u.balance < 1) { go("tariffs"); return; }
-  if (!state.file) { haptic("warning"); $("#file-input").click(); return; }
+  if (!ready()) { haptic("warning"); missingInput().click(); return; }
 
   state.busy = true;
   try {
-    const job = await uploadAndStart(state.file);
+    const job = await uploadAndStart();
     haptic("success");
     setFile(null);
+    setFile(null, "top");
     state.step = 1;
     for (const s of $$("[data-step]")) s.hidden = Number(s.dataset.step) !== 1;
     await refreshBoot();
@@ -1008,7 +1085,8 @@ async function onCta() {
   }
 }
 
-async function uploadAndStart(file) {
+// Один файл кусками; `onBytes(сколько принято)` — для общей полосы прогресса.
+async function uploadOne(file, onBytes) {
   const start = await api("/api/uploads", { method: "POST", body: { size: file.size, name: file.name } });
   const id = start.upload_id;
   const size = file.size;
@@ -1016,7 +1094,7 @@ async function uploadAndStart(file) {
   let failures = 0;
   while (offset < size) {
     const end = Math.min(size, offset + start.chunk_bytes);
-    renderCta(tr("cta.uploading", { p: Math.floor((offset / size) * 100) }), offset / size);
+    onBytes(offset);
     try {
       const res = await api(`/api/uploads/${id}?offset=${offset}`, { method: "PUT", body: file.slice(offset, end), raw: true });
       offset = res.received;
@@ -1030,14 +1108,32 @@ async function uploadAndStart(file) {
       await new Promise((r) => setTimeout(r, 1500 * failures));
     }
   }
+  return id;
+}
+
+// Нижнее видео, затем верхнее («Два видео»), и одна задача на оба. Полоса —
+// общая по байтам: два прогресса подряд читались бы как «загрузилось и
+// началось заново».
+async function uploadAndStart() {
+  const files = state.layout === "split" ? [state.file, state.topFile] : [state.file];
+  const total = files.reduce((n, f) => n + f.size, 0) || 1;
+  let before = 0;
+  const show = (sent) => {
+    const share = (before + sent) / total;
+    renderCta(tr("cta.uploading", { p: Math.floor(share * 100) }), share);
+  };
+  const ids = [];
+  for (const f of files) {
+    ids.push(await uploadOne(f, show));
+    before += f.size;
+  }
   renderCta(tr("cta.checking"), 1);
-  const res = await api(`/api/uploads/${id}/finish`, {
-    method: "POST",
-    body: {
-      preset: state.preset,
-      options: { ...state.options, accent: state.accent, font: state.font },
-    },
-  });
+  const body = {
+    preset: state.preset,
+    options: { ...state.options, accent: state.accent, font: state.font },
+  };
+  if (ids[1]) body.top_upload_id = ids[1];
+  const res = await api(`/api/uploads/${ids[0]}/finish`, { method: "POST", body });
   return res.job;
 }
 
@@ -1496,6 +1592,7 @@ function rerenderAll() {
   renderHeader();
   preview.render();
   if (state.file) setFile(state.file);
+  if (state.topFile) setFile(state.topFile, "top");
   renderScreen(state.screen);
 }
 
@@ -1621,6 +1718,7 @@ async function main() {
   applyStaticTexts();
   state.preset = b.presets.some((p) => p.name === b.user.preset) ? b.user.preset : (b.presets[0] || {}).name;
   state.options = { ...b.defaults };
+  state.layout = loadLayout();
   // Запомненный выбор важнее умолчания: тема уже так и работает (`user.preset`),
   // а цвет со шрифтом до сих пор сбрасывались на каждом открытии приложения.
   const saved = (b.user && b.user.settings) || {};
