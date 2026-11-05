@@ -312,6 +312,7 @@ TEXTS: dict[str, dict[str, str]] = {
     "api.incomplete": {"ru": "Файл загружен не полностью.", "en": "The file hasn't been fully uploaded."},
     "api.unknown_style": {"ru": "Такого стиля нет.", "en": "No such style."},
     "api.blocked": {"ru": "Доступ закрыт.", "en": "Access denied."},
+    "api.top_unreadable": {"ru": "Не получилось прочитать верхнее видео. Пришлите mp4 или mov.", "en": "Couldn't read the top video. Please upload an mp4 or mov."},
     "api.unreadable": {"ru": "Не получилось прочитать видео. Пришлите mp4 или mov.", "en": "Couldn't read the video. Please upload an mp4 or mov."},
     "api.no_balance": {"ru": "На балансе нет роликов.", "en": "Your balance is empty."},
     "api.enqueue_failed": {"ru": "Не получилось поставить ролик в очередь. Баланс не списан.", "en": "Couldn't queue the video. Your balance was not charged."},

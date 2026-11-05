@@ -121,7 +121,10 @@ def _upload_dir(cfg: Settings, upload_id: str) -> Path:
 # При разрешённом гигабайте на файл десяток брошенных приёмов съедает весь
 # свободный диск сервера — вместе с местом под Postgres, который там же.
 # Два — чтобы повтор на оборванной мобильной сети не упирался в отказ.
-MAX_OPEN_UPLOADS = 2
+# Четыре, а не два: ролик «Два видео» — это два приёма разом, и один
+# брошенный приём (закрыли приложение на середине) иначе запирал бы режим до
+# истечения заявки.
+MAX_OPEN_UPLOADS = 4
 # Запас свободного места, который приёму не отдаётся ни при каких условиях:
 # под базу, журналы и рабочие папки самого монтажа.
 DISK_RESERVE_MB = 4096
@@ -501,11 +504,14 @@ async def upload_start(request: web.Request) -> web.Response:
     )
 
 
-async def _own_upload(request: web.Request) -> tuple[Path, dict[str, Any]] | web.Response:
+async def _own_upload(
+    request: web.Request, upload_id: str | None = None
+) -> tuple[Path, dict[str, Any]] | web.Response:
+    """Приём этого пользователя: из адреса или, для верхнего видео, из тела."""
     cfg = request.app[CFG_KEY]
     user: WebAppUser = request[USER_KEY]
-    upload_id = request.match_info["upload_id"]
-    if not _UPLOAD_ID.match(upload_id):
+    upload_id = upload_id if upload_id is not None else request.match_info["upload_id"]
+    if not isinstance(upload_id, str) or not _UPLOAD_ID.match(upload_id):
         return await _fail(request, 404, "api.upload_not_found")
     folder = _upload_dir(cfg, upload_id)
     try:
@@ -569,6 +575,21 @@ async def upload_finish(request: web.Request) -> web.Response:
     if (folder / "data").stat().st_size != meta["size"]:
         received = (folder / "data").stat().st_size
         return await _fail(request, 409, "api.incomplete", extra={"received": received})
+    body = await request.json()
+    # «Два видео»: верхний приём проверяется ДО того, как забран нижний. Чужой
+    # или недогруженный верхний — отказ, а свой нижний цел, и его можно
+    # отправить снова с правильным верхним.
+    top: tuple[Path, dict[str, Any]] | None = None
+    if body.get("top_upload_id") is not None:
+        own_top = await _own_upload(request, body.get("top_upload_id"))
+        if isinstance(own_top, web.Response):
+            return own_top
+        if own_top[0] == folder:
+            return await _fail(request, 404, "api.upload_not_found")
+        if (own_top[0] / "data").stat().st_size != own_top[1]["size"]:
+            return await _fail(request, 409, "api.incomplete",
+                               extra={"received": (own_top[0] / "data").stat().st_size})
+        top = own_top
     # Забираем приём себе ДО всякой долгой работы: это и защита от двух «Готово»
     # разом (две задачи за один файл — два списанных ролика), и уход из-под
     # уборки просроченных заявок на время сборки.
@@ -577,12 +598,17 @@ async def upload_finish(request: web.Request) -> web.Response:
         return await _fail(request, 404, "api.upload_not_found")
     folder = claimed
     data_path = folder / "data"
+    top_folder: Path | None = None
+    if top is not None:
+        top_folder = _claim_upload(top[0])
+        if top_folder is None:
+            shutil.rmtree(folder, ignore_errors=True)
+            return await _fail(request, 404, "api.upload_not_found")
     # ВСЁ, что дальше, — под общей уборкой. Отказ после того, как приём забрали
     # (не та тема, нет баланса, очередь полна, упал ffprobe), оставлял папку
     # лежать до почасовой уборки, и в счёт обещанного места она уже не шла:
     # цикл «залил — получил отказ» кладёт на диск сколько угодно гигабайт.
     try:
-        body = await request.json()
         preset = str(body.get("preset") or "")
         if preset not in available():
             return await _fail(request, 400, "api.unknown_style")
@@ -609,6 +635,13 @@ async def upload_finish(request: web.Request) -> web.Response:
             return _json_error(400, error_text("too_long", lang, **limits))
         if not info.has_audio:
             return _json_error(400, error_text("no_audio", lang, **limits))
+        if top_folder is not None:
+            # Верхнему не нужны ни звук, ни длина: он без звука, а короткий
+            # просто раньше раскроет нижнее на весь экран.
+            try:
+                await asyncio.to_thread(probe, top_folder / "data")
+            except Exception:  # noqa: BLE001 — ffprobe не прочитал верхний файл
+                return await _fail(request, 415, "api.top_unreadable")
 
         try:
             job = await repo.create_job(
@@ -628,6 +661,10 @@ async def upload_finish(request: web.Request) -> web.Response:
             key = storage.key_for(SOURCES, str(job.id), "source.mp4")
             await storage.upload(data_path, key, content_type="video/mp4")
             await repo.update_job(job.id, source_key=key, source_duration=info.duration, preset=preset)
+            if top_folder is not None:
+                top_key = storage.key_for(SOURCES, str(job.id), "top.mp4")
+                await storage.upload(top_folder / "data", top_key, content_type="video/mp4")
+                await repo.update_job(job.id, top_source_key=top_key)
             await repo.set_user_preset(user.id, preset)
             # Цвет и шрифт запоминаются между роликами, как и тема. Раньше
             # приложение каждый раз подставляло умолчание, и выбранная антиква
@@ -654,6 +691,8 @@ async def upload_finish(request: web.Request) -> web.Response:
             return await _fail(request, 500, "api.enqueue_failed")
     finally:
         shutil.rmtree(folder, ignore_errors=True)
+        if top_folder is not None:
+            shutil.rmtree(top_folder, ignore_errors=True)
 
     if status_id is not None:
         watch_job(bot, user.id, status_id, str(job.id), preset)

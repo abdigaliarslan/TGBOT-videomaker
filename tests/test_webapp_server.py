@@ -569,3 +569,93 @@ def test_today_starts_at_the_users_midnight_not_the_servers():
     for junk in ("abc", "99999"):
         bad = make_mocked_request("GET", f"/api/referrals?tz={junk}")
         assert _day_start(bad, now) == datetime(2026, 11, 3, 0, 0, tzinfo=timezone.utc)
+
+
+# ------------------------------------------------------------------ два видео
+
+
+async def _uploaded(client, body: bytes, user_id: int = 42) -> str:
+    r = await client.post("/api/uploads", json={"size": len(body)}, headers=auth(user_id))
+    upload_id = (await r.json())["upload_id"]
+    await client.put(f"/api/uploads/{upload_id}?offset=0", data=body, headers=auth(user_id))
+    return upload_id
+
+
+@pytest.fixture
+def finish_env(client, monkeypatch):
+    """Всё, что `finish` трогает до списания: пользователь, очередь, ffprobe.
+
+    Нижний файл читается как видео со звуком, верхний (`TOP!`) — нет.
+    """
+    from types import SimpleNamespace
+
+    from src.db import repo
+    from src.pipeline import probe as probe_mod
+
+    seen = {"created": 0}
+
+    async def upsert_user(*a, **k):
+        return SimpleNamespace(id=42, is_blocked=False, is_admin=False, balance=3, lang="ru",
+                               language_code="ru", interface_lang=None)
+
+    async def no_jobs(*a, **k):
+        return 0
+
+    async def create_job(*a, **k):
+        seen["created"] += 1
+        raise AssertionError("списали ролик за отказ")
+
+    def fake_probe(path):
+        if Path(path).read_bytes() == b"TOP!":
+            raise RuntimeError("не видео")
+        return SimpleNamespace(duration=20.0, has_audio=True)
+
+    monkeypatch.setattr(repo, "upsert_user", upsert_user)
+    monkeypatch.setattr(repo, "active_jobs_count", no_jobs)
+    monkeypatch.setattr(repo, "create_job", create_job)
+    monkeypatch.setattr(probe_mod, "probe", fake_probe)
+    return seen
+
+
+async def test_a_foreign_top_upload_is_not_found(client, finish_env):
+    """Чужой верхний файл — 404, а свой нижний не забран и цел: его можно
+    отправить снова с правильным верхним."""
+    from src.webapp import server as mod
+
+    cfg = client.server.app[mod.CFG_KEY]
+    bottom = await _uploaded(client, b"abcd")
+    foreign = await _uploaded(client, b"efgh", user_id=43)
+
+    r = await client.post(
+        f"/api/uploads/{bottom}/finish",
+        json={"preset": "glass", "options": {}, "top_upload_id": foreign},
+        headers=auth(),
+    )
+    assert r.status == 404
+    assert (mod._upload_dir(cfg, bottom) / "data").read_bytes() == b"abcd"
+    assert finish_env["created"] == 0
+
+
+async def test_an_unreadable_top_is_refused_before_charging(client, finish_env):
+    from src.webapp import server as mod
+
+    cfg = client.server.app[mod.CFG_KEY]
+    bottom = await _uploaded(client, b"abcd")
+    top = await _uploaded(client, b"TOP!")
+
+    r = await client.post(
+        f"/api/uploads/{bottom}/finish",
+        json={"preset": "glass", "options": {}, "top_upload_id": top},
+        headers=auth(),
+    )
+    assert r.status == 415
+    assert finish_env["created"] == 0
+    left = list(Path(cfg.work_dir).glob("*"))
+    assert left == [], f"после отказа на диске осталось: {[p.name for p in left]}"
+
+
+async def test_a_user_can_open_two_uploads_for_one_reel(client):
+    """Два файла одного ролика и один брошенный приём не упираются в квоту."""
+    for _ in range(3):
+        r = await client.post("/api/uploads", json={"size": 1024}, headers=auth())
+        assert r.status == 200
