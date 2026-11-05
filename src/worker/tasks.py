@@ -188,6 +188,7 @@ async def process_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
         async with heartbeat(redis, str(job.id)):
             await publish("Скачиваю файл", 0.01, "download")
             src_path = await fetch_source(job, work / "source.mp4")
+            top_path = await fetch_top_source(job, work / "top.mp4")
 
             options = JobOptions.from_stored(job.options)
             result = await process_video(
@@ -199,6 +200,7 @@ async def process_job(ctx: dict[str, Any], job_id: str) -> dict[str, Any]:
                 cut_pauses=options.cut,
                 cfg=settings,
                 options=options,
+                top_src=top_path,
             )
 
             await publish("Загружаю результат", 0.99, "upload")
@@ -297,6 +299,7 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
     from src.pipeline.cut import apply_cuts
     from src.pipeline.probe import probe
     from src.pipeline.render import arender_remotion, render_ass
+    from src.pipeline.split import stage_split
 
     redis = ctx["redis"]
     job = await repo.get_job(job_id)
@@ -337,12 +340,26 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
         # крупностью — то есть §0.4 «сохранённый EDL + другой пресет = новое
         # видео» выполнялся только для субтитров. `autocrop` про эту деградацию
         # предупреждает в своём докстринге; правка была за владельцем вызова.
-        vertical = await asyncio.to_thread(
-            autocrop,
-            cut_path, work / "vertical.mp4", work_dir=work, cfg=settings,
-            preset=style, framing=framing_spans(edl, applied_cuts=options.cut),
-            track_out=work / "track.json",
-        )
+        if edl.split_until is not None:
+            # «Два видео»: момент раскрытия — из листа, не заново. Пересчёт по
+            # окнам новой темы дал бы другую склейку из того же листа.
+            top_path = await fetch_top_source(job, work / "top.mp4")
+            vertical = await asyncio.to_thread(
+                stage_split,
+                cut_path, top_path, work / "vertical.mp4",
+                until=edl.split_until,
+                out_duration=edl.out_duration if options.cut else info.duration,
+                work_dir=work, cfg=settings,
+                preset=style, framing=framing_spans(edl, applied_cuts=options.cut),
+                track_out=work / "track.json",
+            )
+        else:
+            vertical = await asyncio.to_thread(
+                autocrop,
+                cut_path, work / "vertical.mp4", work_dir=work, cfg=settings,
+                preset=style, framing=framing_spans(edl, applied_cuts=options.cut),
+                track_out=work / "track.json",
+            )
         staged_info = await asyncio.to_thread(probe, vertical)
 
         # Трек считается заново, а не берётся из кеша задачи. MOTION_PLAN просит

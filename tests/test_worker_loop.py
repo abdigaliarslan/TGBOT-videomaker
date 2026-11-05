@@ -248,3 +248,210 @@ async def test_the_loop_keeps_breathing_while_a_stage_grinds(harness, monkeypatc
 
     assert grinding.is_set(), "медленный этап не вызвался"
     assert beats >= 5, f"loop стоял, пока работал этап: ударов {beats}"
+
+
+# ------------------------------------------------------------ два видео
+
+
+def split_doubles(harness, monkeypatch, *, top_seconds: float = 3.0):
+    """Верхнее видео в обвязке: свой probe по имени файла и подменённая сборка
+    кадра, которая запоминает, с чем её позвали."""
+    src, work, seen = harness
+    top = src.with_name("top.mp4")
+    top.write_bytes(b"\0" * 1024)
+    calls: dict[str, dict] = {}
+
+    def fake_probe(path, *a, **k):
+        seen["probe"] = on_the_loop()
+        info = info_of()
+        if Path(path).name == "top.mp4":
+            info.duration = top_seconds
+        return info
+
+    def fake_stage(bottom, top_src, dst, **k):
+        seen["stage_split"] = on_the_loop()
+        calls["stage_split"] = k
+        shutil.copy2(bottom, dst)
+        return Path(dst)
+
+    async def no_broll(*a, **k):
+        calls["broll"] = {}
+        return 0
+
+    monkeypatch.setattr("src.pipeline.job.probe", fake_probe)
+    monkeypatch.setattr("src.pipeline.job.stage_split", fake_stage)
+    monkeypatch.setattr("src.pipeline.job.broll_mod.plan_and_fetch", no_broll)
+    return src, top, work, seen, calls
+
+
+class ReadyLLM:
+    """Модель «готова», чтобы b-roll в обычном прогоне точно позвался."""
+
+    ready = True
+    usages: list = []
+
+    def report(self):
+        return {}
+
+
+async def test_split_job_skips_broll_and_stages_two_videos(harness, monkeypatch):
+    from src.pipeline.job import process_video
+
+    src, top, work, seen, calls = split_doubles(harness, monkeypatch)
+    cfg = Settings(_env_file=None, audio_post_enabled=False, asr_fix_by_audio=False, broll_enabled=True)
+
+    result = await process_video(src, work, preset="pulse", cfg=cfg, llm=ReadyLLM(), top_src=top)
+
+    assert "broll" not in calls, "в режиме «Два видео» позвали подбор картинок"
+    assert "autocrop" not in seen, "кадр собран обычным кропом, а не из двух видео"
+    until = calls["stage_split"]["until"]
+    assert result.edl.split_until == until == pytest.approx(2.0)
+    assert seen["stage_split"] is False, "сборка кадра занимает event loop"
+
+
+async def test_a_job_without_top_is_built_as_before(harness, monkeypatch):
+    from src.pipeline.job import process_video
+
+    src, top, work, seen, calls = split_doubles(harness, monkeypatch)
+    cfg = Settings(_env_file=None, audio_post_enabled=False, asr_fix_by_audio=False, broll_enabled=True)
+
+    result = await process_video(src, work, preset="pulse", cfg=cfg, llm=ReadyLLM())
+
+    assert "stage_split" not in calls and "autocrop" in seen
+    assert result.edl.split_until is None
+
+
+async def test_a_top_too_short_to_split_gives_an_ordinary_reel(harness, monkeypatch):
+    from src.pipeline.job import process_video
+
+    src, top, work, seen, calls = split_doubles(harness, monkeypatch, top_seconds=0.6)
+    cfg = Settings(_env_file=None, audio_post_enabled=False, asr_fix_by_audio=False)
+
+    result = await process_video(src, work, preset="pulse", cfg=cfg, top_src=top)
+
+    assert result.edl.split_until is None
+    assert "stage_split" not in calls and "autocrop" in seen
+
+
+async def test_rerender_of_a_split_job_reuses_the_saved_switch(tmp_path, monkeypatch):
+    """Перерендер не пересчитывает момент раскрытия: он берёт его из листа."""
+    from types import SimpleNamespace
+
+    from src.worker import tasks
+
+    edl = edl_of()
+    edl.split_until = 2.0
+    got: dict = {}
+
+    async def fake_get_job(job_id):
+        return SimpleNamespace(id="job-1", edl=edl.model_dump(), options={"cut": True},
+                               top_source_key="sources/job-1/top.mp4")
+
+    async def fake_fetch(job, dst):
+        Path(dst).write_bytes(b"\0" * 1024)
+        return Path(dst)
+
+    async def fake_upload(path, key, **k):
+        return key
+
+    def fake_stage(bottom, top_src, dst, **k):
+        got.update(k, top=Path(top_src).name)
+        shutil.copy2(bottom, dst)
+        return Path(dst)
+
+    def fake_cuts(e, s, d, **k):
+        shutil.copy2(s, d)
+
+    async def fake_render(plan, out, **k):
+        Path(out).write_bytes(b"\0" * 64)
+
+    monkeypatch.setattr(tasks, "settings", Settings(_env_file=None, work_dir=tmp_path))
+    monkeypatch.setattr(tasks.repo, "get_job", fake_get_job)
+    monkeypatch.setattr(tasks, "fetch_source", fake_fetch)
+    monkeypatch.setattr(tasks, "fetch_top_source", fake_fetch)
+    monkeypatch.setattr(tasks.storage, "upload", fake_upload)
+    monkeypatch.setattr("src.pipeline.probe.probe", lambda *a, **k: info_of())
+    monkeypatch.setattr("src.pipeline.cut.apply_cuts", fake_cuts)
+    monkeypatch.setattr("src.pipeline.split.stage_split", fake_stage)
+    monkeypatch.setattr("src.pipeline.render.arender_remotion", fake_render)
+
+    class FakeRedis:
+        async def set(self, *a, **k):
+            return None
+
+    await tasks.rerender_job({"redis": FakeRedis()}, "job-1", "pulse")
+    assert got.get("until") == 2.0 and got.get("top") == "top.mp4"
+
+
+async def test_the_worker_hands_the_top_video_to_the_pipeline(tmp_path, monkeypatch):
+    """Задача с верхним исходником доходит до пайплайна с ним."""
+    from types import SimpleNamespace
+
+    from src.worker import tasks
+
+    job = SimpleNamespace(id="job-1", user_id=42, preset="pulse", options=None, source_local_path=None,
+                          source_key="sources/job-1/source.mp4", top_source_key="sources/job-1/top.mp4",
+                          edl=None)
+    got: dict = {}
+
+    async def fake_get_job(job_id):
+        return job
+
+    async def took(job_id, *, resume=False):
+        return True
+
+    async def noop(*a, **k):
+        return None
+
+    async def fake_fetch(j, dst):
+        return Path(dst)
+
+    async def fake_process_video(src, work, **k):
+        got.update(k)
+        raise tasks.JobError("стоп", "too_short")
+
+    class FakeRedis:
+        async def set(self, *a, **k):
+            return None
+
+        async def delete(self, *a, **k):
+            return None
+
+    monkeypatch.setattr(tasks, "settings", Settings(_env_file=None, work_dir=tmp_path))
+    monkeypatch.setattr(tasks.repo, "get_job", fake_get_job)
+    monkeypatch.setattr(tasks.repo, "mark_running", took)
+    monkeypatch.setattr(tasks.repo, "update_job", noop)
+    monkeypatch.setattr(tasks.repo, "mark_failed", noop)
+    monkeypatch.setattr(tasks.repo, "refund_job", noop)
+    monkeypatch.setattr(tasks, "fetch_source", fake_fetch)
+    monkeypatch.setattr(tasks, "fetch_top_source", fake_fetch)
+    monkeypatch.setattr(tasks, "process_video", fake_process_video)
+
+    with pytest.raises(tasks.JobError):
+        await tasks.process_job({"redis": FakeRedis()}, "job-1")
+    assert got.get("top_src") is not None and Path(got["top_src"]).name == "top.mp4"
+
+
+async def test_a_split_sheet_is_rebuilt_from_both_videos(harness, monkeypatch):
+    """Ручная пересборка листа с разделением собирает тот же кадр из двух видео."""
+    from src.pipeline.job import process_from_edl
+
+    src, top, work, seen, calls = split_doubles(harness, monkeypatch)
+    edl = edl_of()
+    edl.split_until = 2.0
+    cfg = Settings(_env_file=None, audio_post_enabled=False)
+
+    await process_from_edl(src, work, edl, cfg=cfg, top_src=top)
+    assert calls["stage_split"]["until"] == 2.0 and "autocrop" not in seen
+
+
+async def test_a_split_sheet_without_the_top_video_is_refused(harness, monkeypatch):
+    """Без верхнего видео субтитры встали бы на шов поверх обычного кадра."""
+    from src.pipeline.job import JobError, process_from_edl
+
+    src, top, work, seen, calls = split_doubles(harness, monkeypatch)
+    edl = edl_of()
+    edl.split_until = 2.0
+    with pytest.raises(JobError) as err:
+        await process_from_edl(src, work, edl, cfg=Settings(_env_file=None, audio_post_enabled=False))
+    assert err.value.code == "source_lost"

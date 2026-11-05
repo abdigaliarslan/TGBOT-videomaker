@@ -19,7 +19,7 @@ from src.core.config import Settings, settings as default_settings
 from src.core.edl import EDL, validate_edl
 from src.core.options import JobOptions, apply_accent, apply_font
 from src.core.preset import load_preset
-from src.core.render_plan import build_plan
+from src.core.render_plan import block_windows, build_plan
 from src.core.track import load_track
 from src.llm.client import LLMClient
 from src.pipeline import broll as broll_mod
@@ -31,6 +31,7 @@ from src.pipeline.director import clean_transcript, direct, make_metadata, voice
 from src.pipeline.luma import measure_bg_luma
 from src.pipeline.probe import MediaInfo, is_playable, probe
 from src.pipeline.render import arender_remotion, render_ass
+from src.pipeline.split import choose_split_until, stage_split
 
 log = logging.getLogger(__name__)
 
@@ -154,8 +155,13 @@ async def process_video(
     cfg: Settings | None = None,
     keep_work: bool | None = None,
     options: JobOptions | None = None,
+    top_src: str | Path | None = None,
 ) -> JobResult:
     """Полный прогон: probe → asr → direct → broll → cut → crop → render.
+
+    `top_src` — верхнее видео режима «Два видео» (`pipeline.split`): тогда
+    картинок по смыслу нет вовсе, а вместо кропа кадр собирается из двух видео.
+    Звук и речь — только у `src`.
 
     `options` — галочки пользователя (Mini App). Без них поведение прежнее: всё
     включено, цвет выделения — как в теме. Нарезка по-прежнему управляется
@@ -178,6 +184,9 @@ async def process_video(
         await _notify(progress, "probe")
         t = time.perf_counter()
         info = await asyncio.to_thread(probe, src)
+        # Верхнее видео меряется сразу: битый файл должен уронить задачу до
+        # распознавания, а не после минут работы. Звук и длина ему не нужны.
+        top_info = await asyncio.to_thread(probe, Path(top_src)) if top_src else None
         mark("probe", t)
 
         if info.duration < cfg.min_video_seconds:
@@ -264,7 +273,9 @@ async def process_video(
 
         # ---------------------------------------------------------- b-roll
         broll_used = 0
-        if cfg.broll_enabled and options.broll and llm is not None and llm.ready:
+        # В «Двух видео» картинок нет вовсе: верхнюю половину пользователь
+        # показал сам, и ИИ ничего в кадр не добавляет (решение владельца).
+        if cfg.broll_enabled and options.broll and top_info is None and llm is not None and llm.ready:
             await _notify(progress, "broll")
             t = time.perf_counter()
             try:
@@ -319,7 +330,23 @@ async def process_video(
         await _notify(progress, "crop")
         t = time.perf_counter()
         staged = cut_path
-        if vertical:
+        out_duration = edl.out_duration if cut_pauses else info.duration
+        if top_info is not None:
+            # Момент раскрытия — по тем же окнам блоков, что поставит план, и
+            # в лист: перерендер соберёт ровно эту склейку.
+            edl.split_until = choose_split_until(
+                top_info.duration, out_duration,
+                block_windows(edl, apply_cuts=cut_pauses, cfg=cfg),
+            )
+        if edl.split_until is not None:
+            staged = await asyncio.to_thread(
+                stage_split,
+                cut_path, Path(top_src), work / "vertical.mp4",  # type: ignore[arg-type]
+                until=edl.split_until, out_duration=out_duration, work_dir=work, cfg=cfg,
+                preset=style, framing=framing_spans(edl, applied_cuts=cut_pauses),
+                track_out=work / "track.json",
+            )
+        elif vertical:
             staged = await asyncio.to_thread(
                 autocrop,
                 cut_path, work / "vertical.mp4", work_dir=work,
@@ -425,8 +452,12 @@ async def process_from_edl(
     cut_pauses: bool = True,
     vertical: bool = True,
     cfg: Settings | None = None,
+    top_src: str | Path | None = None,
 ) -> JobResult:
     """Пересборка ролика из готового EDL: без ASR и без LLM (§0.4).
+
+    Лист «Двух видео» (`EDL.split_until`) пересобирается только с верхним
+    видео (`top_src`): без него субтитры встали бы на шов поверх обычного кадра.
 
     Нужна для двух вещей: перерендер с другим пресетом и честное сравнение фаз.
     Режиссёр недетерминирован, поэтому «до и после» имеет смысл только на одном и
@@ -494,7 +525,18 @@ async def process_from_edl(
 
     t = time.perf_counter()
     staged = cut_path
-    if vertical:
+    if edl.split_until is not None:
+        if top_src is None:
+            raise JobError("Исходный файл потерялся. Пришлите видео ещё раз.", "source_lost")
+        staged = stage_split(
+            cut_path, Path(top_src), work / "vertical.mp4",
+            until=edl.split_until,
+            out_duration=edl.out_duration if cut_pauses else info.duration,
+            work_dir=work, cfg=cfg,
+            preset=style, framing=framing_spans(edl, applied_cuts=cut_pauses),
+            track_out=work / "track.json",
+        )
+    elif vertical:
         staged = autocrop(
             cut_path, work / "vertical.mp4", work_dir=work,
             out_width=cfg.render_width, out_height=cfg.render_height,
