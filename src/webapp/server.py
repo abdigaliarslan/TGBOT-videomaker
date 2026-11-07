@@ -20,6 +20,7 @@ import gzip
 import hashlib
 import hmac
 import json
+import os
 import logging
 import re
 import shutil
@@ -181,6 +182,30 @@ def _sweep_stale_uploads(cfg: Settings) -> list[tuple[Path, dict[str, Any]]]:
             continue
         alive.append((folder, meta))
     return sorted(alive, key=lambda pair: pair[0].stat().st_mtime)
+
+
+def _renew_finished_uploads(cfg: Settings, user_id: int, current: Path) -> None:
+    """Продлевает срок догруженных приёмов пользователя, пока идёт его другой.
+
+    Ролик «Два видео» — два приёма подряд: нижнее догружено, а верхнее ещё
+    идёт, и «Готово» придёт только после него. Срок заявки считается по
+    последнему куску, так что большое верхнее на мобильной сети пережило бы
+    нижнее, и пользователь получил бы 404, залив оба файла. Продлеваются только
+    ДОГРУЖЕННЫЕ и только пока у хозяина есть живая загрузка: брошенный файл
+    по-прежнему уходит по сроку.
+    """
+    root = Path(cfg.work_dir)
+    now = time.time()
+    for folder in root.glob(f"{UPLOAD_PREFIX}*") if root.exists() else []:
+        if folder == current:
+            continue
+        try:
+            meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+            data = folder / "data"
+            if meta.get("user_id") == user_id and data.stat().st_size == meta.get("size"):
+                os.utime(data, (now, now))
+        except (OSError, ValueError, AttributeError):
+            continue  # папку убрали или забрали под сборку — не наше дело
 
 
 def _promised_bytes(open_uploads: list[tuple[Path, dict[str, Any]]]) -> int:
@@ -552,6 +577,7 @@ async def upload_chunk(request: web.Request) -> web.Response:
             fh.write(chunk)
 
     await asyncio.to_thread(append)
+    await asyncio.to_thread(_renew_finished_uploads, request.app[CFG_KEY], meta["user_id"], folder)
     return web.json_response({"received": end})
 
 

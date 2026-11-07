@@ -678,3 +678,41 @@ async def test_a_picture_as_the_top_is_refused(client, finish_env, tmp_path):
     )
     assert r.status == 415
     assert finish_env["created"] == 0
+
+
+async def test_a_finished_bottom_outlives_a_long_top_upload(client):
+    """Нижнее догружено, верхнее идёт дольше срока заявки — нижнее обязано
+    дожить до «Готово». Иначе пользователь залил два файла и получил 404."""
+    import os
+    import time as _time
+
+    from src.webapp import server as mod
+
+    cfg = client.server.app[mod.CFG_KEY]
+    bottom = await _uploaded(client, b"abcd")
+    r = await client.post("/api/uploads", json={"size": 8}, headers=auth())
+    top = (await r.json())["upload_id"]
+
+    # Нижний кусок пришёл давно, верхнее с тех пор всё грузится.
+    old = _time.time() - mod.UPLOAD_LEASE - 300
+    os.utime(mod._upload_dir(cfg, bottom) / "data", (old, old))
+    await client.put(f"/api/uploads/{top}?offset=0", data=b"efgh", headers=auth())
+
+    await client.post("/api/uploads", json={"size": 1}, headers=auth(43))  # чья-то загрузка запускает уборку
+    assert (mod._upload_dir(cfg, bottom) / "data").exists(), "уборка снесла догруженное нижнее"
+
+
+async def test_an_abandoned_finished_upload_still_expires(client):
+    """Продление — только пока у хозяина идёт другая загрузка: брошенный
+    догруженный файл по-прежнему уходит по сроку."""
+    import os
+    import time as _time
+
+    from src.webapp import server as mod
+
+    cfg = client.server.app[mod.CFG_KEY]
+    bottom = await _uploaded(client, b"abcd")
+    old = _time.time() - mod.UPLOAD_LEASE - 300
+    os.utime(mod._upload_dir(cfg, bottom) / "data", (old, old))
+    await client.post("/api/uploads", json={"size": 1}, headers=auth(43))
+    assert not mod._upload_dir(cfg, bottom).exists()
