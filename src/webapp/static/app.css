@@ -30,7 +30,10 @@
      приложения. Поэтому плитка стиля не ходит за токенами интерфейса. */
   --stage: #121016;
   --stage-line: rgb(255 255 255 / 10%);
-  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* Нижний отступ под полосу «домой». Telegram отдаёт его своей переменной
+     (Bot API 8.0): в его WebView `env()` бывает нулём, и нижняя панель
+     ложилась под полосу жестов. Берём большее из двух. */
+  --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px));
   --top-h: 64px;
   color-scheme: dark;
 }
@@ -148,7 +151,12 @@ svg { flex: none; }
 .link-hint span { border-bottom: 1px dashed currentColor; }
 .link-hint--strong { color: var(--text); }
 .link-hint--strong span { border-bottom-style: solid; }
-.link-quiet { color: var(--muted); font-size: 14px; font-weight: 700; min-height: 40px; }
+.link-quiet {
+  color: var(--muted); font-size: 14px; font-weight: 700; min-height: 44px;
+  /* «Все» — одно слово в 26 px шириной: мишень расширена полями, а край
+     текста остался там же, где был. */
+  padding: 0 10px; margin-right: -10px;
+}
 .link-quiet--center { align-self: center; }
 
 .row-head { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
@@ -169,12 +177,38 @@ svg { flex: none; }
 .seg--sm button { min-height: 32px; padding: 0 12px; font-size: 13px; }
 .seg--icons button { padding: 0 11px; }
 .seg--wide { display: flex; }
-.seg--wide button { flex: 1; min-height: 44px; font-size: 15px; }
-.seg--period { align-self: flex-start; }
+/* Кнопки сегмента обязаны ужиматься: с `white-space: nowrap` и полями по
+   16 px «Без нарезки» на 320 px вылезала за карточку и давала странице
+   горизонтальную прокрутку. */
+.seg--wide button { flex: 1; min-width: 0; min-height: 44px; padding: 0 10px; font-size: 15px; }
+@media (max-width: 374.98px) {
+  /* «Вырезать паузы» на 320 px шире половины карточки: подпись переносится,
+     а не обрезается по краям кнопки. */
+  .seg--wide button { white-space: normal; line-height: 1.15; padding: 4px 8px; font-size: 14px; text-align: center; }
+}
+.seg--period { align-self: flex-start; max-width: 100%; }
+.seg--period button { min-width: 0; padding: 0 12px; }
+@media (max-width: 374.98px) {
+  /* Три периода с иконками на 320 px не помещались: пусть займут ряд целиком,
+     а календарики уйдут — подпись и без них понятна. */
+  .seg--period { align-self: stretch; }
+  .seg--period button { flex: 1; padding: 0 6px; }
+  .seg--period svg { display: none; }
+}
 
 .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+/* На телефоне фильтры роликов — одной строкой и листаются вбок, как ленты
+   выбора: перенос третьей кнопки на вторую строку сдвигал весь список. Поля
+   по вертикали — под зону касания, которую иначе срезала бы прокрутка. */
+@media (max-width: 719.98px) {
+  .chips {
+    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+    margin: -4px -18px; padding: 4px 18px;
+  }
+  .chips::-webkit-scrollbar { display: none; }
+}
 .chips button {
-  min-height: 38px; padding: 0 16px; border-radius: 999px;
+  flex: none; min-height: 38px; padding: 0 16px; border-radius: 999px;
   background: var(--card); border: 1px solid var(--line); font-weight: 700; font-size: 14px; color: var(--muted);
 }
 .chips button.is-active { background: var(--pill); color: var(--pill-text); border-color: var(--pill); }
@@ -370,7 +404,7 @@ svg { flex: none; }
   position: absolute; left: 12px; bottom: 12px; z-index: 2;
   max-width: calc(100% - 24px); padding: 6px 11px; border-radius: 999px;
   background: rgb(10 10 14 / 55%); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-  color: rgb(255 255 255 / 86%); font-size: 11px; font-weight: 600; letter-spacing: 0.01em;
+  color: rgb(255 255 255 / 86%); font-size: 12px; font-weight: 600; letter-spacing: 0.01em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
@@ -537,7 +571,7 @@ svg { flex: none; }
 .package__price b { font-size: 16px; white-space: nowrap; }
 .package__save { font-size: 12px; font-weight: 700; color: var(--ok); }
 .badge {
-  align-self: flex-start; font-size: 10px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase;
+  align-self: flex-start; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase;
   padding: 3px 8px; border-radius: 6px; background: var(--grad); color: #fff;
 }
 .radio {
@@ -711,6 +745,16 @@ svg { flex: none; }
 }
 @media (min-width: 720px) and (max-width: 979px) {
   .preview-wrap { margin: 0; padding: 4px 0 0; }
+}
+
+/* Палец: мишень не меньше 44 px. Вид кнопок прежний — растёт только зона
+   касания (::after), иначе плотные ряды настроек разъехались бы. Мышь и
+   так попадает в 32 px, поэтому только для грубого указателя. */
+@media (pointer: coarse) {
+  .seg button, .chips button, .icon-btn--sm { position: relative; }
+  .seg button::after, .chips button::after { content: ""; position: absolute; inset: -4px 0; }
+  .seg--sm button::after { inset: -6px 0; }
+  .icon-btn--sm::after, .strip__arrow::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
