@@ -14,20 +14,61 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from src.core.config import Settings, settings as default_settings
-from src.core.proc import ffmpeg
+from src.core.proc import ffmpeg, run
 from src.pipeline.crop import autocrop
-from src.pipeline.probe import probe
+from src.pipeline.probe import PROBE_TIMEOUT, probe
 
 log = logging.getLogger(__name__)
 
 # Короче этого разделённый кадр не ставится вовсе: половины, мелькнувшие на
 # полсекунды в начале, читаются как сбой, а не как приём.
 MIN_SPLIT_SECONDS = 1.0
+
+
+def top_video_seconds(path: str | Path) -> float:
+    """Сколько секунд верхнее видео показывает движущуюся картинку.
+
+    Меряется ВИДЕОДОРОЖКА, а не контейнер. `probe` берёт длину контейнера, и
+    у верхнего файла она врёт ровно туда, где это видно: звук длиннее картинки
+    (экспорт из редактора, запись экрана) — и верх замер бы на последнем кадре,
+    пока внизу ещё говорят. Не видео — `ValueError`: картинка (один кадр,
+    длина 0, ролик молча вышел бы без верха) и обложка mp3 (`attached_pic`:
+    одна картинка на весь ролик).
+    """
+    out = run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
+         "-show_entries",
+         "stream=codec_name,duration,nb_read_packets,avg_frame_rate:stream_disposition=attached_pic",
+         "-print_format", "json", str(path)],
+        timeout=PROBE_TIMEOUT,
+    )
+    streams = json.loads(out).get("streams") or []
+    if not streams:
+        raise ValueError(f"в файле нет видеодорожки: {path}")
+    stream = streams[0]
+    if (stream.get("disposition") or {}).get("attached_pic"):
+        raise ValueError(f"обложка аудиофайла, а не видео: {path}")
+    frames = int(stream.get("nb_read_packets") or 0)
+    if frames <= 1:
+        raise ValueError(f"одна картинка, а не видео: {path}")
+    try:
+        seconds = float(stream.get("duration"))
+    except (TypeError, ValueError):
+        seconds = 0.0
+    if seconds <= 0:
+        # У mkv и webm длины на дорожке нет — считаем по кадрам.
+        num, _, den = str(stream.get("avg_frame_rate") or "0/1").partition("/")
+        rate = float(num or 0) / float(den or 1) if float(den or 1) else 0.0
+        seconds = frames / rate if rate > 0 else 0.0
+    if seconds <= 0:
+        raise ValueError(f"длина видеодорожки не определяется: {path}")
+    return round(seconds, 3)
 
 
 def choose_split_until(

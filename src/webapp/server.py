@@ -636,11 +636,15 @@ async def upload_finish(request: web.Request) -> web.Response:
         if not info.has_audio:
             return _json_error(400, error_text("no_audio", lang, **limits))
         if top_folder is not None:
-            # Верхнему не нужны ни звук, ни длина: он без звука, а короткий
-            # просто раньше раскроет нижнее на весь экран.
+            # Верхнему не нужны ни звук, ни пределы длины: он без звука, а
+            # короткий просто раньше раскроет нижнее на весь экран. Но он
+            # обязан быть ВИДЕО: картинка и обложка mp3 проходят ffprobe и
+            # дали бы ролик без верха или с застывшим верхом.
+            from src.pipeline.split import top_video_seconds
+
             try:
-                await asyncio.to_thread(probe, top_folder / "data")
-            except Exception:  # noqa: BLE001 — ffprobe не прочитал верхний файл
+                await asyncio.to_thread(top_video_seconds, top_folder / "data")
+            except Exception:  # noqa: BLE001 — не видео или ffprobe не прочитал
                 return await _fail(request, 415, "api.top_unreadable")
 
         try:

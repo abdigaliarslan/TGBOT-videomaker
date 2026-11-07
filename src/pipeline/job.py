@@ -31,7 +31,7 @@ from src.pipeline.director import clean_transcript, direct, make_metadata, voice
 from src.pipeline.luma import measure_bg_luma
 from src.pipeline.probe import MediaInfo, is_playable, probe
 from src.pipeline.render import arender_remotion, render_ass
-from src.pipeline.split import choose_split_until, stage_split
+from src.pipeline.split import choose_split_until, stage_split, top_video_seconds
 
 log = logging.getLogger(__name__)
 
@@ -185,8 +185,9 @@ async def process_video(
         t = time.perf_counter()
         info = await asyncio.to_thread(probe, src)
         # Верхнее видео меряется сразу: битый файл должен уронить задачу до
-        # распознавания, а не после минут работы. Звук и длина ему не нужны.
-        top_info = await asyncio.to_thread(probe, Path(top_src)) if top_src else None
+        # распознавания, а не после минут работы. Звук и пределы длины ему не
+        # нужны, а сама длина — по видеодорожке (`top_video_seconds`).
+        top_seconds = await asyncio.to_thread(top_video_seconds, Path(top_src)) if top_src else None
         mark("probe", t)
 
         if info.duration < cfg.min_video_seconds:
@@ -275,7 +276,7 @@ async def process_video(
         broll_used = 0
         # В «Двух видео» картинок нет вовсе: верхнюю половину пользователь
         # показал сам, и ИИ ничего в кадр не добавляет (решение владельца).
-        if cfg.broll_enabled and options.broll and top_info is None and llm is not None and llm.ready:
+        if cfg.broll_enabled and options.broll and top_seconds is None and llm is not None and llm.ready:
             await _notify(progress, "broll")
             t = time.perf_counter()
             try:
@@ -331,11 +332,11 @@ async def process_video(
         t = time.perf_counter()
         staged = cut_path
         out_duration = edl.out_duration if cut_pauses else info.duration
-        if top_info is not None:
+        if top_seconds is not None:
             # Момент раскрытия — по тем же окнам блоков, что поставит план, и
             # в лист: перерендер соберёт ровно эту склейку.
             edl.split_until = choose_split_until(
-                top_info.duration, out_duration,
+                top_seconds, out_duration,
                 block_windows(edl, apply_cuts=cut_pauses, cfg=cfg),
             )
         if edl.split_until is not None:

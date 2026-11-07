@@ -649,6 +649,7 @@ async def test_an_unreadable_top_is_refused_before_charging(client, finish_env):
         headers=auth(),
     )
     assert r.status == 415
+    assert "верхнее" in (await r.json())["error"], "отказ не про верхнее видео — нижнее не прочиталось?"
     assert finish_env["created"] == 0
     left = list(Path(cfg.work_dir).glob("*"))
     assert left == [], f"после отказа на диске осталось: {[p.name for p in left]}"
@@ -659,3 +660,21 @@ async def test_a_user_can_open_two_uploads_for_one_reel(client):
     for _ in range(3):
         r = await client.post("/api/uploads", json={"size": 1024}, headers=auth())
         assert r.status == 200
+
+
+async def test_a_picture_as_the_top_is_refused(client, finish_env, tmp_path):
+    """Картинка проходит ffprobe, но верх из неё — ролик без верха."""
+    import subprocess
+
+    img = tmp_path / "a.jpg"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64",
+                    "-frames:v", "1", str(img)], check=True)
+    bottom = await _uploaded(client, b"abcd")
+    top = await _uploaded(client, img.read_bytes())
+    r = await client.post(
+        f"/api/uploads/{bottom}/finish",
+        json={"preset": "glass", "options": {}, "top_upload_id": top},
+        headers=auth(),
+    )
+    assert r.status == 415
+    assert finish_env["created"] == 0

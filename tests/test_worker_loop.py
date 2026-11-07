@@ -263,10 +263,11 @@ def split_doubles(harness, monkeypatch, *, top_seconds: float = 3.0):
 
     def fake_probe(path, *a, **k):
         seen["probe"] = on_the_loop()
-        info = info_of()
-        if Path(path).name == "top.mp4":
-            info.duration = top_seconds
-        return info
+        return info_of()  # у верхнего контейнер «длиной в ролик» — врёт, как mp4 с длинным звуком
+
+    def fake_top_seconds(path):
+        seen["top_video_seconds"] = on_the_loop()
+        return top_seconds
 
     def fake_stage(bottom, top_src, dst, **k):
         seen["stage_split"] = on_the_loop()
@@ -279,6 +280,7 @@ def split_doubles(harness, monkeypatch, *, top_seconds: float = 3.0):
         return 0
 
     monkeypatch.setattr("src.pipeline.job.probe", fake_probe)
+    monkeypatch.setattr("src.pipeline.job.top_video_seconds", fake_top_seconds, raising=False)
     monkeypatch.setattr("src.pipeline.job.stage_split", fake_stage)
     monkeypatch.setattr("src.pipeline.job.broll_mod.plan_and_fetch", no_broll)
     return src, top, work, seen, calls
@@ -305,8 +307,11 @@ async def test_split_job_skips_broll_and_stages_two_videos(harness, monkeypatch)
     assert "broll" not in calls, "в режиме «Два видео» позвали подбор картинок"
     assert "autocrop" not in seen, "кадр собран обычным кропом, а не из двух видео"
     until = calls["stage_split"]["until"]
+    # Верх меряется по видеодорожке (3 с), а не по контейнеру (12 с): иначе
+    # кадр считался бы поделённым весь ролик, и верх замер бы на 3-й секунде.
     assert result.edl.split_until == until == pytest.approx(2.0)
     assert seen["stage_split"] is False, "сборка кадра занимает event loop"
+    assert seen["top_video_seconds"] is False, "замер верхнего видео занимает event loop"
 
 
 async def test_a_job_without_top_is_built_as_before(harness, monkeypatch):

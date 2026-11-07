@@ -209,3 +209,51 @@ async def test_a_split_job_whose_top_was_purged_is_a_clear_error(tmp_path):
     with pytest.raises(JobError) as err:
         await fetch_top_source(job, tmp_path / "top.mp4")
     assert err.value.code == "source_lost"
+
+
+# --------------------------------------------------------------- что считать верхним видео
+
+
+def _ff(*args: str) -> None:
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True)
+
+
+def test_a_picture_is_not_a_top_video(tmp_path):
+    """Картинка проходит ffprobe с длиной 0 — и ролик молча вышел бы без верха."""
+    from src.pipeline.split import top_video_seconds
+
+    _ff("-f", "lavfi", "-i", "color=c=red:s=640x480", "-frames:v", "1", str(tmp_path / "a.jpg"))
+    with pytest.raises(ValueError):
+        top_video_seconds(tmp_path / "a.jpg")
+
+
+def test_audio_with_cover_art_is_not_a_top_video(tmp_path):
+    """У mp3 с обложкой есть «видеодорожка» — одна картинка на весь ролик."""
+    from src.pipeline.split import top_video_seconds
+
+    _ff("-f", "lavfi", "-i", "color=c=red:s=320x320", "-frames:v", "1", str(tmp_path / "cover.png"))
+    _ff("-f", "lavfi", "-i", "sine=frequency=440:duration=6", "-i", str(tmp_path / "cover.png"),
+        "-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-c:v", "png",
+        "-disposition:v", "attached_pic", str(tmp_path / "song.mp3"))
+    with pytest.raises(ValueError):
+        top_video_seconds(tmp_path / "song.mp3")
+
+
+def test_top_length_is_the_video_not_the_audio(tmp_path):
+    """Звук длиннее картинки: верх меряется по картинке, иначе он замер бы,
+    пока внизу ещё говорят."""
+    from src.pipeline.split import top_video_seconds
+
+    _ff("-f", "lavfi", "-i", "testsrc=s=320x240:r=25:d=3", "-f", "lavfi", "-i", "sine=duration=8",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(tmp_path / "v.mp4"))
+    assert probe(tmp_path / "v.mp4").duration > 7, "пробник подменился — тест ничего не проверяет"
+    assert top_video_seconds(tmp_path / "v.mp4") == pytest.approx(3.0, abs=0.1)
+
+
+def test_top_length_without_a_stream_duration_comes_from_frames(tmp_path):
+    """У mkv/webm длины на дорожке нет — считаем по кадрам."""
+    from src.pipeline.split import top_video_seconds
+
+    _ff("-f", "lavfi", "-i", "testsrc=s=320x240:r=25:d=4", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        str(tmp_path / "v.mkv"))
+    assert top_video_seconds(tmp_path / "v.mkv") == pytest.approx(4.0, abs=0.1)
