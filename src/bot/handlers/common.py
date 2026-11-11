@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, Message, User
 from src.bot.keyboards import language_keyboard, presets_keyboard, webapp_url, welcome_keyboard
 from src.core.config import settings
 from src.core.i18n import DEFAULT_LANG, LANGS, lang_of, t, videos_word
+from src.core.options import theme_label
 from src.core.preset import available, load_preset
 from src.core.referral import parse_code
 from src.db import repo
@@ -30,13 +31,39 @@ async def _upsert(user: User):
     )
 
 
-def welcome_text(lang: str) -> str:
+def offer_text(lang: str) -> str:
+    """Условия одной строкой: что бесплатно и сколько стоит следующий ролик.
+
+    Стоят на первом экране намеренно. Раньше о цене человек узнавал отказом —
+    прислал видео и получил «на балансе нет роликов».
+    """
+    if settings.free_videos:
+        return t("start.offer_free", lang)
+    packages = settings.star_packages
+    if not packages:
+        return ""
+    single = packages.get(1) or min(packages.values())
+    best = min(stars / videos for videos, stars in packages.items() if videos > 0)
+    key = {0: "start.offer_paid", 1: "start.offer_trial_one"}.get(
+        max(0, settings.trial_videos), "start.offer_trial_many"
+    )
     return t(
+        key, lang,
+        trial=f"{settings.trial_videos} {videos_word(settings.trial_videos, lang)}",
+        single=single, best=f"{best:.0f}",
+    )
+
+
+def welcome_text(lang: str) -> str:
+    text = t(
         "start.welcome",
         lang,
+        brand=settings.brand_name,
         min_s=f"{settings.min_video_seconds:.0f}",
         max_m=f"{settings.max_video_minutes:.0f}",
     )
+    offer = offer_text(lang)
+    return f"{text}\n\n{offer}" if offer else text
 
 
 async def apply_menu_button(bot: Bot, chat_id: int, lang: str) -> None:
@@ -158,8 +185,12 @@ async def on_preset(message: Message) -> None:
     lang = lang_of(db_user) if db_user else lang_of(user)
     current = db_user.preset if db_user else settings.default_preset
     await message.answer(
-        t("preset.current", lang, current=current, names=", ".join(available())),
-        reply_markup=presets_keyboard(current),
+        t(
+            "preset.current", lang,
+            current=theme_label(current, lang, current),
+            names=", ".join(theme_label(name, lang, name) for name in available()),
+        ),
+        reply_markup=presets_keyboard(current, lang),
     )
 
 
@@ -174,10 +205,39 @@ async def on_preset_pick(callback: CallbackQuery) -> None:
         await callback.answer(t("preset.unknown", lang), show_alert=True)
         return
     await repo.set_user_preset(callback.from_user.id, name)
-    title = load_preset(name).title or name
+    title = theme_label(name, lang, load_preset(name).title or name)
     await callback.answer(t("preset.picked", lang, title=title))
     if isinstance(callback.message, Message):
-        await callback.message.edit_reply_markup(reply_markup=presets_keyboard(name))
+        await callback.message.edit_reply_markup(reply_markup=presets_keyboard(name, lang))
+
+
+FUNNEL_DAYS = 30
+
+
+def _share(part: int, whole: int) -> str:
+    return f"{round(100 * part / whole)}%" if whole else "—"
+
+
+async def _funnel_lines(lang: str) -> list[str]:
+    """Воронка для владельца: кто получил ролик, кто вернулся, кто заплатил.
+
+    Сбой отчёта не должен оставить владельца без остального `/stats`.
+    """
+    try:
+        f = await repo.funnel_report(days=FUNNEL_DAYS)
+    except Exception as e:  # noqa: BLE001
+        log.warning("воронка не посчиталась: %s", e)
+        return []
+    users = f["users"]
+    return [
+        t("stats.funnel_head", lang, days=FUNNEL_DAYS),
+        t("stats.funnel_users", lang, n=users),
+        t("stats.funnel_got", lang, n=f["got_reel"], share=_share(f["got_reel"], users)),
+        t("stats.funnel_second", lang, n=f["second_reel"], share=_share(f["second_reel"], f["got_reel"])),
+        t("stats.funnel_paid", lang, n=f["paid"], share=_share(f["paid"], f["got_reel"])),
+        t("stats.funnel_again", lang, n=f["paid_again"], share=_share(f["paid_again"], f["paid"])),
+        t("stats.funnel_stars", lang, n=f["stars"]),
+    ]
 
 
 @router.message(Command("stats"))
@@ -191,10 +251,11 @@ async def on_stats(message: Message) -> None:
         await message.answer(t("stats.empty", lang))
         return
 
-    lines = [t("stats.done", lang, n=db_user.videos_done), t("stats.style", lang, preset=db_user.preset)]
+    lines = [t("stats.done", lang, n=db_user.videos_done), t("stats.style", lang, preset=theme_label(db_user.preset, lang, db_user.preset))]
     if not db_user.is_admin:
         lines.append(t("stats.balance", lang, n=f"{db_user.balance} {videos_word(db_user.balance, lang)}"))
     if db_user.is_admin:
+        lines.extend(await _funnel_lines(lang))
         report = await repo.cost_report(days=7)
         if report:
             lines.append(t("stats.cost_head", lang))

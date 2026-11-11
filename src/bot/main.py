@@ -141,6 +141,24 @@ async def _get_me_persistently(bot: Bot):
     raise SystemExit(f"Telegram недоступен: {last}")
 
 
+async def sync_bot_name(bot: Bot, current: str | None) -> None:
+    """Имя бота в Telegram — то же, что в приветствии и в приложении.
+
+    Название одно (`Settings.brand_name`), а имя бота задавалось отдельно в
+    @BotFather и разошлось с ним. Вызов идёт, только когда имена различаются:
+    у `setMyName` жёсткий лимит частоты, и дёргать его на каждом старте нельзя.
+    Сбой здесь — предупреждение, а не повод не запуститься.
+    """
+    brand = settings.brand_name.strip()
+    if not brand or brand == (current or ""):
+        return
+    try:
+        await bot.set_my_name(name=brand)
+        log.info("имя бота в Telegram: «%s» → «%s»", current, brand)
+    except Exception as e:  # noqa: BLE001
+        log.warning("имя бота сменить не удалось (поменяйте в @BotFather): %s", e)
+
+
 async def main() -> None:
     setup_logging(settings.log_level)
     if not settings.bot_token:
@@ -152,6 +170,7 @@ async def main() -> None:
     bot = make_bot()
     me = await _get_me_persistently(bot)
     log.info("бот @%s запущен", me.username)
+    await sync_bot_name(bot, me.first_name)
 
     dp = Dispatcher()
     dp.include_router(payments.router)

@@ -563,6 +563,36 @@ class AudioTrack:
     target_lufs: float = -16.0
 
 
+def voice_clean_filter(cfg: Settings | None = None) -> str:
+    """Чистка голоса перед нормализацией: срез гула и мягкое шумоподавление.
+
+    Ролики снимают на телефон в комнате: гудит холодильник, шумит улица, шипит
+    сам микрофон. Нормализация громкости поднимает этот фон вместе с голосом, и
+    в готовом ролике он слышен сильнее, чем в исходнике.
+
+    Два звена, оба встроены в ffmpeg (новых зависимостей нет):
+    - `highpass` срезает всё ниже голоса — гул, удары по столу, ветер;
+    - `afftdn` вычитает ровный шум. Подавление намеренно мягкое: сильное даёт
+      «булькающий» голос, который хуже любого шипения. `tn=1` — фильтр сам
+      следит за уровнем шума, поэтому ему не нужен участок тишины для замера.
+
+    Стоит ДО `loudnorm`: тот должен выравнивать уже чистый голос. Возвращает
+    звенья с запятой на конце или пустую строку, если чистка выключена.
+    """
+    cfg = cfg or default_settings
+    links: list[str] = []
+    if cfg.voice_highpass_hz > 0:
+        links.append(f"highpass=f={cfg.voice_highpass_hz:g}")
+    if cfg.voice_denoise_db > 0:
+        links.append(f"afftdn=nr={cfg.voice_denoise_db:g}:nf={VOICE_NOISE_FLOOR_DB:g}:tn=1")
+    return "".join(link + "," for link in links)
+
+
+# Откуда фильтр начинает считать сигнал шумом. Ниже −40 dB в записи с телефона
+# лежит фон; речь туда не опускается даже на тихих окончаниях.
+VOICE_NOISE_FLOOR_DB = -40.0
+
+
 def build_audio(
     edl: EDL,
     video: str | Path,
@@ -640,7 +670,7 @@ def build_audio(
     # дорожку короче себя. Плюс `amix=duration=first` меряет длину микса по первому
     # входу — то есть ровно по этому голосу.
     parts: list[str] = [
-        f"[0:a]{loudnorm_filter(measured, target_lufs=target)},{AFORMAT},"
+        f"[0:a]{voice_clean_filter(cfg)}{loudnorm_filter(measured, target_lufs=target)},{AFORMAT},"
         f"atrim=0:{total:.3f},asetpts=N/SR/TB,apad=whole_dur={total:.3f}[voice]"
     ]
     mix: list[str] = ["[voice]"]

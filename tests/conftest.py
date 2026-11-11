@@ -111,9 +111,15 @@ async def db():
         await c.run_sync(Base.metadata.create_all)
     repo._engine = engine
     repo._sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    # Пробный ролик новичку здесь выключен: денежные тесты считают баланс от
+    # нуля, и подарок при создании пользователя сдвинул бы каждое число. Сама
+    # проба проверяется отдельно и включает её явно.
+    trial_was = repo.default_settings.trial_videos
+    repo.default_settings.trial_videos = 0
     try:
         yield
     finally:
+        repo.default_settings.trial_videos = trial_was
         await engine.dispose()
         async with admin.begin() as c:
             await c.execute(text(f"drop schema if exists {SCHEMA} cascade"))

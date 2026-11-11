@@ -227,6 +227,7 @@ async def process_video(
         # ---------------------------------------------------------- режиссёр
         await _notify(progress, "direct")
         t = time.perf_counter()
+        directed: dict[str, Any] = {}
         edl = await direct(
             words,
             info.duration,
@@ -234,12 +235,16 @@ async def process_video(
             language=asr.language,
             preset=preset,
             cfg=cfg,
+            report=directed,
         )
         mark("direct", t)
         errors = validate_edl(edl)
         if errors:
             raise JobError("Не удалось собрать монтажный лист: " + "; ".join(errors[:3]), "edl_invalid")
-        edl_from_llm = bool(llm and llm.ready and any(u.prompt == "direct" for u in llm.usages))
+        # Чей лист — говорит сам режиссёр. Раньше флаг ставился по факту вызова
+        # модели, а вызов бывает и у листа, собранного фолбэком: ответ не прошёл
+        # валидацию дважды — расход записан, а монтаж детерминированный.
+        edl_from_llm = bool(directed.get("from_llm"))
         # Шрифт — в ЛИСТ, а не только в стиль: перерендер получает ровно лист,
         # и выбор, оставшийся в опциях задачи, до него бы не доехал (инвариант 4).
         edl.font = options.font

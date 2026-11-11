@@ -17,6 +17,8 @@ import logging
 import os
 import re
 import shutil
+import signal
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -163,6 +165,26 @@ def render_remotion(
 
 _PROGRESS = re.compile(r"\[render\] progress (\d+)")
 
+# Срок самому рендеру. Обязан быть МЕНЬШЕ `job_timeout` воркера
+# (`worker.tasks.JOB_TIMEOUT`, три часа): тот отсчитывается от начала всей задачи,
+# и при равных сроках первым всегда срабатывал он — то есть отменой, а не этим
+# сроком. Трёхминутный ролик рендерится около получаса, запас четырёхкратный.
+RENDER_TIMEOUT = 2 * 3600
+
+# Рендер — это Node и порождённые им процессы Chromium. На POSIX он уходит в свою
+# группу, чтобы снять можно было всех разом: `proc.kill()` убивает один Node, а
+# браузер остался бы сиротой. В Windows групп нет — там убивается сам процесс.
+_OWN_GROUP: dict[str, bool] = {"start_new_session": True} if os.name == "posix" else {}
+
+
+def _kill_tree(proc: asyncio.subprocess.Process) -> None:
+    """Снять рендер вместе с его потомками. Процесса уже нет — не ошибка."""
+    with suppress(ProcessLookupError, PermissionError, OSError):
+        if _OWN_GROUP:
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+
 
 async def _run_node_with_progress(
     payload: str, *, timeout: float, on_progress: Callable[[float], Awaitable[None] | None] | None
@@ -179,6 +201,7 @@ async def _run_node_with_progress(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **_OWN_GROUP,
     )
     tail: list[str] = []
 
@@ -208,10 +231,15 @@ async def _run_node_with_progress(
 
     try:
         out = await asyncio.wait_for(run(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise
+    finally:
+        # Убиваем на ЛЮБОМ выходе, пока процесс жив, а не только по сроку. Отмена
+        # задачи (выкладка перезапустила воркер, вышел `job_timeout` arq) — это
+        # `CancelledError`, и раньше он проходил мимо: Node с Chromium оставались
+        # рендерить в никуда и делили ядра со следующей попыткой той же задачи.
+        if proc.returncode is None:
+            _kill_tree(proc)
+            with suppress(Exception):
+                await proc.wait()
     if proc.returncode != 0:
         raise ProcError(cmd, proc.returncode or -1, "\n".join(tail))
     return out.decode("utf-8", "replace")
@@ -242,10 +270,12 @@ async def arender_remotion(
     )
     try:
         stdout = await _run_node_with_progress(
-            _request_payload(req), timeout=10_800, on_progress=on_progress
+            _request_payload(req), timeout=RENDER_TIMEOUT, on_progress=on_progress
         )
     except ProcError as e:
         raise RenderError(f"Remotion не отрендерил: {e}") from e
+    except asyncio.TimeoutError as e:
+        raise RenderError(f"Remotion не уложился в {RENDER_TIMEOUT // 60} мин") from e
     produced = Path(stdout.strip().splitlines()[-1]) if stdout.strip() else req.out
     if not produced.exists():
         raise RenderError(f"рендер завершился, но файла нет: {produced}")

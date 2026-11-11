@@ -12,14 +12,18 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.core.config import settings
 from src.core.i18n import LANG_NAMES, LANGS, t
+from src.core.options import theme_label
 from src.core.preset import available, load_preset
 
 
-def _titles() -> list[tuple[str, str]]:
+def _titles(lang: str | None = None) -> list[tuple[str, str]]:
     """Темы в порядке ленты приложения: `order`, а не алфавит.
 
     Порядок один на оба входа — чат и Mini App, — иначе «третья слева» значит
     в них разное, а выбирают люди глазами, а не по имени файла.
+
+    Подпись кнопки — понятная (`options.theme_label`), а не название темы: в
+    чате нет превью, и «Chisel» там не говорит человеку ничего.
     """
     items = []
     for name in available():
@@ -28,14 +32,14 @@ def _titles() -> list[tuple[str, str]]:
         except Exception:  # noqa: BLE001 — битый пресет не должен ронять меню
             items.append((100, name, name))
             continue
-        items.append((preset.order, name, preset.title or name))
+        items.append((preset.order, name, theme_label(name, lang, preset.title or name)))
     items.sort()
     return [(name, title) for _, name, title in items]
 
 
-def presets_keyboard(current: str) -> InlineKeyboardMarkup:
+def presets_keyboard(current: str, lang: str | None = None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for name, title in _titles():
+    for name, title in _titles(lang):
         mark = "● " if name == current else "○ "
         kb.button(text=f"{mark}{title}", callback_data=f"preset:{name}")
     kb.adjust(2)
@@ -50,9 +54,8 @@ def result_keyboard(job_id: str, current: str, lang: str | None = None) -> Inlin
     шестнадцати строк. Что делает нажатие, говорит подпись к видео
     (`video.caption_rebuild`), и говорит один раз.
     """
-    del lang  # подпись переехала в caption; у кнопки остаётся только название
     kb = InlineKeyboardBuilder()
-    for name, title in _titles():
+    for name, title in _titles(lang):
         if name == current:
             continue
         kb.button(text=title, callback_data=f"rerender:{job_id}:{name}")

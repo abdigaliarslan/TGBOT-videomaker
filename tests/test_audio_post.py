@@ -271,6 +271,25 @@ def music_file(tmp_path_factory):
     return path
 
 
+def test_the_voice_is_cleaned_before_it_is_levelled():
+    """Чистка голоса — звенья перед `loudnorm`, и каждое выключается своим числом.
+
+    Запятая на конце обязательна: строка вставляется в цепочку фильтров прямо
+    перед нормализацией, и без неё ffmpeg получил бы два фильтра, слипшихся в
+    одно несуществующее имя.
+    """
+    from src.core.config import Settings
+    from src.pipeline.audio_post import voice_clean_filter
+
+    on = voice_clean_filter(Settings(_env_file=None, voice_highpass_hz=80, voice_denoise_db=8))
+    assert on.startswith("highpass=f=80,afftdn=nr=8:") and on.endswith(",")
+
+    only_cut = voice_clean_filter(Settings(_env_file=None, voice_highpass_hz=80, voice_denoise_db=0))
+    assert only_cut == "highpass=f=80,"
+
+    assert voice_clean_filter(Settings(_env_file=None, voice_highpass_hz=0, voice_denoise_db=0)) == ""
+
+
 def test_loudnorm_hits_preset_target(tmp_path, voice_video):
     preset = load_preset("glass")
     track = build_audio(simple_edl(), voice_video, tmp_path / "a.wav",

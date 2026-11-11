@@ -78,8 +78,13 @@ def upsert_user_stmt(
     is_admin: bool,
     now: datetime,
     preset: str | None = None,
+    trial: int | None = None,
 ):
     """INSERT … ON CONFLICT для пользователя. Вынесен, чтобы проверяться без БД.
+
+    `trial` — пробные ролики (`Settings.trial_videos`). Как и тема, они стоят в
+    values и НЕ стоят в `set_`: баланс кладётся один раз, при первой записи о
+    человеке. В `set_` он обнулял бы или пополнял баланс на каждом сообщении.
 
     `preset` стоит в values и НЕ стоит в `set_`, и это два разных требования.
 
@@ -91,6 +96,7 @@ def upsert_user_stmt(
     пользователя, и тема из конфига затирала бы тему, выбранную руками.
     """
     preset = preset or default_settings.default_preset
+    trial = default_settings.trial_videos if trial is None else trial
     return (
         pg_insert(User)
         .values(
@@ -100,6 +106,7 @@ def upsert_user_stmt(
             language_code=language_code,
             is_admin=is_admin,
             preset=preset,
+            balance=max(0, int(trial)),
             created_at=now,
             last_seen_at=now,
         )
@@ -692,6 +699,54 @@ async def record_llm_call(usage: Usage, job_id: uuid.UUID | str | None = None) -
                 attempt=usage.attempt,
             )
         )
+
+
+async def funnel_report(days: int = 30) -> dict[str, int]:
+    """Воронка: не «сколько зарегистрировалось», а кто дошёл до чего.
+
+    Регистрация сама ничего не значит — бота открывают из любопытства. Значат
+    шаги после неё: получил ролик, вернулся за вторым, заплатил, заплатил ещё
+    раз. Считается по пользователям, пришедшим за последние `days` дней, чтобы
+    число отражало нынешний продукт, а не всю историю.
+
+    Чего здесь нет и быть не может — «опубликовал»: что человек сделал с файлом
+    после скачивания, бот не видит.
+    """
+    since = func.now() - func.make_interval(0, 0, 0, days)
+    async with session() as s:
+        users = (
+            await s.execute(
+                select(
+                    func.count(User.id).label("users"),
+                    func.count(User.id).filter(User.videos_done >= 1).label("got_reel"),
+                    func.count(User.id).filter(User.videos_done >= 2).label("second_reel"),
+                ).where(User.created_at > since)
+            )
+        ).one()
+        per_user = (
+            select(Payment.user_id, func.count(Payment.id).label("n"), func.sum(Payment.stars).label("stars"))
+            .join(User, User.id == Payment.user_id)
+            .where(User.created_at > since)
+            .group_by(Payment.user_id)
+            .subquery()
+        )
+        pays = (
+            await s.execute(
+                select(
+                    func.count().label("paid"),
+                    func.count().filter(per_user.c.n >= 2).label("paid_again"),
+                    func.coalesce(func.sum(per_user.c.stars), 0).label("stars"),
+                ).select_from(per_user)
+            )
+        ).one()
+    return {
+        "users": int(users.users),
+        "got_reel": int(users.got_reel),
+        "second_reel": int(users.second_reel),
+        "paid": int(pays.paid),
+        "paid_again": int(pays.paid_again),
+        "stars": int(pays.stars),
+    }
 
 
 async def cost_report(days: int = 7) -> list[dict[str, Any]]:

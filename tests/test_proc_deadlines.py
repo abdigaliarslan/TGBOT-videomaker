@@ -84,6 +84,80 @@ def test_the_luma_measurement_gives_up_instead_of_hanging(hanging, monkeypatch, 
     assert time.perf_counter() - t < 5
 
 
+@pytest.fixture
+def hanging_node(tmp_path, monkeypatch):
+    """Зависающий `node`, который успевает сказать, под каким номером он запущен."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    exe = bindir / "node"
+    exe.write_text('#!/bin/sh\necho $$ > "$NODE_PIDFILE"\nexec sleep 30\n', encoding="utf-8")
+    exe.chmod(0o755)
+    pidfile = tmp_path / "node.pid"
+    monkeypatch.setenv("NODE_PIDFILE", str(pidfile))
+    monkeypatch.setenv("PATH", f"{bindir}:{__import__('os').environ['PATH']}")
+    return pidfile
+
+
+async def _started(pidfile) -> int:
+    import asyncio
+
+    for _ in range(200):
+        if pidfile.exists() and pidfile.read_text().strip():
+            return int(pidfile.read_text())
+        await asyncio.sleep(0.05)
+    pytest.fail("двойник node не запустился")
+
+
+def _alive(pid: int) -> bool:
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def test_a_cancelled_render_takes_its_node_down_with_it(hanging_node):
+    """Отмена задачи обязана снять и рендер.
+
+    Выкладка перезапускает воркер посреди ролика, arq отменяет задачу — это
+    `CancelledError`, а убивался Node только по истечении срока. Он оставался
+    рендерить в никуда и делил ядра со следующей попыткой той же задачи.
+    """
+    import asyncio
+
+    from src.pipeline import render
+
+    task = asyncio.create_task(render._run_node_with_progress("{}", timeout=60, on_progress=None))
+    pid = await _started(hanging_node)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not _alive(pid), "рендер пережил отмену своей задачи"
+
+
+async def test_a_render_past_its_deadline_is_killed(hanging_node):
+    """Прежнее поведение на месте: срок вышел — процесса нет."""
+    import asyncio
+
+    from src.pipeline import render
+
+    with pytest.raises(asyncio.TimeoutError):
+        await render._run_node_with_progress("{}", timeout=0.5, on_progress=None)
+    assert not _alive(await _started(hanging_node)), "рендер пережил свой срок"
+
+
+def test_the_render_deadline_fires_before_the_job_deadline():
+    """Срок рендера обязан быть меньше срока задачи: при равных первым всегда
+    срабатывал срок задачи, то есть отмена, и ветка «рендер не уложился» была
+    недостижима."""
+    from src.pipeline.render import RENDER_TIMEOUT
+    from src.worker.tasks import JOB_TIMEOUT
+
+    assert RENDER_TIMEOUT < JOB_TIMEOUT
+
+
 def test_every_outside_process_in_the_pipeline_has_a_deadline():
     """Сторож от возврата старой беды: новый вызов без срока виден сразу.
 

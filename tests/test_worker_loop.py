@@ -388,6 +388,126 @@ async def test_rerender_of_a_split_job_reuses_the_saved_switch(tmp_path, monkeyp
     assert got.get("until") == 2.0 and got.get("top") == "top.mp4"
 
 
+class RecordingRedis:
+    """Redis-двойник перерендера: помнит, что записали и что стёрли."""
+
+    def __init__(self) -> None:
+        self.written: dict[str, dict] = {}
+        self.deleted: list[str] = []
+
+    async def set(self, key, value, **k):
+        import json
+
+        self.written[key] = json.loads(value)
+
+    async def delete(self, key):
+        self.deleted.append(key)
+
+
+async def test_a_failed_rerender_tells_the_chat_and_frees_the_user(tmp_path, monkeypatch):
+    """Перерендер, который не получился, обязан сказать об этом.
+
+    Наблюдатель в чате читает только ключ прогресса, а в базе перерендер не
+    живёт. Раньше ключ писался лишь на успехе: при любой поломке пользователь
+    три часа смотрел на «Пересобираю…». Заодно снимается замок «один перерендер
+    на пользователя» — иначе отказ запирал бы кнопки тем на час.
+    """
+    from types import SimpleNamespace
+
+    from src.worker import tasks
+
+    async def fake_get_job(job_id):
+        return SimpleNamespace(
+            id="job-1", user_id=7, edl=edl_of().model_dump(), options={"cut": True}
+        )
+
+    async def lost(job, dst):
+        raise tasks.JobError("Исходный файл потерялся. Пришлите видео ещё раз.", "source_lost")
+
+    monkeypatch.setattr(tasks, "settings", Settings(_env_file=None, work_dir=tmp_path))
+    monkeypatch.setattr(tasks.repo, "get_job", fake_get_job)
+    monkeypatch.setattr(tasks, "fetch_source", lost)
+    redis = RecordingRedis()
+
+    with pytest.raises(tasks.JobError):
+        await tasks.rerender_job({"redis": redis}, "job-1", "glass")
+
+    said = redis.written.get(tasks.progress_key("job-1:glass"))
+    assert said is not None, "об отказе никто не узнал"
+    assert said["stage"] == "failed" and said["error_code"] == "source_lost"
+    assert tasks.rerender_lock_key(7) in redis.deleted, "замок пользователя остался висеть"
+
+
+async def test_the_rerender_rebuilds_the_sound_and_measures_its_own_frame(tmp_path, monkeypatch):
+    """Смена темы — это новый ролик целиком, а не только новые субтитры.
+
+    Перерендер пропускал два шага основного прогона. Звуковой пост: ролик
+    выходил без подложки и звуковых акцентов, с громкостью нарезки. Замер
+    яркости фона: в листе оставалось число прошлого прогона, снятое под другим
+    кропом и другой темой, и правило контраста красило текст по нему.
+    """
+    from types import SimpleNamespace
+
+    from src.worker import tasks
+
+    edl = edl_of()
+    for block in edl.captions:
+        block.bg_luma = 0.9  # замер прошлого прогона
+    seen: dict = {}
+
+    async def fake_get_job(job_id):
+        return SimpleNamespace(
+            id="job-1", user_id=7, edl=edl.model_dump(), options={"cut": True, "sfx": False}
+        )
+
+    async def fake_fetch(job, dst):
+        Path(dst).write_bytes(b"\0" * 1024)
+        return Path(dst)
+
+    async def fake_upload(path, key, **k):
+        return key
+
+    def fake_copy(s, d, **k):
+        shutil.copy2(s, d)
+        return d
+
+    def fake_audio(e, video, out, **k):
+        seen["audio"] = {"video": Path(video).name, "on_loop": on_the_loop(), **k}
+        return SimpleNamespace(path=Path(out))
+
+    def fake_luma(e, video, **k):
+        seen["luma"] = {"video": Path(video).name, "on_loop": on_the_loop()}
+        for block in e.captions:
+            block.bg_luma = None
+
+    async def fake_render(plan, out, **k):
+        seen["plan"] = plan
+        Path(out).write_bytes(b"\0" * 64)
+
+    monkeypatch.setattr(tasks, "settings", Settings(_env_file=None, work_dir=tmp_path))
+    monkeypatch.setattr(tasks.repo, "get_job", fake_get_job)
+    monkeypatch.setattr(tasks, "fetch_source", fake_fetch)
+    monkeypatch.setattr(tasks.storage, "upload", fake_upload)
+    monkeypatch.setattr("src.pipeline.probe.probe", lambda *a, **k: info_of())
+    monkeypatch.setattr("src.pipeline.cut.apply_cuts", lambda e, s, d, **k: fake_copy(s, d))
+    monkeypatch.setattr("src.pipeline.crop.autocrop", fake_copy)
+    monkeypatch.setattr("src.pipeline.audio_post.build_audio", fake_audio)
+    monkeypatch.setattr("src.pipeline.job.measure_bg_luma", fake_luma)
+    monkeypatch.setattr("src.pipeline.render.arender_remotion", fake_render)
+    redis = RecordingRedis()
+
+    await tasks.rerender_job({"redis": redis}, "job-1", "glass")
+
+    assert seen["audio"]["video"] == "cut.mp4", "звук считается по нарезке, как в основном прогоне"
+    assert seen["audio"]["sfx"] is False, "галочка «звуки» из опций задачи потерялась"
+    assert seen["audio"]["apply_cuts"] is True
+    assert seen["plan"].audio and seen["plan"].audio.endswith("audio.wav")
+    assert seen["luma"]["video"] == "vertical.mp4", "фон меряется по кадру ЭТОГО перерендера"
+    assert not seen["audio"]["on_loop"] and not seen["luma"]["on_loop"]
+    assert redis.written[tasks.progress_key("job-1:glass")]["stage"] == "done"
+    assert tasks.rerender_lock_key(7) in redis.deleted
+
+
 async def test_the_worker_hands_the_top_video_to_the_pipeline(tmp_path, monkeypatch):
     """Задача с верхним исходником доходит до пайплайна с ним."""
     from types import SimpleNamespace

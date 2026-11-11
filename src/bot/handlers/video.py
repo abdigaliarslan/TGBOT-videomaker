@@ -15,18 +15,36 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from src.bot.keyboards import app_keyboard, result_keyboard
 from src.core.config import settings
-from src.core.options import JobOptions
+from src.core.options import JobOptions, theme_label
 from src.core.i18n import error_text, lang_of, stage_title, t
 from src.core.preset import available
 from src.db import repo
+from src.db.models import JobStatus
 from src.storage.s3 import SOURCES, storage
-from src.worker.tasks import QUEUE_CPU, get_queue, progress_key
+from src.worker.tasks import (
+    JOB_TIMEOUT,
+    QUEUE_CPU,
+    QUEUED_MAX_WAIT,
+    RERENDER_LOCK_TTL,
+    STUCK_GRACE,
+    get_queue,
+    progress_key,
+    rerender_lock_key,
+)
 
 log = logging.getLogger(__name__)
 router = Router(name="video")
 
 POLL_SECONDS = 3.0  # бот редактирует сообщение раз в 3 секунды (§5 M4)
 BAR_WIDTH = 12
+
+# Сколько наблюдатель ждёт задачу. Столько же, сколько она вправе прожить: срок
+# ожидания в очереди, срок самой работы и запас сторожа на приговор. Раньше здесь
+# стояли три часа, а в очереди задача законно стоит до шести — ролик, доделанный
+# после этого, не доезжал до пользователя до следующего рестарта бота.
+WATCH_SECONDS = QUEUED_MAX_WAIT + JOB_TIMEOUT + 2 * STUCK_GRACE
+# Раз в сколько опросов сверяться с БД (раз в минуту): см. `_settled`.
+DB_CHECK_EVERY = 20
 
 # Сколько раз пытаться отдать готовый ролик и сколько ждать между попытками.
 #
@@ -160,11 +178,22 @@ async def on_video(message: Message, bot: Bot) -> None:
         await status.edit_text(t("video.download_failed", lang))
         return
 
-    queue = await get_queue(QUEUE_CPU)
     try:
-        await queue.enqueue_job("process_job", str(job.id), _queue_name=QUEUE_CPU)
-    finally:
-        await queue.close()
+        queue = await get_queue(QUEUE_CPU)
+        try:
+            await queue.enqueue_job("process_job", str(job.id), _queue_name=QUEUE_CPU)
+        finally:
+            await queue.close()
+    except Exception as e:  # noqa: BLE001 — Redis недоступен: задачу никто не возьмёт
+        # Ролик к этому моменту списан. Без отката задача стояла бы QUEUED до
+        # отсечки сторожа (шесть часов), и всё это время правило «один ролик в
+        # работе» не давало бы пользователю прислать следующий. Приложение
+        # делает то же самое в `upload_finish`.
+        log.exception("не удалось поставить задачу %s в очередь", job.id)
+        await repo.mark_failed(job.id, f"постановка в очередь: {e}")
+        await repo.refund_job(job.id)
+        await _safe_edit(bot, message.chat.id, status.message_id, t("video.queue_full", lang))
+        return
 
     asyncio.create_task(_watch(bot, message.chat.id, status.message_id, str(job.id), db_user.preset))
 
@@ -192,8 +221,6 @@ async def resume_watchers(bot: Bot) -> int:
     Наблюдатели живут в памяти процесса, поэтому без этого пользователь после
     рестарта не дождался бы ролика никогда — джоб бы доделался в тишину.
     """
-    from src.db.models import JobStatus
-
     jobs = await repo.jobs_in_flight()
     for job in jobs:
         if job.status == JobStatus.DONE and job.result_key:
@@ -219,15 +246,53 @@ async def _lang_for_job(job_id: str) -> str:
         return lang_of(None)
 
 
+async def _settled(job_id: str) -> tuple[str, str | None] | None:
+    """Исход задачи по БД: («done», None), («failed», код) или None — ещё идёт.
+
+    Прогресс живёт в Redis и там же умирает: ключ истекает через три часа, а
+    запись «готово» может не дойти вовсе. База — единственное место, где исход
+    задачи записан наверняка, поэтому наблюдатель сверяется с ней. Сбой самой
+    сверки не повод бросать наблюдение: спросим ещё раз через минуту.
+    """
+    try:
+        job = await repo.get_job(job_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("наблюдатель: исход задачи %s не прочитан: %s", job_id, e)
+        return None
+    if job is None:
+        return "failed", None
+    if job.status == JobStatus.DONE:
+        return "done", None
+    if job.status in (JobStatus.FAILED, JobStatus.CANCELLED):
+        return "failed", job.error_code
+    return None
+
+
 async def _watch(bot: Bot, chat_id: int, message_id: int, job_id: str, preset: str) -> None:
     """Раз в 3 секунды подтягивает прогресс из Redis и правит одно сообщение."""
     lang = await _lang_for_job(job_id)
     queue = await get_queue()
     redis = queue
     last_text = ""
+
+    async def fail(code: str | None) -> None:
+        text = error_text(
+            code, lang, min_s=settings.min_video_seconds, max_m=settings.max_video_minutes
+        )
+        await _safe_edit(bot, chat_id, message_id, text)
+
     try:
-        for _ in range(int(3 * 3600 / POLL_SECONDS)):
+        for tick in range(1, int(WATCH_SECONDS / POLL_SECONDS) + 1):
             await asyncio.sleep(POLL_SECONDS)
+            if tick % DB_CHECK_EVERY == 0:
+                settled = await _settled(job_id)
+                if settled is not None:
+                    outcome, code = settled
+                    if outcome == "done":
+                        await _deliver(bot, chat_id, message_id, job_id, preset)
+                    else:
+                        await fail(code)
+                    return
             raw = await redis.get(progress_key(job_id))
             if raw is None:
                 continue
@@ -236,11 +301,7 @@ async def _watch(bot: Bot, chat_id: int, message_id: int, job_id: str, preset: s
             share = float(data.get("progress") or 0.0)
 
             if stage == "failed":
-                text = error_text(
-                    data.get("error_code"), lang,
-                    min_s=settings.min_video_seconds, max_m=settings.max_video_minutes,
-                )
-                await _safe_edit(bot, chat_id, message_id, text)
+                await fail(data.get("error_code"))
                 return
             if stage == "done":
                 await _deliver(bot, chat_id, message_id, job_id, preset)
@@ -261,12 +322,23 @@ async def _safe_edit(bot: Bot, chat_id: int, message_id: int, text: str) -> None
 
 
 async def _send_video(
-    bot: Bot, chat_id: int, job, dst: Path, preset: str, lang: str | None = None
+    bot: Bot,
+    chat_id: int,
+    job,
+    dst: Path,
+    preset: str,
+    lang: str | None = None,
+    *,
+    caption: str | None = None,
+    filename: str = "reel.mp4",
 ) -> None:
     """Отправка ролика, переживающая обрыв связи.
 
     Файл уже скачан — повторяем только саму заливку. Ошибки логики (не тот чат,
     слишком большой файл) не ретраятся: они от повтора не пройдут.
+
+    `caption` и `filename` — для перерендера: у него своя подпись (длительности
+    те же, тема другая) и имя файла с темой.
     """
     dims = await video_dims(dst)
     thumb = await video_thumbnail(dst, dims)
@@ -275,10 +347,10 @@ async def _send_video(
         try:
             await bot.send_video(
                 chat_id=chat_id,
-                video=FSInputFile(dst, filename="reel.mp4"),
+                video=FSInputFile(dst, filename=filename),
                 thumbnail=thumb,
                 **dims,
-                caption=_caption(job, lang),
+                caption=caption if caption is not None else _caption(job, lang),
                 supports_streaming=True,
                 reply_markup=result_keyboard(str(job.id), preset, lang),
             )
@@ -375,7 +447,7 @@ def _caption(job, lang: str | None = None) -> str:
         )
         if saved > 0.5:
             parts.append(t("video.caption_saved", lang, n=f"{saved:.0f}"))
-    parts.append(t("video.caption_style", lang, preset=job.preset))
+    parts.append(t("video.caption_style", lang, preset=theme_label(job.preset, lang, job.preset)))
     return " · ".join(parts) + "\n" + t("video.caption_rebuild", lang)
 
 
@@ -409,51 +481,110 @@ async def on_rerender(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer(t("rerender.purged", lang), show_alert=True)
         return
 
-    await callback.answer(t("rerender.toast", lang))
-    status = await bot.send_message(callback.message.chat.id, t("rerender.status", lang, preset=preset))
+    # Перерендер бесплатный, а очередь у него общая с оплаченными роликами, и
+    # берёт она по одному. Поэтому те же два предела, что у нового видео: потолок
+    # очереди и один перерендер на пользователя за раз. Без них десяток нажатий
+    # на кнопки тем вставал впереди чужих платных задач.
+    if await repo.active_jobs_count() >= settings.queue_max_size:
+        await callback.answer(t("video.queue_full", lang), show_alert=True)
+        return
 
+    chat_id = callback.message.chat.id
+    is_admin = owner in settings.admin_ids
+    lock = rerender_lock_key(job.user_id)
     queue = await get_queue(QUEUE_CPU)
     try:
-        await queue.enqueue_job("rerender_job", job_id, preset, _queue_name=QUEUE_CPU)
+        # Замок снимает воркер в конце перерендера (`rerender_job`); срок жизни —
+        # страховка на случай, когда снять некому.
+        if not is_admin and not await queue.set(lock, "1", ex=RERENDER_LOCK_TTL, nx=True):
+            await callback.answer(t("rerender.busy", lang), show_alert=True)
+            return
+
+        status = None
+        try:
+            await callback.answer(t("rerender.toast", lang))
+            status = await bot.send_message(
+                chat_id, t("rerender.status", lang, preset=theme_label(preset, lang, preset))
+            )
+            # Исход прошлого перерендера в эту же тему живёт в Redis три часа.
+            # Не убрать его — наблюдатель примет старое «готово» или старый
+            # отказ за ответ на новый запрос.
+            await queue.delete(progress_key(f"{job_id}:{preset}"))
+            await queue.enqueue_job("rerender_job", job_id, preset, _queue_name=QUEUE_CPU)
+        except Exception:  # noqa: BLE001 — перерендер не поставлен: замок держать не за что
+            log.exception("не удалось поставить перерендер %s в очередь", job_id)
+            if not is_admin:
+                with contextlib.suppress(Exception):
+                    await queue.delete(lock)
+            if status is not None:
+                await _safe_edit(bot, chat_id, status.message_id, t("video.queue_full", lang))
+            return
     finally:
         await queue.close()
 
-    asyncio.create_task(
-        _watch_rerender(bot, callback.message.chat.id, status.message_id, job_id, preset)
-    )
+    asyncio.create_task(_watch_rerender(bot, chat_id, status.message_id, job_id, preset))
 
 
 async def _watch_rerender(bot: Bot, chat_id: int, message_id: int, job_id: str, preset: str) -> None:
+    """Ждёт исхода перерендера — любого, а не только успеха.
+
+    В базе перерендер не живёт (задача остаётся DONE), поэтому единственный
+    источник правды здесь — ключ прогресса, который пишет `rerender_job`.
+    """
     lang = await _lang_for_job(job_id)
+
+    async def fail(code: str | None) -> None:
+        text = error_text(
+            code, lang, min_s=settings.min_video_seconds, max_m=settings.max_video_minutes
+        )
+        await _safe_edit(bot, chat_id, message_id, text)
+
     queue = await get_queue()
     try:
-        for _ in range(int(3 * 3600 / POLL_SECONDS)):
+        for _ in range(int(WATCH_SECONDS / POLL_SECONDS)):
             await asyncio.sleep(POLL_SECONDS)
             raw = await queue.get(progress_key(f"{job_id}:{preset}"))
             if raw is None:
                 continue
             data = json.loads(raw if isinstance(raw, str) else raw.decode())
-            if data.get("stage") != "done":
-                continue
-            key = data.get("result_key")
-            dst = Path(settings.work_dir) / f"rerender-{job_id}-{preset}.mp4"
-            try:
-                await storage.download(key, dst)
-                await bot.send_video(
-                    chat_id=chat_id,
-                    video=FSInputFile(dst, filename=f"reel-{preset}.mp4"),
-                    thumbnail=await video_thumbnail(dst, dims := await video_dims(dst)),
-                    **dims,
-                    caption=t("video.caption_style", lang, preset=preset)
-                    + "\n"
-                    + t("video.caption_rebuild", lang),
-                    supports_streaming=True,
-                    reply_markup=result_keyboard(job_id, preset, lang),
+            stage = data.get("stage")
+            if stage == "failed":
+                await fail(data.get("error_code"))
+                return
+            if stage == "done":
+                await _deliver_rerender(
+                    bot, chat_id, message_id, job_id, preset, data.get("result_key"), lang
                 )
-                await _safe_edit(bot, chat_id, message_id, t("video.done", lang))
-            finally:
-                dst.unlink(missing_ok=True)
-                dst.with_suffix(".thumb.jpg").unlink(missing_ok=True)
-            return
+                return
+        # Срок вышел, а исхода нет: воркер умер посреди перерендера и не вернулся.
+        await fail("worker_lost")
     finally:
         await queue.close()
+
+
+async def _deliver_rerender(
+    bot: Bot, chat_id: int, message_id: int, job_id: str, preset: str, key: str | None, lang: str
+) -> None:
+    job = await repo.get_job(job_id)
+    if job is None or not key:
+        await _safe_edit(bot, chat_id, message_id, t("video.result_lost", lang))
+        return
+    dst = Path(settings.work_dir) / f"rerender-{job_id}-{preset}.mp4"
+    try:
+        await storage.download(key, dst)
+        # Через `_send_video`, а не голым `send_video`: обрыв связи на заливке
+        # стоил бы пользователю всего перерендера, как когда-то стоил монтажа.
+        await _send_video(
+            bot, chat_id, job, dst, preset, lang,
+            caption=t("video.caption_style", lang, preset=theme_label(preset, lang, preset))
+            + "\n"
+            + t("video.caption_rebuild", lang),
+            filename=f"reel-{preset}.mp4",
+        )
+        await _safe_edit(bot, chat_id, message_id, t("video.done", lang))
+    except Exception as e:  # noqa: BLE001
+        log.exception("не отдал перерендер")
+        await _safe_edit(bot, chat_id, message_id, t("video.not_sent", lang, error=escape(str(e))))
+    finally:
+        dst.unlink(missing_ok=True)
+        dst.with_suffix(".thumb.jpg").unlink(missing_ok=True)

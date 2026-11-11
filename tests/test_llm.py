@@ -10,6 +10,7 @@ from src.core.config import PROVIDER_MODELS, Settings
 from src.llm import client as client_mod
 from src.llm.client import (
     LLMBadOutput,
+    LLMBudgetExceeded,
     LLMClient,
     LLMUnavailable,
     Usage,
@@ -282,6 +283,21 @@ async def test_bad_json_raises_bad_output():
     with pytest.raises(LLMBadOutput):
         await c.complete("clean_transcript", {"language": "ru", "words_table": "x"},
                          SCHEMAS["clean_transcript"], "cheap")
+
+
+@pytest.mark.parametrize("stop", ["length", "max_tokens", "MAX_TOKENS"])
+async def test_a_reply_cut_by_the_token_limit_is_not_bad_output(stop):
+    """Обрыв по лимиту токенов — не «плохой ответ»: ретрай на него тратить нельзя.
+
+    У провайдеров слово разное и в разном регистре. Прямой Gemini пишет
+    `MAX_TOKENS`, и сравнение с учётом регистра пропускало его в `LLMBadOutput`,
+    на который режиссёр тратит свой единственный оплачиваемый повтор.
+    """
+    c, p = client([result_of('{"fixes": [', stop_reason=stop)])
+    with pytest.raises(LLMBudgetExceeded):
+        await c.complete("clean_transcript", {"language": "ru", "words_table": "x"},
+                         SCHEMAS["clean_transcript"], "cheap")
+    assert len(p.calls) == 1
 
 
 async def test_wrong_shape_raises_bad_output():

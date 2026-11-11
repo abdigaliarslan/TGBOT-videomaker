@@ -40,6 +40,40 @@ ACCENTS: dict[str, tuple[dict[str, str], str | None]] = {
 }
 
 
+# Понятные подписи тем. Название темы (`Preset.title`) — имя для своих: «Pulse»,
+# «Glass», «Chisel» человеку, который видит их впервые, не говорят ничего, а тем
+# семнадцать. Подпись отвечает на вопрос «как это выглядит». Ключ — имя темы;
+# темы без подписи показываются по названию (`theme_label`), а тест следит,
+# чтобы подпись была у каждой и чтобы две темы не назывались одинаково.
+THEME_LABELS: dict[str, dict[str, str]] = {
+    "pulse": {"ru": "С выделением слов", "en": "Highlighted words"},
+    "glass": {"ru": "Крупные субтитры", "en": "Large captions"},
+    "bold": {"ru": "Жирные заглавные", "en": "Bold caps"},
+    "press": {"ru": "Журнальный", "en": "Magazine"},
+    "widescreen": {"ru": "Как в кино", "en": "Cinematic"},
+    "notebook": {"ru": "Печатная машинка", "en": "Typewriter"},
+    "silk": {"ru": "Элегантный", "en": "Elegant"},
+    "heavyweight": {"ru": "Очень крупный", "en": "Extra large"},
+    "mariable": {"ru": "Мягкий с засечками", "en": "Soft serif"},
+    "invitation": {"ru": "Нежный", "en": "Delicate"},
+    "boardwalk": {"ru": "Афиша", "en": "Poster"},
+    "deco_line": {"ru": "Тонкие заглавные", "en": "Thin caps"},
+    "editorial": {"ru": "Газетный", "en": "Editorial"},
+    "feather": {"ru": "Лёгкий", "en": "Light"},
+    "nouveau": {"ru": "Винтажный", "en": "Vintage"},
+    "modernist": {"ru": "Строгий", "en": "Clean caps"},
+    "chisel": {"ru": "Классика", "en": "Classic caps"},
+}
+
+
+def theme_label(name: str, lang: str | None = None, fallback: str | None = None) -> str:
+    """Подпись темы на языке интерфейса; нет подписи — название темы."""
+    labels = THEME_LABELS.get(name)
+    if not labels:
+        return fallback or name
+    return labels.get(lang or "ru") or labels["ru"]
+
+
 class FontChoice(BaseModel):
     """Шрифт из библиотеки. Имя семейства — ровно то, что лежит внутри TTF.
 

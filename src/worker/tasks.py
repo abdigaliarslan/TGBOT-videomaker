@@ -38,6 +38,21 @@ QUEUE_CPU = "arq:queue:cpu"
 QUEUE_LIGHT = "arq:queue:light"
 
 PROGRESS_TTL = 3 * 3600
+# Срок одной задачи пула `cpu`. Именем, а не числом в настройках пула: от него
+# считают срок наблюдателя в чате (`bot.handlers.video`) и срок самого рендера
+# (`pipeline.render.RENDER_TIMEOUT`, обязан быть меньше).
+JOB_TIMEOUT = 3 * 3600
+
+# Один перерендер на пользователя за раз. Перерендер бесплатный и идёт в ту же
+# очередь `cpu`, что и оплаченные ролики, а она берёт их по одному: без замка
+# десяток нажатий на кнопки тем вставал в очередь впереди чужих платных задач.
+# Замок ставит бот, снимает воркер в конце перерендера. Срок жизни — страховка на
+# случай, когда снять некому (воркер убит): дольше него замок не провисит.
+RERENDER_LOCK_TTL = 3600
+
+
+def rerender_lock_key(user_id: Any) -> str:
+    return f"reelbot:rerender:{user_id}"
 
 
 def redis_settings() -> RedisSettings:
@@ -297,6 +312,8 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
     from src.core.track import load_track
     from src.pipeline.crop import autocrop, framing_spans
     from src.pipeline.cut import apply_cuts
+    from src.pipeline.audio_post import build_audio
+    from src.pipeline.job import _measure_luma
     from src.pipeline.probe import probe
     from src.pipeline.render import arender_remotion, render_ass
     from src.pipeline.split import stage_split
@@ -304,13 +321,15 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
     redis = ctx["redis"]
     job = await repo.get_job(job_id)
     if job is None:
+        await _rerender_failed(redis, job_id, preset, "failed")
         raise RuntimeError(f"задача {job_id} не найдена")
-    if not job.edl:
-        raise JobError("Монтажный лист не сохранился — пересобрать нечем.", "edl_missing")
 
     work = Path(settings.work_dir) / f"{job.id}-rerender"
-    work.mkdir(parents=True, exist_ok=True)
+    cancelled = False
     try:
+        if not job.edl:
+            raise JobError("Монтажный лист не сохранился — пересобрать нечем.", "edl_missing")
+        work.mkdir(parents=True, exist_ok=True)
         src_path = await fetch_source(job, work / "source.mp4")
         edl = EDL(**job.edl)
         edl.preset = preset
@@ -335,6 +354,24 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
             await asyncio.to_thread(apply_cuts, edl, src_path, cut_path, info=info, cfg=settings)
         else:
             await asyncio.to_thread(shutil.copy2, src_path, cut_path)
+        # Звук собирается заново, как и в основном прогоне. Без этого шага ролик
+        # после смены темы выходил с голой дорожкой нарезки: без подложки, без
+        # звуковых акцентов и с громкостью не той темы. Расстановка эффектов
+        # берётся из листа (`build_audio` переиспользует `edl.sfx`), галочка
+        # «звуки» — из опций задачи. Сбой не роняет перерендер: тогда в ролике
+        # остаётся звук нарезки, как было раньше.
+        audio_path: str | None = None
+        if settings.audio_post_enabled:
+            try:
+                track = await asyncio.to_thread(
+                    build_audio,
+                    edl, cut_path, work / "audio.wav", preset=style,
+                    apply_cuts=options.cut, sfx=options.sfx, cfg=settings,
+                )
+                if track is not None:
+                    audio_path = str(track.path)
+            except Exception as e:  # noqa: BLE001 — без звукового поста ролик всё равно едет
+                log.warning("перерендер %s: звуковой пост пропущен: %s", job.id, e)
         # Пресет и крупность передаются ЯВНО. Без них перерендер брал цветокор из
         # `cfg.default_preset`, а не из пресета задачи, и снимал весь ролик одной
         # крупностью — то есть §0.4 «сохранённый EDL + другой пресет = новое
@@ -362,6 +399,14 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
             )
         staged_info = await asyncio.to_thread(probe, vertical)
 
+        # Яркость фона под субтитрами — заново: в листе лежит замер прошлого
+        # прогона, а там были другой кроп и другая тема (`pipeline.luma`: «старое
+        # значение — не замер»). Правило контраста по чужому числу красило бы
+        # текст под фон, которого в этом ролике нет.
+        await asyncio.to_thread(
+            _measure_luma, edl, vertical, preset=style, cut_pauses=options.cut, cfg=settings
+        )
+
         # Трек считается заново, а не берётся из кеша задачи. MOTION_PLAN просит
         # кешировать его в MinIO и не пересчитывать, но здесь всё равно заново
         # идёт и нарезка, и кроп — а трек живёт в координатах ВЫХОДНОГО кадра,
@@ -370,7 +415,7 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
         plan = build_plan(
             edl, str(vertical), fps=int(round(staged_info.fps)),
             width=staged_info.width, height=staged_info.height,
-            preset=style, apply_cuts=options.cut, cfg=settings,
+            preset=style, apply_cuts=options.cut, audio_path=audio_path, cfg=settings,
             track=load_track(work / "track.json"),
         )
         out = work / "result.mp4"
@@ -387,9 +432,42 @@ async def rerender_job(ctx: dict[str, Any], job_id: str, preset: str) -> dict[st
             ex=PROGRESS_TTL,
         )
         return {"job_id": str(job.id), "preset": preset, "result_key": key}
+    except asyncio.CancelledError:
+        # Выкладка перезапускает воркер: arq поставит перерендер заново, поэтому
+        # сообщать об отказе рано, а место в очереди остаётся за пользователем.
+        cancelled = True
+        raise
+    except JobError as e:
+        log.warning("перерендер %s в «%s» отклонён: %s", job.id, preset, e)
+        await _rerender_failed(redis, job_id, preset, e.code)
+        raise
+    except Exception:  # noqa: BLE001 — поломка обязана дойти до чата, а не только до лога
+        log.exception("перерендер %s в «%s» упал", job.id, preset)
+        await _rerender_failed(redis, job_id, preset, "failed")
+        raise
     finally:
         if not settings.debug:
             shutil.rmtree(work, ignore_errors=True)
+        # Замок пользователя снимается на любом выходе, кроме отмены.
+        user_id = getattr(job, "user_id", None)
+        if user_id is not None and not cancelled:
+            with suppress(Exception):
+                await redis.delete(rerender_lock_key(user_id))
+
+
+async def _rerender_failed(redis: Any, job_id: str, preset: str, code: str) -> None:
+    """Сообщить наблюдателю в чате, что перерендер не получился.
+
+    Наблюдатель читает только этот ключ. Без записи пользователь три часа смотрел
+    на «Пересобираю…»: в базе перерендер не живёт, и сторож его не видит.
+    Сама запись не имеет права скрыть исходную ошибку — отсюда `suppress`.
+    """
+    with suppress(Exception):
+        await redis.set(
+            progress_key(f"{job_id}:{preset}"),
+            json.dumps({"stage": "failed", "progress": 0.0, "error_code": code}),
+            ex=PROGRESS_TTL,
+        )
 
 
 # Запас от последнего пульса до приговора. Больше срока жизни ключа — иначе
@@ -594,7 +672,7 @@ class WorkerSettings:
     on_shutdown = shutdown
     queue_name = QUEUE_CPU
     max_jobs = settings.max_concurrent_jobs
-    job_timeout = 3 * 3600
+    job_timeout = JOB_TIMEOUT
     keep_result = 3600
     # Упавший монтаж arq не повторяет при любом `max_tries`: повтор бывает только
     # после отмены, то есть когда выкладка перезапустила воркер посреди ролика.
@@ -663,4 +741,4 @@ class GpuWorkerSettings(WorkerSettings):
     functions = [process_job]
     queue_name = QUEUE_GPU
     max_jobs = 1
-    job_timeout = 3 * 3600
+    job_timeout = JOB_TIMEOUT

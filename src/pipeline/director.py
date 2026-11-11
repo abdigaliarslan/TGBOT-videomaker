@@ -935,14 +935,21 @@ async def direct(
     language: str = "",
     preset: str | None = None,
     cfg: Settings | None = None,
+    report: dict[str, Any] | None = None,
 ) -> EDL:
     """Главный вход M2: транскрипт → EDL.
 
     Порядок: вызов LLM → валидация → один ретрай с текстом ошибки → фолбэк (§3).
+
+    `report` — куда записать, чей это лист: `report["from_llm"]` истинно только
+    когда принят лист модели. По одному факту вызова этого не узнать: вызов мог
+    состояться, а лист всё равно собран фолбэком.
     """
     cfg = cfg or default_settings
     if not words:
         raise ValueError("пустой транскрипт: нечего монтировать")
+    if report is not None:
+        report["from_llm"] = False
 
     if llm is None or not llm.ready:
         log.info("режиссёр: LLM недоступна, детерминированный монтаж")
@@ -1001,6 +1008,8 @@ async def direct(
                 len(edl.captions),
                 sum(1 for c in edl.cuts if not c.kept),
             )
+            if report is not None:
+                report["from_llm"] = True
             return edl
 
         log.warning("режиссёр: EDL не прошёл валидацию (попытка %d): %s", attempt, "; ".join(errors))

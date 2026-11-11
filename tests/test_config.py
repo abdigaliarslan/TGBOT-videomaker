@@ -221,6 +221,72 @@ def test_new_user_is_created_with_the_configured_theme(monkeypatch):
     assert compiled.params["preset"] == "bold"
 
 
+def test_a_new_user_gets_the_trial_once_and_only_once(monkeypatch):
+    """Проба кладётся на баланс при ПЕРВОЙ записи о человеке и больше никогда.
+
+    В `set_` баланс стоять не должен: `set_` выполняется на каждом сообщении
+    существующего пользователя, и проба либо обнуляла бы купленные ролики, либо
+    выдавалась бы заново.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy.dialects import postgresql
+
+    from src.db import repo
+
+    monkeypatch.setattr(repo, "default_settings", Settings(_env_file=None, trial_videos=1))
+    stmt = repo.upsert_user_stmt(
+        1, username=None, first_name=None, language_code=None, is_admin=False,
+        now=datetime.now(timezone.utc),
+    )
+    compiled = stmt.compile(dialect=postgresql.dialect())
+    assert compiled.params["balance"] == 1
+    insert_part, rest = str(compiled).split("ON CONFLICT", 1)
+    assert "balance" in insert_part
+    assert "balance" not in rest.split("RETURNING", 1)[0]
+
+    off = repo.upsert_user_stmt(
+        1, username=None, first_name=None, language_code=None, is_admin=False,
+        now=datetime.now(timezone.utc), trial=0,
+    )
+    assert off.compile(dialect=postgresql.dialect()).params["balance"] == 0
+
+
+def test_every_theme_has_its_own_plain_label():
+    """Подпись темы отвечает на вопрос «как это выглядит» — и обязана быть у
+    каждой темы на обоих языках. Две темы с одной подписью неразличимы в чате,
+    где превью нет вовсе."""
+    from src.core.options import THEME_LABELS, theme_label
+    from src.core.preset import available
+
+    assert set(THEME_LABELS) == set(available())
+    for lang in ("ru", "en"):
+        labels = [theme_label(name, lang) for name in available()]
+        assert all(labels) and len(set(labels)) == len(labels), lang
+    assert theme_label("нет такой", "ru", "Запасное") == "Запасное"
+
+
+def test_the_first_screen_states_the_terms(monkeypatch):
+    """Условия стоят в приветствии: что бесплатно и сколько стоит следующий
+    ролик. Раньше о цене человек узнавал отказом после отправки видео."""
+    from src.bot.handlers import common
+
+    monkeypatch.setattr(common.settings, "free_videos", False)
+    monkeypatch.setattr(common.settings, "star_packages", {1: 50, 5: 200, 20: 600})
+    monkeypatch.setattr(common.settings, "brand_name", "Reelmaker")
+
+    monkeypatch.setattr(common.settings, "trial_videos", 1)
+    text = common.welcome_text("ru")
+    assert "Reelmaker" in text and "{brand}" not in text
+    assert "Первый ролик — бесплатно" in text and "50 ⭐" in text and "от 30 ⭐" in text
+
+    monkeypatch.setattr(common.settings, "trial_videos", 0)
+    assert "бесплатно" not in common.offer_text("ru") and "50 ⭐" in common.offer_text("ru")
+
+    monkeypatch.setattr(common.settings, "free_videos", True)
+    assert "⭐" not in common.offer_text("ru")
+
+
 def test_upsert_does_not_overwrite_the_theme_of_an_existing_user():
     """`set_` выполняется на каждом сообщении — тема из конфига затёрла бы выбор."""
     from datetime import datetime, timezone

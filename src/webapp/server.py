@@ -38,7 +38,7 @@ from aiohttp import web
 from src.core.config import CLAIMED_PREFIX, UPLOAD_PREFIX, Settings
 from src.core.geometry import load_metrics
 from src.core.i18n import LANGS, error_text, lang_of, stage_title, t, videos_word
-from src.core.options import ACCENTS, FONTS, JobOptions
+from src.core.options import ACCENTS, FONTS, JobOptions, theme_label
 from src.core.preset import available, load_preset
 from src.core.referral import code_of
 from src.db import repo
@@ -335,6 +335,9 @@ async def bootstrap(request: web.Request) -> web.Response:
         {
             "name": name,
             "title": p.title or name,
+            # Понятная подпись под названием: «Chisel» не говорит ничего тому,
+            # кто видит тему впервые, а «Классика» — говорит.
+            "label": theme_label(name, lang, p.title or name),
             "font": p.font.family,
             "font_file": p.font.file,
             "letter_spacing": p.font.letter_spacing,
@@ -384,7 +387,9 @@ async def bootstrap(request: web.Request) -> web.Response:
                 "lang": lang,
             },
             "bot_username": me.username,
-            "bot_name": me.first_name,
+            # Название — одно на всё (`Settings.brand_name`), а не то, что сейчас
+            # записано именем бота в Telegram: эти два места и расходились.
+            "bot_name": cfg.brand_name or me.first_name,
             "presets": presets,
             "accents": [
                 {"key": k, "title": titles.get(lang, titles["ru"]), "color": color}
@@ -409,6 +414,9 @@ async def bootstrap(request: web.Request) -> web.Response:
             # Монтаж сейчас бесплатный для всех: кнопка не ведёт в тарифы и не
             # обещает списания.
             "free": cfg.free_videos,
+            # Сколько роликов даётся новичку на пробу: первый экран говорит об
+            # этом сразу, вместе с ценой следующего.
+            "trial": max(0, cfg.trial_videos),
             "limits": {
                 "min_seconds": cfg.min_video_seconds,
                 "max_minutes": cfg.max_video_minutes,

@@ -16,6 +16,9 @@ const I18N = {
     "home.recent": "Последнее", "home.all": "Все", "home.invite": "Пригласите друга",
     "home.invite_sub": "{p}% с каждой его покупки — вам на баланс",
     "home.empty": "Роликов пока нет", "home.empty_sub": "Первый ролик появится здесь",
+    "home.offer_trial": "Первый ролик — бесплатно. Дальше {single} ⭐ за ролик",
+    "home.offer_paid": "{single} ⭐ за ролик, пакетом — от {best} ⭐",
+    "home.offer_free": "Сейчас монтаж бесплатный",
     "preview.pause": "Пауза", "preview.play": "Воспроизвести",
     "preview.s1": ["это", "пример", "субтитров", "в", "стиле"],
     "preview.s2": ["паузы", "уже", "вырезаны"],
@@ -104,6 +107,9 @@ const I18N = {
     "home.recent": "Recent", "home.all": "All", "home.invite": "Invite a friend",
     "home.invite_sub": "{p}% of every purchase they make goes to your balance",
     "home.empty": "No videos yet", "home.empty_sub": "Your first reel will show up here",
+    "home.offer_trial": "Your first reel is free. After that it's {single} ⭐ per reel",
+    "home.offer_paid": "{single} ⭐ per reel, or from {best} ⭐ in a pack",
+    "home.offer_free": "Editing is free right now",
     "preview.pause": "Pause", "preview.play": "Play",
     "preview.s1": ["this", "is", "captions", "in", "style"],
     "preview.s2": ["pauses", "are", "gone"],
@@ -609,7 +615,7 @@ const preview = {
       }
     }
     const font = activeFont();
-    $("#preview-tag").textContent = `${p.title} · ${font ? font.title : p.font}`;
+    $("#preview-tag").textContent = `${p.label || p.title} · ${font ? font.title : p.font}`;
   },
   tick() {
     this.step += 1;
@@ -712,7 +718,7 @@ function renderPresets() {
       // Не «вкладка»: панели у неё нет, и скринридер обещал бы то, чего нет.
       // Это выбор одного из многих — радиогруппа.
       role: "radio",
-      title: `${p.title} · ${p.font}`,
+      title: `${p.label || p.title} · ${p.title}`,
       "aria-checked": p.name === state.preset ? "true" : "false",
       onclick: () => {
         state.preset = p.name;
@@ -724,12 +730,13 @@ function renderPresets() {
         scrollToActive(box);
       },
     }, [
-      // Таблетка — это образец: название темы набрано ЕЁ шрифтом и её
-      // регистром. Семнадцать одинаково набранных подписей ничего не говорили
-      // бы о том, чем темы отличаются.
+      // Таблетка — это образец: подпись набрана шрифтом темы и её регистром.
+      // Семнадцать одинаково набранных подписей ничего не говорили бы о том,
+      // чем темы отличаются. Текст — понятная подпись («Крупные субтитры»), а
+      // не название темы: «Chisel» тому, кто видит её впервые, не говорит ничего.
       el("span", {
         class: `style-pill__name${p.uppercase ? " is-caps" : ""}`,
-        text: p.uppercase ? p.title.toUpperCase() : p.title,
+        text: p.uppercase ? (p.label || p.title).toUpperCase() : (p.label || p.title),
         style: `font-family:"${p.font}", system-ui, sans-serif;letter-spacing:${p.letter_spacing}em`,
       }),
     ])));
@@ -1210,7 +1217,7 @@ function renderJobs() {
     ]));
     return;
   }
-  const presets = Object.fromEntries(state.boot.presets.map((p) => [p.name, p.title]));
+  const presets = Object.fromEntries(state.boot.presets.map((p) => [p.name, p.label || p.title]));
   box.replaceChildren(...jobs.map((j) => {
     const accent = state.boot.accents.find((a) => a.key === (j.options && j.options.accent));
     const meta = [presets[j.preset] || j.preset, accent && accent.key !== "theme" ? accent.title : null, fmtWhen(j.created_at)].filter(Boolean).join(" · ");
@@ -1519,6 +1526,29 @@ function renderUser() {
   const p = state.boot.referral ? state.boot.referral.percent : 0;
   $("#home-invite-sub").textContent = tr("home.invite_sub", { p });
   $("#profile-invite-sub").textContent = tr("home.invite_sub", { p });
+  const offer = offerText();
+  const offerNode = $("#home-offer");
+  if (offerNode) {
+    offerNode.textContent = offer;
+    offerNode.hidden = !offer;
+  }
+}
+
+// Условия одной строкой на первом экране: что бесплатно и сколько стоит
+// следующий ролик. Раньше о цене человек узнавал отказом после загрузки видео.
+// Владельцу строка не нужна — с него ролики не списываются.
+function offerText() {
+  const boot = state.boot;
+  if (boot.user.is_admin) return "";
+  if (boot.free) return tr("home.offer_free");
+  const packs = (boot.packages || []).filter((x) => x.videos > 0);
+  if (!packs.length) return "";
+  const one = packs.find((x) => x.videos === 1);
+  const single = one ? one.stars : Math.min(...packs.map((x) => x.stars));
+  const best = Math.round(Math.min(...packs.map((x) => x.stars / x.videos)));
+  // Проба ещё не потрачена: ни одного готового ролика, а на балансе что-то есть.
+  const trial = boot.trial > 0 && boot.user.videos_done === 0 && boot.user.balance > 0;
+  return tr(trial ? "home.offer_trial" : "home.offer_paid", { single, best });
 }
 
 function renderProfile() {

@@ -301,7 +301,9 @@ class LLMClient:
                 # Обрыв по лимиту токенов повторять НЕЛЬЗЯ: те же настройки дадут
                 # тот же обрыв, а заплатим дважды. Проверено дорогой ценой —
                 # два таких ретрая сожгли весь остаток баланса.
-                if result.stop_reason in ("length", "max_tokens"):
+                # Регистр у провайдеров разный: OpenAI-совместимые пишут `length`,
+                # Anthropic — `max_tokens`, а прямой Gemini — `MAX_TOKENS`.
+                if (result.stop_reason or "").lower() in ("length", "max_tokens"):
                     raise LLMBudgetExceeded(
                         f"{prompt_name}: ответ оборван по лимиту токенов "
                         f"({result.output_tokens} шт.), повтор не поможет — "

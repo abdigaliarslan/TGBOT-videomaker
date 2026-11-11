@@ -103,6 +103,30 @@ async def test_two_bad_plans_fall_back_to_deterministic():
         assert sum(1 for cw in block.words if cw.emphasis.value != "none") == 1
 
 
+async def test_the_director_says_whose_edit_it_is():
+    """Флаг «лист от модели» ставится по принятому листу, а не по факту вызова.
+
+    Раньше джоб смотрел, был ли вызов `direct`. Он бывает и у фолбэка: модель
+    дважды ответила негодным листом, расход записан, монтаж детерминированный —
+    а в базе стояло «от модели», и статистика качества режиссёра врала.
+    """
+    ws = words()
+
+    accepted: dict = {}
+    await direct(ws, 4.5, llm=client_with(good_plan()), language="ru", cfg=cfg(), report=accepted)
+    assert accepted["from_llm"] is True
+
+    fell_back: dict = {}
+    llm = client_with(broken_plan(), broken_plan())
+    await direct(ws, 4.5, llm=llm, language="ru", cfg=cfg(), report=fell_back)
+    assert len(llm.fake.calls) == 2, "модель вызывалась — и всё равно лист не её"
+    assert fell_back["from_llm"] is False
+
+    no_llm: dict = {}
+    await direct(ws, 4.5, llm=None, language="ru", cfg=cfg(), report=no_llm)
+    assert no_llm["from_llm"] is False
+
+
 async def test_llm_outage_falls_back_without_raising():
     from src.llm.providers import ProviderError
 

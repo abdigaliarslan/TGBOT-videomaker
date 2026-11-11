@@ -86,7 +86,7 @@ TEXTS: dict[str, dict[str, str]] = {
     # ------------------------------------------------------------ старт и помощь
     "start.welcome": {
         "ru": (
-            "Привет! Я — Reelmaker, бот-монтажёр 🎬\n\n"
+            "Привет! Я — {brand}, бот-монтажёр 🎬\n\n"
             "Снимаете видео, где говорите на камеру о работе, экспертизе или своём дне? "
             "Присылайте сырой файл — дальше я сам:\n\n"
             "✂️ вырежу паузы, «эээ» и неловкие заминки\n"
@@ -99,7 +99,7 @@ TEXTS: dict[str, dict[str, str]] = {
             "🎨 Стиль и цвет субтитров — в приложении, кнопка ниже"
         ),
         "en": (
-            "Hi! I'm Reelmaker, your video editing bot 🎬\n\n"
+            "Hi! I'm {brand}, your video editing bot 🎬\n\n"
             "Recorded yourself talking about your work, expertise or day? "
             "Send me the raw file — I'll take it from there:\n\n"
             "✂️ cut the pauses, “umm”s and awkward stumbles\n"
@@ -111,6 +111,24 @@ TEXTS: dict[str, dict[str, str]] = {
             "📎 Videos from {min_s} s to {max_m} min, landscape works too\n"
             "🎨 Caption style and colour are in the app — button below"
         ),
+    },
+    # Условия одной строкой под приветствием (`handlers.common.offer_text`).
+    # `best` — цена ролика в самом выгодном пакете.
+    "start.offer_trial_one": {
+        "ru": "🎁 Первый ролик — бесплатно. Дальше {single} ⭐ за ролик, пакетом — от {best} ⭐.",
+        "en": "🎁 Your first reel is free. After that it's {single} ⭐ per reel, or from {best} ⭐ in a pack.",
+    },
+    "start.offer_trial_many": {
+        "ru": "🎁 Первые {trial} — бесплатно. Дальше {single} ⭐ за ролик, пакетом — от {best} ⭐.",
+        "en": "🎁 Your first {trial} are free. After that it's {single} ⭐ per reel, or from {best} ⭐ in a pack.",
+    },
+    "start.offer_paid": {
+        "ru": "💳 {single} ⭐ за ролик, пакетом — от {best} ⭐.",
+        "en": "💳 {single} ⭐ per reel, or from {best} ⭐ in a pack.",
+    },
+    "start.offer_free": {
+        "ru": "🎁 Сейчас монтаж бесплатный.",
+        "en": "🎁 Editing is free right now.",
     },
     "btn.open_app": {"ru": "Открыть приложение", "en": "Open the app"},
     "btn.menu": {"ru": "Приложение ✨", "en": "App ✨"},
@@ -204,6 +222,16 @@ TEXTS: dict[str, dict[str, str]] = {
     "stats.done": {"ru": "Готовых роликов: {n}", "en": "Reels done: {n}"},
     "stats.style": {"ru": "Стиль: {preset}", "en": "Style: {preset}"},
     "stats.balance": {"ru": "На балансе: {n}", "en": "Balance: {n}"},
+    # Воронка для владельца. Доля у каждого шага — от предыдущего значимого:
+    # «получили ролик» от пришедших, «вернулись» и «заплатили» от получивших,
+    # «заплатили ещё раз» от заплативших.
+    "stats.funnel_head": {"ru": "\nВоронка за {days} дней:", "en": "\nFunnel, last {days} days:"},
+    "stats.funnel_users": {"ru": "  Пришли: {n}", "en": "  Joined: {n}"},
+    "stats.funnel_got": {"ru": "  Получили ролик: {n} ({share})", "en": "  Got a reel: {n} ({share})"},
+    "stats.funnel_second": {"ru": "  Сделали второй: {n} ({share})", "en": "  Made a second one: {n} ({share})"},
+    "stats.funnel_paid": {"ru": "  Заплатили: {n} ({share})", "en": "  Paid: {n} ({share})"},
+    "stats.funnel_again": {"ru": "  Заплатили ещё раз: {n} ({share})", "en": "  Paid again: {n} ({share})"},
+    "stats.funnel_stars": {"ru": "  Звёзд от них: {n} ⭐", "en": "  Stars from them: {n} ⭐"},
     "stats.cost_head": {"ru": "\nРасход на модель за 7 дней:", "en": "\nModel spend, last 7 days:"},
     "stats.cost_total": {"ru": "  Итого: ${total:.2f}", "en": "  Total: ${total:.2f}"},
     "stats.cost_none": {"ru": "\nВызовов модели пока не было.", "en": "\nNo model calls yet."},
@@ -258,6 +286,10 @@ TEXTS: dict[str, dict[str, str]] = {
     },
     "rerender.toast": {"ru": "Пересобираю — без повторного распознавания", "en": "Rebuilding — no need to transcribe again"},
     "rerender.status": {"ru": "Пересобираю в «{preset}»…", "en": "Rebuilding in “{preset}”…"},
+    "rerender.busy": {
+        "ru": "Один ролик уже пересобирается. Дождитесь его — и выбирайте следующую тему.",
+        "en": "One reel is already being rebuilt. Wait for it, then pick the next theme.",
+    },
 
     # ------------------------------------------------------------ стадии монтажа
     "stage.probe": {"ru": "Читаю файл", "en": "Reading the file"},
