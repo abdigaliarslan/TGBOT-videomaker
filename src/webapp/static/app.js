@@ -16,8 +16,8 @@ const I18N = {
     "home.recent": "Последнее", "home.all": "Все", "home.invite": "Пригласите друга",
     "home.invite_sub": "{p}% с каждой его покупки — вам на баланс",
     "home.empty": "Роликов пока нет", "home.empty_sub": "Первый ролик появится здесь",
-    "home.offer_trial": "Первый ролик — бесплатно. Дальше {single} ⭐ за ролик",
-    "home.offer_paid": "{single} ⭐ за ролик, пакетом — от {best} ⭐",
+    "home.offer_trial": "Первый ролик — бесплатно. Дальше ролик — {cost}",
+    "home.offer_paid": "Ролик — {cost}, пакеты от {pack}",
     "home.offer_free": "Сейчас монтаж бесплатный",
     "preview.pause": "Пауза", "preview.play": "Воспроизвести",
     "preview.s1": ["это", "пример", "субтитров", "в", "стиле"],
@@ -52,41 +52,41 @@ const I18N = {
     "split.bottom_title": "Снизу — вы в кадре", "split.bottom_sub": "звук и субтитры отсюда",
     "split.need_both": "добавьте оба видео", "split.top_role": "Сверху", "split.bottom_role": "Снизу",
     "edit.s1_lead_split": "Сверху — то, что показываете, снизу — вы в кадре. Соберём из двух видео ролик с субтитрами.",
-    "cta.topup": "Пополнить баланс", "cta.missing": "не хватает 1 ролика",
-    "cta.free": "бесплатно для владельца", "cta.free_all": "сейчас монтаж бесплатный", "cta.pick": "сначала выберите видео", "cta.charge": "спишется 1 ролик из {n}",
+    "cta.topup": "Пополнить баланс", "cta.missing": "на ролик не хватает {n}",
+    "cta.free": "бесплатно для владельца", "cta.free_all": "сейчас монтаж бесплатный", "cta.pick": "сначала выберите видео", "cta.charge": "спишется {c} из {n}",
     "cta.uploading": "Загрузка {p}%", "cta.checking": "Проверяю видео…", "cta.keep_open": "не закрывайте приложение до конца загрузки",
     "upload.lost": "Связь оборвалась во время загрузки. Попробуйте ещё раз.",
     "toast.accepted": "Видео принято. Готовый ролик придёт в чат, а прогресс — в «Результатах».",
     "err.title": "Не получилось",
     "balance.unlimited": "без ограничений",
-    "balance.note": "Один ролик — один смонтированный видеофайл. Если монтаж не получится, ролик вернётся на баланс.",
+    "balance.note": "Один ролик — {c}. Если монтаж не получится, токены вернутся на баланс.",
     "balance.note_admin": "Вы владелец бота: монтаж бесплатный, баланс не списывается.",
-    "balance.note_free": "Сейчас монтаж бесплатный: ролики с баланса не списываются.",
+    "balance.note_free": "Сейчас монтаж бесплатный: токены с баланса не списываются.",
     "status.queued": "в очереди", "status.running": "монтируется", "status.done": "готов", "status.failed": "не получилось", "status.cancelled": "отменён",
     "jobs.all": "Все", "jobs.done": "Готовые", "jobs.active": "В работе",
     "jobs.empty": "Роликов пока нет", "jobs.empty_hint": "Загрузите видео — готовый ролик придёт в чат и появится здесь.",
     "jobs.empty_filter": "Здесь пока пусто",
-    "jobs.to_edit": "К монтажу", "jobs.reel": "Ролик", "jobs.refunded": "Ролик вернулся на баланс.",
+    "jobs.to_edit": "К монтажу", "jobs.reel": "Ролик", "jobs.refunded": "Токены вернулись на баланс.",
     "jobs.purged": "Удалён с сервера по сроку хранения. В чате ролик остался.",
     "jobs.retention": "Готовые ролики хранятся на сервере {n} дн., в чате — всегда.",
     "jobs.send": "Прислать в чат", "jobs.sent": "Отправил в чат.", "jobs.not_sent": "Не отправилось",
     "tariffs.balance": "Баланс", "tariffs.history": "История", "tariffs.package": "Пакет", "tariffs.method": "Способ оплаты",
-    "pkg.per": "{n} ⭐ за ролик", "pkg.try": "попробовать", "pkg.popular": "популярный", "pkg.save": "выгода −{n}%",
+    "pkg.per": "до {n} {w}", "pkg.rub": "≈ {n} ₽", "pkg.popular": "популярный", "pkg.save": "выгода −{n}%",
     "pay.button": "Оплатить {n} ⭐", "pay.sub": "{n} {w} на баланс",
     "pay.title": "Оплата", "pay.update": "Обновите Telegram — эта версия не умеет оплату звёздами.",
     "pay.failed": "Оплата не прошла", "pay.failed_text": "Звёзды не списаны. Попробуйте ещё раз.",
     "pay.crediting": "Оплачено. Зачисляю…", "pay.credited": "Зачислено: {n} {w}.", "pay.later": "Оплата прошла, баланс обновится через минуту.",
     "history.title": "История", "history.empty": "Оплат пока не было",
     "history.payment": "Покупка пакета", "history.bonus": "Бонус за друга",
-    "invite.lead": "За каждую оплату друга вам возвращается {p}% от купленных им роликов — прямо на баланс.",
+    "invite.lead": "За каждую оплату друга вам возвращается {p}% от купленных им токенов — прямо на баланс.",
     "invite.your_link": "Ваша ссылка", "invite.copy": "Скопировать", "invite.share": "Поделиться",
     "invite.copied": "Ссылка скопирована",
-    "invite.step1": "Друг открывает бота по вашей ссылке", "invite.step2": "Покупает пакет роликов",
+    "invite.step1": "Друг открывает бота по вашей ссылке", "invite.step2": "Покупает пакет токенов",
     "invite.step3": "Вам на баланс — {p}% от купленного",
-    "invite.all_time": "За всё время", "invite.came": "Пришли", "invite.paid": "Оплатили", "invite.earned": "Роликов",
+    "invite.all_time": "За всё время", "invite.came": "Пришли", "invite.paid": "Оплатили", "invite.earned": "Токенов",
     "invite.today": "+{n} сегодня",
-    "invite.credit": "Накоплено {n} ролика — на баланс уйдёт целым роликом, как только наберётся.",
-    "invite.friends": "Приглашённые", "invite.summary": "{a} пришли · {b} оплатили · +{c} роликов",
+    "invite.credit": "Накоплено {n} токена — на баланс уйдёт целым токеном, как только наберётся.",
+    "invite.friends": "Приглашённые", "invite.summary": "{a} пришли · {b} оплатили · +{c} токенов",
     "invite.none": "Пока никого", "invite.none_sub": "Поделитесь ссылкой — приглашённые появятся здесь.",
     "invite.friend_paid": "оплатил", "invite.friend_waiting": "ещё не покупал", "invite.noname": "Без имени",
     "period.7": "7 дней", "period.30": "30 дней", "period.0": "Всё время",
@@ -107,8 +107,8 @@ const I18N = {
     "home.recent": "Recent", "home.all": "All", "home.invite": "Invite a friend",
     "home.invite_sub": "{p}% of every purchase they make goes to your balance",
     "home.empty": "No videos yet", "home.empty_sub": "Your first reel will show up here",
-    "home.offer_trial": "Your first reel is free. After that it's {single} ⭐ per reel",
-    "home.offer_paid": "{single} ⭐ per reel, or from {best} ⭐ in a pack",
+    "home.offer_trial": "Your first reel is free. After that a reel is {cost}",
+    "home.offer_paid": "A reel is {cost}, packs from {pack}",
     "home.offer_free": "Editing is free right now",
     "preview.pause": "Pause", "preview.play": "Play",
     "preview.s1": ["this", "is", "captions", "in", "style"],
@@ -143,40 +143,40 @@ const I18N = {
     "split.bottom_title": "Bottom — you on camera", "split.bottom_sub": "sound and captions come from here",
     "split.need_both": "add both videos", "split.top_role": "Top", "split.bottom_role": "Bottom",
     "edit.s1_lead_split": "On top — what you show, below — you on camera. We'll turn the two videos into a reel with captions.",
-    "cta.topup": "Top up balance", "cta.missing": "you need 1 more video",
-    "cta.free": "free for the owner", "cta.free_all": "editing is free right now", "cta.pick": "pick a video first", "cta.charge": "uses 1 of your {n} videos",
+    "cta.topup": "Top up balance", "cta.missing": "{n} short of a reel",
+    "cta.free": "free for the owner", "cta.free_all": "editing is free right now", "cta.pick": "pick a video first", "cta.charge": "uses {c} of your {n}",
     "cta.uploading": "Uploading {p}%", "cta.checking": "Checking the video…", "cta.keep_open": "keep the app open until the upload finishes",
     "upload.lost": "The connection dropped during upload. Please try again.",
     "toast.accepted": "Video received. The finished reel will arrive in the chat; track progress in “Results”.",
     "err.title": "Something went wrong",
     "balance.unlimited": "unlimited",
-    "balance.note": "One video — one edited reel. If editing fails, the video goes back to your balance.",
+    "balance.note": "One reel is {c}. If editing fails, the tokens go back to your balance.",
     "balance.note_admin": "You own this bot: editing is free and your balance isn't used.",
-    "balance.note_free": "Editing is free right now: your balance isn't used.",
+    "balance.note_free": "Editing is free right now: no tokens are taken.",
     "status.queued": "queued", "status.running": "editing", "status.done": "ready", "status.failed": "failed", "status.cancelled": "cancelled",
     "jobs.all": "All", "jobs.done": "Ready", "jobs.active": "In progress",
     "jobs.empty": "No videos yet", "jobs.empty_hint": "Upload a video — the finished reel will arrive in the chat and show up here.",
     "jobs.empty_filter": "Nothing here yet",
-    "jobs.to_edit": "Go to editor", "jobs.reel": "Reel", "jobs.refunded": "The video was returned to your balance.",
+    "jobs.to_edit": "Go to editor", "jobs.reel": "Reel", "jobs.refunded": "The tokens went back to your balance.",
     "jobs.purged": "Removed from the server after the storage period. It's still in your chat.",
     "jobs.retention": "Finished videos stay on the server for {n} days and in your chat forever.",
     "jobs.send": "Send to chat", "jobs.sent": "Sent to the chat.", "jobs.not_sent": "Couldn't send",
     "tariffs.balance": "Balance", "tariffs.history": "History", "tariffs.package": "Package", "tariffs.method": "Payment method",
-    "pkg.per": "{n} ⭐ per video", "pkg.try": "try it out", "pkg.popular": "popular", "pkg.save": "save {n}%",
+    "pkg.per": "up to {n} {w}", "pkg.rub": "≈ {n} ₽", "pkg.popular": "popular", "pkg.save": "save {n}%",
     "pay.button": "Pay {n} ⭐", "pay.sub": "{n} {w} to your balance",
     "pay.title": "Payment", "pay.update": "Please update Telegram — this version can't pay with Stars.",
     "pay.failed": "Payment failed", "pay.failed_text": "No Stars were charged. Please try again.",
     "pay.crediting": "Paid. Adding to your balance…", "pay.credited": "Added: {n} {w}.", "pay.later": "Payment received; your balance will update in a minute.",
     "history.title": "History", "history.empty": "No payments yet",
     "history.payment": "Package purchase", "history.bonus": "Friend bonus",
-    "invite.lead": "Every time a friend pays, {p}% of the videos they bought comes back to you — straight to your balance.",
+    "invite.lead": "Every time a friend pays, {p}% of the tokens they bought comes back to you — straight to your balance.",
     "invite.your_link": "Your link", "invite.copy": "Copy", "invite.share": "Share",
     "invite.copied": "Link copied",
     "invite.step1": "A friend opens the bot with your link", "invite.step2": "They buy a video package",
     "invite.step3": "You get {p}% of it on your balance",
-    "invite.all_time": "All time", "invite.came": "Joined", "invite.paid": "Paid", "invite.earned": "Videos",
+    "invite.all_time": "All time", "invite.came": "Joined", "invite.paid": "Paid", "invite.earned": "Tokens",
     "invite.today": "+{n} today",
-    "invite.credit": "{n} of a video saved up — it moves to your balance as a whole video once it adds up.",
+    "invite.credit": "{n} of a token saved up — it moves to your balance as a whole token once it adds up.",
     "invite.friends": "Invited", "invite.summary": "{a} joined · {b} paid · +{c} videos",
     "invite.none": "Nobody yet", "invite.none_sub": "Share your link — invited friends will show up here.",
     "invite.friend_paid": "paid", "invite.friend_waiting": "hasn't bought yet", "invite.noname": "No name",
@@ -271,6 +271,13 @@ function plural(n, one, few, many) {
 const videosWord = (n) => (currentLang() === "en"
   ? (Math.abs(n) === 1 ? "video" : "videos")
   : plural(n, "ролик", "ролика", "роликов"));
+const tokensWord = (n) => (currentLang() === "en"
+  ? (Math.abs(n) === 1 ? "token" : "tokens")
+  : plural(n, "токен", "токена", "токенов"));
+// «240 токенов». Баланс — в токенах, ролик стоит `boot.video_cost`.
+const tokensText = (n) => `${n} ${tokensWord(n)}`;
+const videoCost = () => (state.boot && state.boot.video_cost) || 1;
+const fmtRub = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, "\u00a0");
 
 // Сотые ролика → «0,5» / «0.5». Бонус за друга копится дробью: 10 % от пакета
 // в 5 роликов — половина ролика.
@@ -1049,9 +1056,9 @@ function renderCta(progressText, share) {
     return;
   }
   btn.disabled = false;
-  if (pays(u) && u.balance < 1) {
+  if (pays(u) && u.balance < videoCost()) {
     title.textContent = tr("cta.topup");
-    sub.textContent = tr("cta.missing");
+    sub.textContent = tr("cta.missing", { n: tokensText(videoCost() - u.balance) });
   } else {
     // Пока файла нет, нажатие открывает выбор файла, а не запускает монтаж —
     // так кнопка и должна называться.
@@ -1059,14 +1066,14 @@ function renderCta(progressText, share) {
     const free = u.is_admin ? "cta.free" : "cta.free_all";
     sub.textContent = !ready()
       ? tr(state.layout === "split" ? "split.need_both" : "cta.pick")
-      : (pays(u) ? tr("cta.charge", { n: u.balance }) : tr(free));
+      : (pays(u) ? tr("cta.charge", { c: tokensText(videoCost()), n: u.balance }) : tr(free));
   }
 }
 
 async function onCta() {
   if (state.busy) return;
   const u = state.boot.user;
-  if (pays(u) && u.balance < 1) { go("tariffs"); return; }
+  if (pays(u) && u.balance < videoCost()) { go("tariffs"); return; }
   if (!ready()) { haptic("warning"); missingInput().click(); return; }
 
   state.busy = true;
@@ -1290,58 +1297,50 @@ function schedulePoll() {
 
 // ------------------------------------------------------------------ «Тарифы»
 
+// Пакеты токенов как их прислал сервер: «популярный» и честная выгода
+// посчитаны там (`server._packages_view`), здесь только рисуем.
 function packageFacts() {
-  const list = state.boot.packages || [];
-  const base = list.length ? list[0].stars / list[0].videos : 0;
-  // «Популярный» — средний пакет, когда их хотя бы три: самый частый выбор
-  // между «попробовать» и «оптом». Метка — подсказка, а не продажа: выгода
-  // пишется честным процентом от цены одиночного ролика.
-  const popular = list.length >= 3 ? Math.floor((list.length - 1) / 2) : -1;
-  return list.map((p, i) => ({
-    ...p,
-    popular: i === popular,
-    per: Math.round(p.stars / p.videos),
-    save: base ? Math.round((1 - p.stars / p.videos / base) * 100) : 0,
-  }));
+  return state.boot.packages || [];
 }
 
 function renderTariffs() {
   const facts = packageFacts();
-  if (state.pkg === null || !facts.some((p) => p.videos === state.pkg)) {
+  if (state.pkg === null || !facts.some((p) => p.tokens === state.pkg)) {
     const pop = facts.find((p) => p.popular) || facts[0];
-    state.pkg = pop ? pop.videos : null;
+    state.pkg = pop ? pop.tokens : null;
   }
   $("#packages").replaceChildren(...facts.map((p) => {
-    const on = p.videos === state.pkg;
+    const on = p.tokens === state.pkg;
     return el("button", {
       class: "package", type: "button", role: "radio", "aria-checked": on ? "true" : "false",
-      onclick: () => { state.pkg = p.videos; haptic(); renderTariffs(); },
+      onclick: () => { state.pkg = p.tokens; haptic(); renderTariffs(); },
     }, [
       el("span", { class: `radio${on ? " is-on" : ""}` }),
       el("span", { class: "package__main" }, [
         p.popular ? el("span", { class: "badge", text: tr("pkg.popular") }) : null,
-        el("span", { class: "package__amount" }, [el("b", { text: String(p.videos) }), el("span", { class: "muted", text: videosWord(p.videos) })]),
-        el("span", { class: "muted", text: p.videos > 1 ? tr("pkg.per", { n: p.per }) : tr("pkg.try") }),
+        el("span", { class: "package__amount" }, [el("b", { text: String(p.tokens) }), el("span", { class: "muted", text: tokensWord(p.tokens) })]),
+        el("span", { class: "muted", text: tr("pkg.per", { n: p.videos, w: videosWord(p.videos) }) }),
       ]),
       el("span", { class: "package__price" }, [
         el("b", { text: `${p.stars} ⭐` }),
+        p.rub ? el("span", { class: "muted", text: tr("pkg.rub", { n: fmtRub(p.rub) }) }) : null,
         p.save > 0 ? el("span", { class: "package__save", text: tr("pkg.save", { n: p.save }) }) : null,
       ]),
     ]);
   }));
-  const chosen = facts.find((p) => p.videos === state.pkg);
+  const chosen = facts.find((p) => p.tokens === state.pkg);
   $("#pay-method-price").textContent = chosen ? `${chosen.stars} ⭐` : "";
   $("#pay-title").textContent = chosen ? tr("pay.button", { n: chosen.stars }) : "";
-  $("#pay-sub").textContent = chosen ? tr("pay.sub", { n: chosen.videos, w: videosWord(chosen.videos) }) : "";
+  $("#pay-sub").textContent = chosen ? tr("pay.sub", { n: chosen.tokens, w: tokensWord(chosen.tokens) }) : "";
   $("#pay").hidden = !chosen;
 }
 
-async function buy(videos) {
+async function buy(tokens) {
   haptic();
   if (!tg || !tg.openInvoice) { popup(tr("pay.title"), tr("pay.update")); return; }
   let link;
   try {
-    link = (await api("/api/invoice", { method: "POST", body: { videos } })).link;
+    link = (await api("/api/invoice", { method: "POST", body: { tokens } })).link;
   } catch (e) {
     popup(tr("err.title"), e.message);
     return;
@@ -1358,7 +1357,7 @@ async function buy(videos) {
     // поэтому ждём, пока баланс действительно вырастет.
     for (let i = 0; i < 15; i += 1) {
       await refreshBoot();
-      if (state.boot.user.balance > before) { toast(tr("pay.credited", { n: videos, w: videosWord(videos) })); return; }
+      if (state.boot.user.balance > before) { toast(tr("pay.credited", { n: tokens, w: tokensWord(tokens) })); return; }
       await new Promise((r) => setTimeout(r, 1000));
     }
     toast(tr("pay.later"));
@@ -1408,8 +1407,8 @@ async function openHistory() {
         el("span", { class: "muted", text: fmtWhen(it.at) }),
       ]),
       el("span", { class: "list-row__end" }, [
-        el("b", { class: "pos", text: bonus ? `+${fmtShare(it.share)}` : `+${it.videos}` }),
-        el("span", { class: "muted", text: bonus ? videosWord(2) : `${it.stars} ⭐` }),
+        el("b", { class: "pos", text: bonus ? `+${fmtShare(it.share)}` : `+${it.tokens}` }),
+        el("span", { class: "muted", text: bonus ? tokensWord(2) : `${it.stars} ⭐` }),
       ]),
     ]);
   }));
@@ -1541,14 +1540,13 @@ function offerText() {
   const boot = state.boot;
   if (boot.user.is_admin) return "";
   if (boot.free) return tr("home.offer_free");
-  const packs = (boot.packages || []).filter((x) => x.videos > 0);
+  const packs = boot.packages || [];
   if (!packs.length) return "";
-  const one = packs.find((x) => x.videos === 1);
-  const single = one ? one.stars : Math.min(...packs.map((x) => x.stars));
-  const best = Math.round(Math.min(...packs.map((x) => x.stars / x.videos)));
+  const first = packs[0];
+  const pack = first.rub ? `${tokensText(first.tokens)} · ${fmtRub(first.rub)} ₽` : `${tokensText(first.tokens)} · ${first.stars} ⭐`;
   // Проба ещё не потрачена: ни одного готового ролика, а на балансе что-то есть.
   const trial = boot.trial > 0 && boot.user.videos_done === 0 && boot.user.balance > 0;
-  return tr(trial ? "home.offer_trial" : "home.offer_paid", { single, best });
+  return tr(trial ? "home.offer_trial" : "home.offer_paid", { cost: tokensText(videoCost()), pack });
 }
 
 function renderProfile() {
@@ -1563,10 +1561,11 @@ function renderBalance() {
   const u = state.boot.user;
   const n = u.balance;
   for (const node of $$("[data-balance-value]")) node.textContent = u.is_admin ? "∞" : n;
-  for (const node of $$("[data-balance-unit]")) node.textContent = u.is_admin ? tr("balance.unlimited") : videosWord(n);
+  for (const node of $$("[data-balance-unit]")) node.textContent = u.is_admin ? tr("balance.unlimited") : tokensWord(n);
   for (const node of $$("[data-balance-count]")) node.textContent = u.is_admin ? "∞" : n;
   $("#balance-note").textContent = tr(
     u.is_admin ? "balance.note_admin" : (pays(u) ? "balance.note" : "balance.note_free"),
+    { c: tokensText(videoCost()) },
   );
   renderCta();
 }

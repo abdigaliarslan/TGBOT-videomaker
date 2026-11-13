@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -98,6 +98,29 @@ PROVIDER_MODELS: dict[str, dict[str, str]] = {
 # модели у них обязано нести вендора — «google/gemini-3.5-flash». Имя без
 # вендора шлюз не узнаёт и отвечает 400. Список нужен валидатору ниже.
 GATEWAY_PROVIDERS = frozenset({"fal"})
+
+
+class TokenPackage(BaseModel):
+    """Пакет токенов в «Тарифах»: сколько токенов, цена в звёздах и в рублях.
+
+    Рубли — для ориентира: платят звёздами (XTR), курс 1099 ₽ ≈ 749 ⭐ задан
+    владельцем ценами пакетов, а не формулой.
+    """
+
+    tokens: int = Field(gt=0)
+    stars: int = Field(gt=0)
+    rub: int = Field(default=0, ge=0)
+    popular: bool = False
+
+
+def _default_packages() -> list[TokenPackage]:
+    # Как у Brandly: 240 / 590 / 1170 токенов, «до 10 / 25 / 50 роликов».
+    # Цены владельца: 1099 / 2799 / 5299 ₽, в звёздах по ~1,47 ₽ за ⭐.
+    return [
+        TokenPackage(tokens=240, stars=749, rub=1099),
+        TokenPackage(tokens=590, stars=1899, rub=2799, popular=True),
+        TokenPackage(tokens=1170, stars=3599, rub=5299),
+    ]
 
 
 class Settings(BaseSettings):
@@ -405,10 +428,18 @@ class Settings(BaseSettings):
     webapp_max_upload_mb: int = 1024
 
     # ------------------------------------------------------------------ оплата
-    # Пакеты «роликов → звёзд». Ключ — сколько роликов, значение — цена в XTR.
+    # Баланс — в токенах. Ролик стоит `tokens_per_video` токенов. 23 — то
+    # единственное целое, при котором сходятся все три подписи пакетов Brandly:
+    # 240 → «до 10», 590 → «до 25», 1170 → «до 50 роликов» (при 24 вышло бы 10 /
+    # 24 / 48). Цена пишется в задачу при списании (`Job.cost`), и возврат
+    # отдаёт именно её, а не нынешнюю цену.
     # Владельцы из ADMIN_IDS монтируют бесплатно и баланс не тратят.
-    star_packages: dict[int, int] = Field(default_factory=lambda: {1: 50, 5: 200, 20: 600})
-    # Сколько процентов от купленных приглашённым роликов уходит пригласившему.
+    tokens_per_video: int = Field(default=23, gt=0)
+    # Пакеты токенов. Своё имя, а не прежнее STAR_PACKAGES: старое значение на
+    # сервере («1 → 50 ⭐») продавало бы теперь ОДИН ТОКЕН за 50 звёзд.
+    # В .env — JSON-список: [{"tokens":240,"stars":749,"rub":1099}, …].
+    token_packages: list[TokenPackage] = Field(default_factory=_default_packages)
+    # Сколько процентов от купленных приглашённым токенов уходит пригласившему.
     # Ноль выключает программу целиком: и бонусы, и раздел в приложении.
     referral_percent: int = Field(default=10, ge=0, le=100)
 
@@ -416,17 +447,28 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
-    @field_validator("star_packages", mode="before")
+    @field_validator("token_packages", mode="before")
     @classmethod
-    def _parse_star_packages(cls, v: Any) -> Any:
+    def _parse_token_packages(cls, v: Any) -> Any:
         if isinstance(v, str):
-            v = json.loads(v) if v.strip() else {}
-        if isinstance(v, dict):
-            packages = {int(k): int(price) for k, price in v.items()}
-            if any(k <= 0 or price <= 0 for k, price in packages.items()):
-                raise ValueError("STAR_PACKAGES: и число роликов, и цена обязаны быть > 0")
-            return dict(sorted(packages.items()))
+            v = json.loads(v) if v.strip() else []
         return v
+
+    @field_validator("token_packages")
+    @classmethod
+    def _sorted_unique_packages(cls, v: list[TokenPackage]) -> list[TokenPackage]:
+        if len({p.tokens for p in v}) != len(v):
+            raise ValueError("TOKEN_PACKAGES: два пакета с одним числом токенов")
+        return sorted(v, key=lambda p: p.tokens)
+
+    def package(self, tokens: int) -> TokenPackage | None:
+        """Пакет по числу токенов — так его называют счёт и оплата."""
+        return next((p for p in self.token_packages if p.tokens == tokens), None)
+
+    @property
+    def trial_tokens(self) -> int:
+        """Проба новичку в токенах: `trial_videos` роликов по нынешней цене."""
+        return max(0, self.trial_videos) * self.tokens_per_video
 
     @field_validator("admin_ids", mode="before")
     @classmethod

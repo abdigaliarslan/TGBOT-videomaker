@@ -240,7 +240,7 @@ def test_a_new_user_gets_the_trial_once_and_only_once(monkeypatch):
         now=datetime.now(timezone.utc),
     )
     compiled = stmt.compile(dialect=postgresql.dialect())
-    assert compiled.params["balance"] == 1
+    assert compiled.params["balance"] == 23, "проба — один ролик, то есть 23 токена"
     insert_part, rest = str(compiled).split("ON CONFLICT", 1)
     assert "balance" in insert_part
     assert "balance" not in rest.split("RETURNING", 1)[0]
@@ -271,17 +271,21 @@ def test_the_first_screen_states_the_terms(monkeypatch):
     ролик. Раньше о цене человек узнавал отказом после отправки видео."""
     from src.bot.handlers import common
 
+    from src.core.config import Settings
+
     monkeypatch.setattr(common.settings, "free_videos", False)
-    monkeypatch.setattr(common.settings, "star_packages", {1: 50, 5: 200, 20: 600})
+    monkeypatch.setattr(common.settings, "token_packages", Settings(_env_file=None).token_packages)
+    monkeypatch.setattr(common.settings, "tokens_per_video", 23)
     monkeypatch.setattr(common.settings, "brand_name", "Reelmaker")
 
     monkeypatch.setattr(common.settings, "trial_videos", 1)
     text = common.welcome_text("ru")
     assert "Reelmaker" in text and "{brand}" not in text
-    assert "Первый ролик — бесплатно" in text and "50 ⭐" in text and "от 30 ⭐" in text
+    # Ролик — 23 токена; пакеты от 240 токенов за 1099 ₽ (749 ⭐).
+    assert "Первый ролик — бесплатно" in text and "23 токена" in text and "1099 ₽" in text
 
     monkeypatch.setattr(common.settings, "trial_videos", 0)
-    assert "бесплатно" not in common.offer_text("ru") and "50 ⭐" in common.offer_text("ru")
+    assert "бесплатно" not in common.offer_text("ru") and "23 токена" in common.offer_text("ru")
 
     monkeypatch.setattr(common.settings, "free_videos", True)
     assert "⭐" not in common.offer_text("ru")

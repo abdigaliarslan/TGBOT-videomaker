@@ -34,11 +34,12 @@ def test_anything_that_is_not_a_code_is_ignored(junk):
 
 
 def test_a_bonus_reads_like_a_person_wrote_it():
-    assert share_text(50, "ru") == "0,5 ролика"
-    assert share_text(200, "ru") == "2 ролика"
-    assert share_text(100, "ru") == "1 ролик"
-    assert share_text(10, "en") == "0.1 of a video"
-    assert share_text(150, "en") == "1.5 videos"
+    assert share_text(50, "ru") == "0,5 токена"
+    assert share_text(2400, "ru") == "24 токена"
+    assert share_text(100, "ru") == "1 токен"
+    assert share_text(500, "ru") == "5 токенов"
+    assert share_text(10, "en") == "0.1 of a token"
+    assert share_text(150, "en") == "1.5 tokens"
 
 
 # ------------------------------------------------------------------ база
@@ -57,9 +58,10 @@ async def balance(uid: int) -> tuple[int, int]:
     return u.balance, u.ref_credit
 
 
-async def pay(uid: int, videos: int, charge: str, percent: int = 10) -> bool:
+async def pay(uid: int, tokens: int, charge: str, percent: int = 10) -> bool:
+    """Оплата пакета; суммы в тестах ниже — в токенах, бонус — в сотых токена."""
     return await repo.credit_payment(
-        uid, charge_id=charge, stars=videos * 50, videos=videos, payload=f"videos:{videos}",
+        uid, charge_id=charge, stars=tokens * 3, tokens=tokens, payload=f"tokens:{tokens}",
         referral_percent=percent,
     )
 

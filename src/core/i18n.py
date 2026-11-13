@@ -66,6 +66,15 @@ def videos_word(n: int, lang: str | None) -> str:
     return plural(n, lang, ("ролик", "ролика", "роликов"), ("video", "videos"))
 
 
+def tokens_word(n: int, lang: str | None) -> str:
+    return plural(n, lang, ("токен", "токена", "токенов"), ("token", "tokens"))
+
+
+def tokens_text(n: int, lang: str | None) -> str:
+    """«240 токенов», «1 token»."""
+    return f"{n} {tokens_word(n, lang)}"
+
+
 # Коды ошибок монтажа. Пайплайн знает только код, фразу подставляет интерфейс.
 ERROR_CODES = (
     "source_lost", "edl_missing", "too_short", "too_long", "no_audio",
@@ -113,19 +122,22 @@ TEXTS: dict[str, dict[str, str]] = {
         ),
     },
     # Условия одной строкой под приветствием (`handlers.common.offer_text`).
-    # `best` — цена ролика в самом выгодном пакете.
+    # `cost` — цена ролика в токенах, `pack` — самый маленький пакет.
     "start.offer_trial_one": {
-        "ru": "🎁 Первый ролик — бесплатно. Дальше {single} ⭐ за ролик, пакетом — от {best} ⭐.",
-        "en": "🎁 Your first reel is free. After that it's {single} ⭐ per reel, or from {best} ⭐ in a pack.",
+        "ru": "🎁 Первый ролик — бесплатно. Дальше ролик — {cost}, пакеты от {pack}.",
+        "en": "🎁 Your first reel is free. After that a reel is {cost}, packs from {pack}.",
     },
     "start.offer_trial_many": {
-        "ru": "🎁 Первые {trial} — бесплатно. Дальше {single} ⭐ за ролик, пакетом — от {best} ⭐.",
-        "en": "🎁 Your first {trial} are free. After that it's {single} ⭐ per reel, or from {best} ⭐ in a pack.",
+        "ru": "🎁 Первые {trial} — бесплатно. Дальше ролик — {cost}, пакеты от {pack}.",
+        "en": "🎁 Your first {trial} are free. After that a reel is {cost}, packs from {pack}.",
     },
     "start.offer_paid": {
-        "ru": "💳 {single} ⭐ за ролик, пакетом — от {best} ⭐.",
-        "en": "💳 {single} ⭐ per reel, or from {best} ⭐ in a pack.",
+        "ru": "💳 Ролик — {cost}, пакеты от {pack}.",
+        "en": "💳 A reel is {cost}, packs from {pack}.",
     },
+    # «240 токенов за 1099 ₽ (749 ⭐)»: рубли — ориентир, платят звёздами.
+    "start.pack": {"ru": "{tokens} за {rub} ₽ ({stars} ⭐)", "en": "{tokens} for {rub} ₽ ({stars} ⭐)"},
+    "start.pack_stars": {"ru": "{tokens} за {stars} ⭐", "en": "{tokens} for {stars} ⭐"},
     "start.offer_free": {
         "ru": "🎁 Сейчас монтаж бесплатный.",
         "en": "🎁 Editing is free right now.",
@@ -151,12 +163,12 @@ TEXTS: dict[str, dict[str, str]] = {
     },
     "menu.referral": {
         "ru": (
-            "🎁 Приглашайте друзей — получаете {percent}% их покупок роликами.\n\n"
+            "🎁 Приглашайте друзей — получаете {percent}% их покупок токенами.\n\n"
             "Ваша ссылка:\n{link}\n\n"
             "Бонус приходит в тот момент, когда друг оплачивает пакет."
         ),
         "en": (
-            "🎁 Invite friends — you get {percent}% of their purchases in reels.\n\n"
+            "🎁 Invite friends — you get {percent}% of their purchases in tokens.\n\n"
             "Your link:\n{link}\n\n"
             "The bonus arrives the moment a friend pays for a package."
         ),
@@ -256,8 +268,8 @@ TEXTS: dict[str, dict[str, str]] = {
     "video.queue_full": {"ru": "Очередь забита. Попробуйте через несколько минут.", "en": "The queue is full. Try again in a few minutes."},
     "video.too_long": {"ru": "Видео длиннее {max_m} мин. Пришлите кусок покороче.", "en": "The video is longer than {max_m} min. Send a shorter clip."},
     "video.no_balance": {
-        "ru": "На балансе нет роликов. Пополнить можно в приложении — кнопка ниже.",
-        "en": "Your balance is empty. You can top it up in the app — button below.",
+        "ru": "На балансе не хватает токенов на ролик ({cost}). Пополнить можно в приложении — кнопка ниже.",
+        "en": "Not enough tokens for a reel ({cost}). You can top up in the app — button below.",
     },
     "video.accepted": {"ru": "Принял. Ставлю в очередь…", "en": "Got it. Adding to the queue…"},
     "video.accepted_app": {"ru": "Принял видео из приложения. Ставлю в очередь…", "en": "Got your video from the app. Adding to the queue…"},
@@ -326,13 +338,13 @@ TEXTS: dict[str, dict[str, str]] = {
     "pay.stars_only": {"ru": "Оплата принимается только звёздами.", "en": "Only Telegram Stars are accepted."},
     "pay.price_changed": {"ru": "Цена изменилась. Откройте приложение и выберите пакет заново.", "en": "The price has changed. Open the app and pick a package again."},
     "pay.unrecognized": {"ru": "Оплата прошла, но пакет не распознан. Напишите нам — зачислим руками.", "en": "Payment went through but the package wasn't recognised. Contact us and we'll credit it manually."},
-    "pay.credited": {"ru": "Зачислено: {videos} {word}. На балансе: {balance}.", "en": "Added {videos} {word}. Balance: {balance}."},
-    "pay.invoice_title": {"ru": "{videos} {word}", "en": "{videos} {word}"},
+    "pay.credited": {"ru": "Зачислено: {tokens}. На балансе: {balance}.", "en": "Added {tokens}. Balance: {balance}."},
+    "pay.invoice_title": {"ru": "{tokens}", "en": "{tokens}"},
     "pay.invoice_description": {
         "ru": "Монтаж вертикальных роликов: субтитры, нарезка пауз, кадр 9:16.",
         "en": "Vertical reel editing: captions, pause cutting, 9:16 framing.",
     },
-    "pay.invoice_label": {"ru": "{videos} шт.", "en": "{videos} pcs"},
+    "pay.invoice_label": {"ru": "{tokens}", "en": "{tokens}"},
 
     # ------------------------------------------------------------ приложение (ответы API)
     "api.empty_file": {"ru": "Пустой файл.", "en": "The file is empty."},

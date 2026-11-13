@@ -38,6 +38,6 @@ def parse_code(payload: str | None) -> int | None:
     return value if 0 < value < 2**63 else None
 
 
-def share_of(videos: int, percent: int) -> int:
-    """Бонус пригласившему в СОТЫХ ролика: 5 роликов × 10 % = 50 сотых."""
-    return max(0, videos) * max(0, percent)
+def share_of(tokens: int, percent: int) -> int:
+    """Бонус пригласившему в СОТЫХ токена: 240 токенов × 10 % = 2400 сотых (24 токена)."""
+    return max(0, tokens) * max(0, percent)

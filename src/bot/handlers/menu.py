@@ -18,7 +18,7 @@ from aiogram.types import Message
 from src.bot.handlers import common
 from src.bot.keyboards import app_keyboard, main_keyboard
 from src.core.config import settings
-from src.core.i18n import LANGS, lang_of, t, videos_word
+from src.core.i18n import LANGS, lang_of, t, tokens_text
 from src.core.referral import code_of
 from src.db import repo
 
@@ -99,7 +99,7 @@ async def on_button(message: Message, bot: Bot) -> None:
         await message.answer(common.welcome_text(lang), reply_markup=app_keyboard(None, lang))
     elif action == "balance":
         await message.answer(
-            t("stats.balance", lang, n=f"{db_user.balance} {videos_word(db_user.balance, lang)}"),
+            t("stats.balance", lang, n=tokens_text(db_user.balance, lang)),
             reply_markup=app_keyboard("balance", lang),
         )
     elif action == "videos":

@@ -96,7 +96,7 @@ def upsert_user_stmt(
     пользователя, и тема из конфига затирала бы тему, выбранную руками.
     """
     preset = preset or default_settings.default_preset
-    trial = default_settings.trial_videos if trial is None else trial
+    trial = default_settings.trial_tokens if trial is None else trial
     return (
         pg_insert(User)
         .values(
@@ -219,13 +219,14 @@ async def create_job(
     Проверка баланса и списание — один UPDATE с условием, поэтому две
     одновременные загрузки не уведут баланс в минус.
     """
+    cost = default_settings.tokens_per_video if charge else 0
     async with session() as s:
         if charge:
             left = (
                 await s.execute(
                     update(User)
-                    .where(User.id == user_id, User.balance >= 1)
-                    .values(balance=User.balance - 1)
+                    .where(User.id == user_id, User.balance >= cost)
+                    .values(balance=User.balance - cost)
                     .returning(User.balance)
                 )
             ).scalar_one_or_none()
@@ -241,6 +242,7 @@ async def create_job(
             status=JobStatus.QUEUED,
             options=options,
             charged=charge,
+            cost=cost,
         )
         s.add(job)
         await s.flush()
@@ -409,23 +411,24 @@ async def mark_delivered(job_id: uuid.UUID | str) -> None:
 
 
 async def refund_job(job_id: uuid.UUID | str) -> bool:
-    """Возвращает списанный за задачу ролик. Ровно один раз; без списания — ничего.
+    """Возвращает списанные за задачу токены (`Job.cost`). Ровно один раз; без списания — ничего.
 
     Флаг снимается и баланс растёт в одной транзакции: повторный вызов (воркер
     упал и задачу разбирают снова) находит `charged = false` и ничего не делает.
     """
     async with session() as s:
-        owner = (
+        row = (
             await s.execute(
                 update(Job)
                 .where(Job.id == uuid.UUID(str(job_id)), Job.charged.is_(True))
                 .values(charged=False)
-                .returning(Job.user_id)
+                .returning(Job.user_id, Job.cost)
             )
-        ).scalar_one_or_none()
-        if owner is None:
+        ).one_or_none()
+        if row is None:
             return False
-        await s.execute(update(User).where(User.id == owner).values(balance=User.balance + 1))
+        owner, cost = row
+        await s.execute(update(User).where(User.id == owner).values(balance=User.balance + cost))
         return True
 
 
@@ -434,7 +437,7 @@ async def credit_payment(
     *,
     charge_id: str,
     stars: int,
-    videos: int,
+    tokens: int,
     payload: str,
     referral_percent: int | None = None,
 ) -> bool:
@@ -442,7 +445,7 @@ async def credit_payment(
 
     Бонус пригласившему — в той же транзакции и под той же защитой от повтора:
     повторный апдейт об оплате не зачисляет ни пакет, ни бонус. Бонус копится в
-    сотых ролика (`users.ref_credit`), а на баланс переходят целые ролики —
+    сотых токена (`users.ref_credit`), а на баланс переходят целые токены —
     оба поля считаются одним UPDATE из старого значения копилки, так что
     одновременные оплаты двух приглашённых не теряют долю друг друга.
     """
@@ -453,7 +456,7 @@ async def credit_payment(
         referrer = (
             await s.execute(select(User.referrer_id).where(User.id == user_id))
         ).scalar_one_or_none()
-        bonus = share_of(videos, percent) if referrer is not None else 0
+        bonus = share_of(tokens, percent) if referrer is not None else 0
         inserted = (
             await s.execute(
                 pg_insert(Payment)
@@ -461,7 +464,7 @@ async def credit_payment(
                     user_id=user_id,
                     telegram_charge_id=charge_id,
                     stars=stars,
-                    videos=videos,
+                    tokens=tokens,
                     payload=payload[:128],
                     ref_bonus=bonus,
                     created_at=datetime.now(timezone.utc),
@@ -472,7 +475,7 @@ async def credit_payment(
         ).scalar_one_or_none()
         if inserted is None:
             return False
-        await s.execute(update(User).where(User.id == user_id).values(balance=User.balance + videos))
+        await s.execute(update(User).where(User.id == user_id).values(balance=User.balance + tokens))
         if bonus:
             pot = User.ref_credit + bonus
             await s.execute(
@@ -611,7 +614,7 @@ async def referral_bonuses(user_id: int, limit: int = 50) -> list[tuple[datetime
 
 
 async def payment_bonus(charge_id: str) -> tuple[int, int] | None:
-    """(пригласивший, сотые ролика) по оплате — чтобы бот сказал ему спасибо."""
+    """(пригласивший, сотые токена) по оплате — чтобы бот сказал ему спасибо."""
     async with session() as s:
         row = (
             await s.execute(

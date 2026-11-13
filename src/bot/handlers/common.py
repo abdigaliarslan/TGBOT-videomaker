@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery, Message, User
 
 from src.bot.keyboards import language_keyboard, presets_keyboard, webapp_url, welcome_keyboard
 from src.core.config import settings
-from src.core.i18n import DEFAULT_LANG, LANGS, lang_of, t, videos_word
+from src.core.i18n import DEFAULT_LANG, LANGS, lang_of, t, tokens_text, videos_word
 from src.core.options import theme_label
 from src.core.preset import available, load_preset
 from src.core.referral import parse_code
@@ -39,18 +39,21 @@ def offer_text(lang: str) -> str:
     """
     if settings.free_videos:
         return t("start.offer_free", lang)
-    packages = settings.star_packages
+    packages = settings.token_packages
     if not packages:
         return ""
-    single = packages.get(1) or min(packages.values())
-    best = min(stars / videos for videos, stars in packages.items() if videos > 0)
+    first = packages[0]
+    pack = t(
+        "start.pack" if first.rub else "start.pack_stars", lang,
+        tokens=tokens_text(first.tokens, lang), rub=first.rub, stars=first.stars,
+    )
     key = {0: "start.offer_paid", 1: "start.offer_trial_one"}.get(
         max(0, settings.trial_videos), "start.offer_trial_many"
     )
     return t(
         key, lang,
         trial=f"{settings.trial_videos} {videos_word(settings.trial_videos, lang)}",
-        single=single, best=f"{best:.0f}",
+        cost=tokens_text(settings.tokens_per_video, lang), pack=pack,
     )
 
 
@@ -253,7 +256,7 @@ async def on_stats(message: Message) -> None:
 
     lines = [t("stats.done", lang, n=db_user.videos_done), t("stats.style", lang, preset=theme_label(db_user.preset, lang, db_user.preset))]
     if not db_user.is_admin:
-        lines.append(t("stats.balance", lang, n=f"{db_user.balance} {videos_word(db_user.balance, lang)}"))
+        lines.append(t("stats.balance", lang, n=tokens_text(db_user.balance, lang)))
     if db_user.is_admin:
         lines.extend(await _funnel_lines(lang))
         report = await repo.cost_report(days=7)

@@ -17,7 +17,7 @@ from aiogram.types import Message, ReplyKeyboardRemove
 
 from src.bot.handlers import common
 from src.bot.keyboards import app_keyboard, welcome_keyboard
-from src.core.i18n import lang_of, t
+from src.core.i18n import lang_of, t, tokens_text
 from src.db import repo
 
 log = logging.getLogger(__name__)
@@ -72,7 +72,8 @@ async def on_text(message: Message) -> None:
         await message.answer(common.welcome_text(lang), reply_markup=welcome_keyboard(lang))
     elif action == "balance":
         await message.answer(
-            t("stats.balance", lang, n=db_user.balance), reply_markup=app_keyboard("balance", lang)
+            t("stats.balance", lang, n=tokens_text(db_user.balance, lang)),
+            reply_markup=app_keyboard("balance", lang),
         )
     elif action == "stats":
         await common.on_stats(message)

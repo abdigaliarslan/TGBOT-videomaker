@@ -16,7 +16,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from src.bot.keyboards import app_keyboard, result_keyboard
 from src.core.config import settings
 from src.core.options import JobOptions, theme_label
-from src.core.i18n import error_text, lang_of, stage_title, t
+from src.core.i18n import error_text, lang_of, stage_title, t, tokens_text
 from src.core.preset import available
 from src.db import repo
 from src.db.models import JobStatus
@@ -154,7 +154,10 @@ async def on_video(message: Message, bot: Bot) -> None:
             charge=settings.charges(is_admin=db_user.is_admin),
         )
     except repo.InsufficientBalance:
-        await message.answer(t("video.no_balance", lang), reply_markup=app_keyboard("balance", lang))
+        await message.answer(
+            t("video.no_balance", lang, cost=tokens_text(settings.tokens_per_video, lang)),
+            reply_markup=app_keyboard("balance", lang),
+        )
         return
 
     status = await message.answer(t("video.accepted", lang))

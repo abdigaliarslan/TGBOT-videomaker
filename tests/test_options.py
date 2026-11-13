@@ -143,13 +143,24 @@ def test_the_font_and_the_accent_compose():
     assert both.font.file == FONTS["serif"][1].file
 
 
-def test_star_packages_parse_from_the_env_string():
-    cfg = Settings(_env_file=None, star_packages='{"20": 600, "1": 50, "5": 200}')
-    assert cfg.star_packages == {1: 50, 5: 200, 20: 600}
-    assert list(cfg.star_packages) == [1, 5, 20], "пакеты идут по возрастанию"
+def test_token_packages_parse_from_the_env_string():
+    cfg = Settings(_env_file=None, token_packages=(
+        '[{"tokens": 1170, "stars": 3599}, {"tokens": 240, "stars": 749, "rub": 1099}]'
+    ))
+    assert [(p.tokens, p.stars, p.rub) for p in cfg.token_packages] == [(240, 749, 1099), (1170, 3599, 0)]
 
 
-@pytest.mark.parametrize("raw", ['{"0": 50}', '{"1": 0}', '{"-1": 50}'])
-def test_a_free_or_empty_package_is_a_config_error(raw: str):
+@pytest.mark.parametrize("raw", [
+    '[{"tokens": 0, "stars": 50}]', '[{"tokens": 240, "stars": 0}]', '[{"tokens": -1, "stars": 50}]',
+    '[{"tokens": 240, "stars": 1}, {"tokens": 240, "stars": 2}]',
+])
+def test_a_free_empty_or_duplicate_package_is_a_config_error(raw: str):
     with pytest.raises(ValueError):
-        Settings(_env_file=None, star_packages=raw)
+        Settings(_env_file=None, token_packages=raw)
+
+
+def test_the_old_star_packages_setting_is_ignored():
+    """STAR_PACKAGES на сервере («1 → 50 ⭐») не имеет права стать «1 токен за
+    50 звёзд»: у пакетов токенов своя настройка."""
+    cfg = Settings(_env_file=None, star_packages='{"1": 50}')
+    assert [p.tokens for p in cfg.token_packages] == [240, 590, 1170]

@@ -716,3 +716,40 @@ async def test_an_abandoned_finished_upload_still_expires(client):
     os.utime(mod._upload_dir(cfg, bottom) / "data", (old, old))
     await client.post("/api/uploads", json={"size": 1}, headers=auth(43))
     assert not mod._upload_dir(cfg, bottom).exists()
+
+
+# ------------------------------------------------------------------ токены
+
+
+async def test_bootstrap_sells_token_packages(booted):
+    """Тарифы как у Brandly: токены, «до N роликов», популярный, честная выгода."""
+    body = await (await booted.get("/api/bootstrap", headers=auth())).json()
+    assert body["video_cost"] == 23
+    packs = body["packages"]
+    assert [(p["tokens"], p["stars"], p["rub"], p["videos"]) for p in packs] == [
+        (240, 749, 1099, 10), (590, 1899, 2799, 25), (1170, 3599, 5299, 50),
+    ]
+    assert [p["popular"] for p in packs] == [False, True, False]
+    # Выгода — от цены токена в самом маленьком пакете и только если она есть:
+    # 590 за 2799 ₽ токен ДОРОЖЕ, чем 240 за 1099 ₽, — «выгоды» там нет.
+    assert [p["save"] for p in packs] == [0, 0, 1]
+
+
+async def test_an_invoice_is_for_tokens_at_the_current_price(booted):
+    from src.webapp import server as mod
+
+    seen = {}
+
+    async def create_invoice_link(**k):
+        seen.update(k)
+        return "https://t.me/$inv"
+
+    booted.server.app[mod.BOT_KEY].create_invoice_link = create_invoice_link
+    r = await booted.post("/api/invoice", json={"tokens": 590}, headers=auth())
+    assert r.status == 200 and (await r.json())["link"] == "https://t.me/$inv"
+    assert seen["payload"] == "tokens:590" and seen["currency"] == "XTR"
+    assert seen["prices"][0].amount == 1899
+    assert "590 токенов" in seen["title"]
+
+    r = await booted.post("/api/invoice", json={"tokens": 300}, headers=auth())
+    assert r.status == 400

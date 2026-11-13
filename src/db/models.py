@@ -87,9 +87,8 @@ class User(Base):
         BigInteger, ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
     referred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Набежавшая доля ролика от покупок приглашённых, в СОТЫХ ролика. Пакеты
-    # продаются по 1 и 5 роликов, и 10 % от них — дробь: копится здесь, а на
-    # баланс уходит целыми роликами. Без копилки бонус с мелких пакетов терялся бы.
+    # Набежавшая доля токена от покупок приглашённых, в СОТЫХ токена. 10 % от
+    # пакета бывает дробью: копится здесь, а на баланс уходит целыми токенами.
     ref_credit: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -136,6 +135,9 @@ class Job(Base):
     # Списан ли за задачу ролик с баланса. Нужен, чтобы вернуть ровно то, что
     # списали, и ровно один раз: у владельцев списания нет вовсе.
     charged: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    # Сколько токенов списано за задачу. Возврат отдаёт ровно это: цена ролика —
+    # настройка, и её могут поменять, пока ролик монтируется.
+    cost: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
 
     # EDL хранится целиком: сохранённый EDL + другой пресет = новое видео
     # без повторного ASR и LLM (§0.4).
@@ -216,9 +218,11 @@ class Payment(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     telegram_charge_id: Mapped[str] = mapped_column(String(256), unique=True, nullable=False)
     stars: Mapped[int] = mapped_column(Integer, nullable=False)
-    videos: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Сколько токенов зачислено (до перехода на токены — роликов; миграция
+    # 9b4e2f7a1c35 пересчитала старые строки по 23 токена за ролик).
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[str] = mapped_column(String(128), nullable=False)
-    # Сколько сотых ролика с этой оплаты ушло пригласившему. Записано в момент
+    # Сколько сотых токена с этой оплаты ушло пригласившему. Записано в момент
     # оплаты, а не пересчитывается по текущему проценту: смена процента не
     # должна переписывать прошлое на экране «Приглашения».
     ref_bonus: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)

@@ -27,15 +27,19 @@ import uuid
 import pytest
 from sqlalchemy import text
 
+from src.core.config import settings
 from src.db import repo
 from src.db.models import Base, JobStatus
 
+# Цена ролика в токенах: баланс и все суммы ниже — в токенах.
+COST = settings.tokens_per_video
+
 @pytest.fixture
 async def user(db):
-    """Пользователь с балансом на три ролика."""
+    """Пользователь с балансом ровно на три ролика."""
     u = await repo.upsert_user(1001, username="t", first_name="Т", language_code="ru")
     async with repo.session() as s:
-        await s.execute(text("update users set balance = 3 where id = 1001"))
+        await s.execute(text("update users set balance = :b where id = 1001"), {"b": 3 * COST})
     return u
 
 
@@ -59,15 +63,17 @@ async def balance_of(user_id: int = 1001) -> int:
 
 async def test_a_job_costs_exactly_one_reel(user):
     job = await repo.create_job(1001, **job_args())
-    assert await balance_of() == 2
+    assert await balance_of() == 2 * COST
     assert job.charged is True
+    assert job.cost == COST
     assert job.status == JobStatus.QUEUED
 
 
 async def test_an_owner_pays_nothing(user):
     job = await repo.create_job(1001, **job_args(charge=False))
-    assert await balance_of() == 3
+    assert await balance_of() == 3 * COST
     assert job.charged is False
+    assert job.cost == 0
 
 
 async def test_an_empty_balance_leaves_no_job_behind(user):
@@ -96,7 +102,7 @@ async def test_a_reel_is_not_charged_for_a_job_that_was_never_created(user):
     with pytest.raises(DBAPIError):
         await repo.create_job(1001, **job_args(preset="т" * 100))
 
-    assert await balance_of() == 3, "ролик списан за задачу, которой нет"
+    assert await balance_of() == 3 * COST, "ролик списан за задачу, которой нет"
     assert await repo.user_jobs(1001) == []
 
 
@@ -107,7 +113,7 @@ async def test_two_uploads_at_once_cannot_overdraw_the_balance(user):
     UPDATE, и этот тест уйдёт в минус.
     """
     async with repo.session() as s:
-        await s.execute(text("update users set balance = 1 where id = 1001"))
+        await s.execute(text("update users set balance = :b where id = 1001"), {"b": COST})
 
     got = await asyncio.gather(
         repo.create_job(1001, **job_args()),
@@ -127,18 +133,18 @@ async def test_two_uploads_at_once_cannot_overdraw_the_balance(user):
 async def test_a_refund_happens_exactly_once(user):
     """Возврат зовут и падение прогона, и сторож зависших задач — иногда оба."""
     job = await repo.create_job(1001, **job_args())
-    assert await balance_of() == 2
+    assert await balance_of() == 2 * COST
 
     assert await repo.refund_job(job.id) is True
-    assert await balance_of() == 3
+    assert await balance_of() == 3 * COST
     assert await repo.refund_job(job.id) is False, "второй возврат прошёл"
-    assert await balance_of() == 3
+    assert await balance_of() == 3 * COST
 
 
 async def test_an_uncharged_job_gives_nothing_back(user):
     job = await repo.create_job(1001, **job_args(charge=False))
     assert await repo.refund_job(job.id) is False
-    assert await balance_of() == 3
+    assert await balance_of() == 3 * COST
 
 
 async def test_two_refunds_at_once_return_one_reel(user):
@@ -146,33 +152,33 @@ async def test_two_refunds_at_once_return_one_reel(user):
     job = await repo.create_job(1001, **job_args())
     got = await asyncio.gather(repo.refund_job(job.id), repo.refund_job(job.id))
     assert sorted(got) == [False, True], f"два возврата за один ролик: {got}"
-    assert await balance_of() == 3
+    assert await balance_of() == 3 * COST
 
 
 # -------------------------------------------------------------------- оплата
 
 
 async def test_a_payment_is_credited_once_per_charge_id(user):
-    args = dict(charge_id="tg-charge-1", stars=250, videos=5, payload="pack:5")
+    args = dict(charge_id="tg-charge-1", stars=749, tokens=240, payload="tokens:240")
     assert await repo.credit_payment(1001, **args) is True
-    assert await balance_of() == 8
+    assert await balance_of() == 3 * COST + 240
     assert await repo.credit_payment(1001, **args) is False, "повтор вебхука зачислил второй раз"
-    assert await balance_of() == 8
+    assert await balance_of() == 3 * COST + 240
 
 
 async def test_two_packages_add_up(user):
-    await repo.credit_payment(1001, charge_id="a", stars=250, videos=5, payload="p")
-    await repo.credit_payment(1001, charge_id="b", stars=100, videos=2, payload="p")
-    assert await balance_of() == 10
+    await repo.credit_payment(1001, charge_id="a", stars=749, tokens=240, payload="p")
+    await repo.credit_payment(1001, charge_id="b", stars=1899, tokens=590, payload="p")
+    assert await balance_of() == 3 * COST + 830
 
 
 async def test_the_same_charge_arriving_twice_at_once_is_credited_once(user):
-    args = dict(charge_id="race", stars=250, videos=5, payload="p")
+    args = dict(charge_id="race", stars=749, tokens=240, payload="p")
     got = await asyncio.gather(
         repo.credit_payment(1001, **args), repo.credit_payment(1001, **args)
     )
     assert sorted(got) == [False, True], f"одна оплата зачислена дважды: {got}"
-    assert await balance_of() == 8
+    assert await balance_of() == 3 * COST + 240
 
 
 # ----------------------------------------------- переходы статуса и сторож
@@ -244,3 +250,33 @@ async def test_the_top_source_is_kept_and_purged_with_the_job(user):
 
     await repo.mark_files_purged(job.id)
     assert (await repo.get_job(job.id)).top_source_key is None
+
+
+async def test_a_refund_returns_what_was_charged_even_after_a_price_change(user, monkeypatch):
+    """Цена ролика — настройка. Подняли её, пока ролик монтировался, — возврат
+    обязан отдать списанное тогда, а не нынешнюю цену."""
+    job = await repo.create_job(1001, **job_args())
+    monkeypatch.setattr(repo.default_settings, "tokens_per_video", COST * 2)
+    assert await repo.refund_job(job.id) is True
+    assert await balance_of() == 3 * COST
+
+
+async def test_a_balance_one_token_short_of_a_reel_is_refused(user):
+    async with repo.session() as s:
+        await s.execute(text("update users set balance = :b where id = 1001"), {"b": COST - 1})
+    with pytest.raises(repo.InsufficientBalance):
+        await repo.create_job(1001, **job_args())
+    assert await balance_of() == COST - 1
+
+
+def test_the_migration_rate_is_the_price_of_a_reel():
+    """Миграция пересчитала ролики по RATE токенов. Если цена ролика другая,
+    ролик на балансе стоил бы не столько, сколько с него спишут."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "alembic/versions/9b4e2f7a1c35_balance_in_tokens.py"
+    spec = importlib.util.spec_from_file_location("mig", path)
+    mig = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mig)
+    assert mig.RATE == COST

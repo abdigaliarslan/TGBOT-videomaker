@@ -37,7 +37,7 @@ from aiohttp import web
 
 from src.core.config import CLAIMED_PREFIX, UPLOAD_PREFIX, Settings
 from src.core.geometry import load_metrics
-from src.core.i18n import LANGS, error_text, lang_of, stage_title, t, videos_word
+from src.core.i18n import LANGS, error_text, lang_of, stage_title, t, tokens_text
 from src.core.options import ACCENTS, FONTS, JobOptions, theme_label
 from src.core.preset import available, load_preset
 from src.core.referral import code_of
@@ -410,13 +410,16 @@ async def bootstrap(request: web.Request) -> web.Response:
                 }
                 for k, (titles, choice) in FONTS.items()
             ],
-            "packages": [{"videos": v, "stars": s} for v, s in cfg.star_packages.items()],
+            "packages": _packages_view(cfg),
+            # Цена ролика в токенах: приложение по ней решает, хватает ли баланса.
+            "video_cost": cfg.tokens_per_video,
             # Монтаж сейчас бесплатный для всех: кнопка не ведёт в тарифы и не
             # обещает списания.
             "free": cfg.free_videos,
             # Сколько роликов даётся новичку на пробу: первый экран говорит об
             # этом сразу, вместе с ценой следующего.
             "trial": max(0, cfg.trial_videos),
+            "trial_tokens": cfg.trial_tokens,
             "limits": {
                 "min_seconds": cfg.min_video_seconds,
                 "max_minutes": cfg.max_video_minutes,
@@ -434,6 +437,33 @@ async def bootstrap(request: web.Request) -> web.Response:
             ),
         }
     )
+
+
+def _packages_view(cfg: Settings) -> list[dict[str, Any]]:
+    """Пакеты для «Тарифов»: токены, «до N роликов», цена и выгода.
+
+    Выгода — от цены токена в самом маленьком пакете, в рублях (если они
+    заданы у всех пакетов), иначе в звёздах. Отрицательная или нулевая не
+    показывается: пакет, где токен дороже, «выгодой» не назовёшь.
+    """
+    packs = cfg.token_packages
+    in_rub = bool(packs) and all(p.rub for p in packs)
+
+    def per_token(p) -> float:
+        return (p.rub if in_rub else p.stars) / p.tokens
+
+    base = per_token(packs[0]) if packs else 0.0
+    return [
+        {
+            "tokens": p.tokens,
+            "stars": p.stars,
+            "rub": p.rub,
+            "videos": p.tokens // cfg.tokens_per_video,
+            "popular": p.popular,
+            "save": max(0, round((1 - per_token(p) / base) * 100)) if base else 0,
+        }
+        for p in packs
+    ]
 
 
 def _day_start(request: web.Request, now: datetime | None = None) -> datetime:
@@ -494,7 +524,7 @@ async def payments_history(request: web.Request) -> web.Response:
     paid = await repo.user_payments(user.id)
     bonuses = await repo.referral_bonuses(user.id)
     items = [
-        {"kind": "payment", "at": p.created_at.isoformat(), "videos": p.videos, "stars": p.stars}
+        {"kind": "payment", "at": p.created_at.isoformat(), "tokens": p.tokens, "stars": p.stars}
         for p in paid
     ] + [{"kind": "bonus", "at": at.isoformat(), "share": share} for at, share in bonuses]
     items.sort(key=lambda x: x["at"], reverse=True)
@@ -818,18 +848,19 @@ async def invoice(request: web.Request) -> web.Response:
     request[LANG_KEY] = lang
     body = await request.json()
     try:
-        videos = int(body.get("videos"))
+        tokens = int(body.get("tokens"))
     except (TypeError, ValueError):
         return await _fail(request, 400, "api.no_package")
-    stars = cfg.star_packages.get(videos)
-    if stars is None:
+    package = cfg.package(tokens)
+    if package is None:
         return await _fail(request, 400, "api.unknown_package")
+    amount = tokens_text(tokens, lang)
     link = await bot.create_invoice_link(
-        title=t("pay.invoice_title", lang, videos=videos, word=videos_word(videos, lang)),
+        title=t("pay.invoice_title", lang, tokens=amount),
         description=t("pay.invoice_description", lang),
-        payload=f"videos:{videos}",
+        payload=f"tokens:{tokens}",
         currency="XTR",
-        prices=[LabeledPrice(label=t("pay.invoice_label", lang, videos=videos), amount=stars)],
+        prices=[LabeledPrice(label=t("pay.invoice_label", lang, tokens=amount), amount=package.stars)],
     )
     return web.json_response({"link": link})
 
