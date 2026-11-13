@@ -41,6 +41,11 @@ def make_bot() -> Bot:
             "BOT_API_URL пуст — работает облачный Bot API, лимит файла 20 МБ. "
             "Поднимите telegram-bot-api из docker-compose, чтобы принимать до 2 ГБ."
         )
+    # Отказ Telegram из-за значка кнопки (кончился Premium у владельца) не
+    # ломает сообщение: оно уходит ещё раз без значков (`bot/icons.py`).
+    from src.bot.icons import IconFallback
+
+    session.middleware(IconFallback())
     return Bot(
         token=settings.bot_token,
         session=session,

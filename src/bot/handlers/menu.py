@@ -40,9 +40,22 @@ def _norm(text: str | None) -> str:
     return (text or "").strip().lower()
 
 
+# Подписи клавиатуры до значков (ноябрь 2026): эмодзи стояло в самом тексте.
+# Такая клавиатура остаётся у людей, пока бот не пришлёт новую, и её кнопки
+# обязаны работать как раньше.
+PREVIOUS_LABELS: dict[str, dict[str, str]] = {
+    "start": {"ru": "▶️ Начать монтаж", "en": "▶️ Start editing"},
+    "balance": {"ru": "💳 Баланс", "en": "💳 Balance"},
+    "videos": {"ru": "📹 Мои ролики", "en": "📹 My reels"},
+    "referral": {"ru": "🎁 Реф. программа", "en": "🎁 Referrals"},
+    "support": {"ru": "🎧 Поддержка", "en": "🎧 Support"},
+}
+
 # Подпись на любом языке → действие. Считается один раз на импорте.
 LABELS: dict[str, str] = {
-    _norm(t(f"kb.{action}", lang)): action for lang in LANGS for action in ACTIONS
+    **{_norm(label): action for action, by_lang in PREVIOUS_LABELS.items()
+       for label in by_lang.values()},
+    **{_norm(t(f"kb.{action}", lang)): action for lang in LANGS for action in ACTIONS},
 }
 
 
@@ -120,7 +133,9 @@ async def show_keyboard(message: Message, lang: str) -> None:
 
 
 # Отметка в `users.settings`: клавиатуру этому человеку уже присылали.
-SEEN_FLAG = "kb"
+# «kb2» — клавиатура со значками. У кого отметка «kb» (прежняя, с цветными
+# эмодзи в подписи), тот получит новую один раз на следующем сообщении.
+SEEN_FLAG = "kb2"
 
 
 class KeyboardOnce(BaseMiddleware):

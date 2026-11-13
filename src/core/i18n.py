@@ -134,11 +134,13 @@ TEXTS: dict[str, dict[str, str]] = {
     "btn.menu": {"ru": "Приложение ✨", "en": "App ✨"},
     # Нижняя клавиатура. Эмодзи — часть подписи: по ним кнопку узнают быстрее,
     # чем по словам, а на десктопе без цветного шрифта они рисуются контуром.
-    "kb.start": {"ru": "▶️ Начать монтаж", "en": "▶️ Start editing"},
-    "kb.balance": {"ru": "💳 Баланс", "en": "💳 Balance"},
-    "kb.videos": {"ru": "📹 Мои ролики", "en": "📹 My reels"},
-    "kb.referral": {"ru": "🎁 Реф. программа", "en": "🎁 Referrals"},
-    "kb.support": {"ru": "🎧 Поддержка", "en": "🎧 Support"},
+    # Без эмодзи: значок кнопки — контурный кастомный эмодзи (`bot/icons.py`).
+    # Прежние подписи с эмодзи узнаёт `menu.PREVIOUS_LABELS`.
+    "kb.start": {"ru": "Начать монтаж", "en": "Start editing"},
+    "kb.balance": {"ru": "Баланс", "en": "Balance"},
+    "kb.videos": {"ru": "Мои ролики", "en": "My reels"},
+    "kb.referral": {"ru": "Реф. программа", "en": "Referrals"},
+    "kb.support": {"ru": "Поддержка", "en": "Support"},
     "kb.ready": {
         "ru": "Кнопки внизу — для быстрых действий.",
         "en": "The buttons below are your shortcuts.",

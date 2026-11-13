@@ -11,6 +11,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.core.config import settings
+from src.bot import icons
 from src.core.i18n import LANG_NAMES, LANGS, t
 from src.core.options import theme_label
 from src.core.preset import available, load_preset
@@ -100,7 +101,8 @@ def app_keyboard(section: str | None = None, lang: str | None = None) -> InlineK
     if not url:
         return None
     kb = InlineKeyboardBuilder()
-    kb.button(text=t("btn.open_app", lang), web_app=WebAppInfo(url=url))
+    kb.button(text=t("btn.open_app", lang), web_app=WebAppInfo(url=url),
+              icon_custom_emoji_id=icons.icon("app"))
     return kb.as_markup()
 
 
@@ -127,9 +129,12 @@ def main_keyboard(lang: str | None = None) -> ReplyKeyboardMarkup:
     direct = url and settings.webapp_url.strip()
     rows = [
         [
-            KeyboardButton(text=t(f"kb.{name}", lang), web_app=WebAppInfo(url=url))
-            if name == "start" and direct
-            else KeyboardButton(text=t(f"kb.{name}", lang))
+            KeyboardButton(
+                text=t(f"kb.{name}", lang),
+                web_app=WebAppInfo(url=url) if name == "start" and direct else None,
+                icon_custom_emoji_id=icons.icon(name),
+                style=icons.STYLES.get(name),
+            )
             for name in row
         ]
         for row in MAIN_BUTTONS
@@ -142,7 +147,8 @@ def welcome_keyboard(lang: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     url = _app_url(None)
     if url:
-        kb.button(text=t("btn.open_app", lang), web_app=WebAppInfo(url=url))
+        kb.button(text=t("btn.open_app", lang), web_app=WebAppInfo(url=url),
+                  icon_custom_emoji_id=icons.icon("app"))
     other = [code for code in LANGS if code != lang]
     for code in other:
         kb.button(text=LANG_NAMES[code], callback_data=f"lang:{code}")
